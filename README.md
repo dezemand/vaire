@@ -15,7 +15,24 @@ never written back to the corpus.
 
 ## Install
 
-Build from source (Rust 1.85+):
+**Prebuilt binary (Linux x86_64, macOS arm64).** Downloads the latest release and
+installs it to `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dezemand/vaire/main/install.sh | sh
+```
+
+On Windows (PowerShell), installs `vaire.exe` and adds it to your user PATH:
+
+```powershell
+irm https://raw.githubusercontent.com/dezemand/vaire/main/install.ps1 | iex
+```
+
+Both honor `VAIRE_VERSION` (a tag like `v0.1.0`) and `VAIRE_INSTALL_DIR` to override
+the version and target directory.
+
+**From source (Rust 1.85+)** — also the path for Intel macOS or arm64 Linux, which
+have no prebuilt binary yet:
 
 ```bash
 git clone https://github.com/dezemand/vaire.git && cd vaire
