@@ -1,0 +1,17 @@
+# .vaire/config.toml — committed, version-controlled (the one authored file under .vaire/).
+# Everything else under .vaire/ is derived and gitignored. See design.md §9.
+
+# Where to look. The `id:`+`type:` pair is still what makes a file a node; these globs
+# only bound the search space.
+include = ["knowledge/**/*.md", "projects/**/*.md"]
+exclude = ["**/node_modules/**", "**/drafts/**", "**/archive/**"]
+
+# Type vocabulary — the `type:` field, which is also the ID prefix in `type:id`. Growable.
+id_prefixes = ["person", "department", "method", "system", "event", "record", "project"]
+vocabulary_strict = false
+
+[embeddings]
+# Local by default: no network, no model file (a deterministic feature-hashing embedder
+# in this build; a real local model is a drop-in upgrade).
+provider = "local"
+dimensions = 384

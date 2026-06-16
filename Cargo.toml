@@ -1,0 +1,53 @@
+[package]
+name = "vaire"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Derived reference-graph index over a Markdown knowledge corpus, with a CLI and an MCP server"
+authors = ["Maarten van Ittersum"]
+license = "MIT"
+readme = "README.md"
+keywords = ["knowledge", "markdown", "graph", "index", "mcp"]
+categories = ["command-line-utilities", "text-processing"]
+repository = "https://github.com/dezemand/vaire"
+
+[[bin]]
+name = "vaire"
+path = "src/main.rs"
+
+[lib]
+name = "vaire"
+path = "src/lib.rs"
+
+[dependencies]
+# CLI surface (cli.md §2)
+clap = { version = "4", features = ["derive", "env"] }
+
+# Output shapes — JSON is the canonical machine shape, mirrored by MCP (cli.md §2.3)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Frontmatter is YAML
+serde_yaml = "0.9"
+
+# Authored config (cli.md §6)
+toml = "0.8"
+
+# Derived index: SQLite with bundled FTS5 (design.md §9)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Corpus discovery: include/exclude globs over the working tree (cli.md §6)
+globset = "0.4"
+walkdir = "2"
+
+# Errors → typed exit codes (cli.md §7)
+thiserror = "2"
+
+# Blocking HTTP for the OpenAI embedding provider (rustls TLS, no async runtime)
+ureq = "2"
+
+[dev-dependencies]
+# Throwaway git-repo corpora for integration tests
+tempfile = "3"
+# Direct index inspection/tampering in tests (dedups with the normal dependency)
+rusqlite = { version = "0.32", features = ["bundled"] }

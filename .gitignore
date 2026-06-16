@@ -1,0 +1,9 @@
+/target
+
+# Vairë — derived index, rebuildable from files (design.md §9)
+.vaire/*
+!.vaire/config.toml
+
+# Same rule for the example corpus's own derived index
+example/.vaire/*
+!example/.vaire/config.toml
