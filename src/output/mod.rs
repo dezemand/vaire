@@ -325,18 +325,26 @@ impl Output for CheckReport {
 
 // ---- init ------------------------------------------------------------------
 
-/// `vaire init`: the corpus that was scaffolded.
+/// `vaire init`: the package that was scaffolded or migrated.
 #[derive(Debug, Serialize)]
 pub struct InitOutput {
     pub root: String,
     pub config_path: String,
+    /// True when an existing `.vaire/config.toml` was migrated into `knowledge.toml`.
+    pub migrated: bool,
 }
 
 impl Output for InitOutput {
     fn render_human(&self) -> String {
+        let verb = if self.migrated {
+            "migrated to knowledge.toml"
+        } else {
+            "initialized Vairë package"
+        };
         format!(
-            "{} initialized Vairë corpus\n  root:   {}\n  config: {}\n  next:   vaire index",
+            "{} {}\n  root:     {}\n  manifest: {}\n  next:     vaire index",
             green("✓"),
+            verb,
             self.root,
             self.config_path,
         )

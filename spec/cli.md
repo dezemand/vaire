@@ -543,11 +543,12 @@ exclude = ["**/node_modules/**", "**/drafts/**", "**/archive/**"]
 id_prefixes = ["person", "department", "method", "system", "event", "record", "project"]
 vocabulary_strict = false
 
-# Scoped IDs. Types listed here that carry the `scope_field` get the composed address
-# `<container-id>/<type>:<local-id>` (e.g. project:atlas-2026-q2/record:2026-06-10-standup).
-# Lets records use short, container-local ids that stay globally unique. Empty = off (all
-# IDs flat). See §6.1.
-scoped_types = []           # e.g. ["record"]
+# Scoped IDs. Scoping is DATA-DRIVEN: any node carrying the `scope_field` gets the composed
+# address `<container-id>/<type>:<local-id>` (e.g. project:atlas-2026-q2/record:2026-06-10-standup),
+# regardless of type. The two lists are a LINT POLICY only (not a gate): `vaire check` warns
+# when a scoped node's type is not permitted. `"*"` matches any type; defaults permit all. §6.1.
+scoped_types_whitelist = ["*"]
+scoped_types_blacklist = []
 scope_field  = "scope"      # frontmatter field that supplies the scope; its value names the
                             # container (scope: project:atlas, scope: org:some-firm, …)
 
@@ -583,12 +584,13 @@ environment.
 
 ### 6.1 Scoped IDs
 
-By default every ID is a flat global `type:slug`, so a record needs a globally-unique
-slug — projects end up hand-prefixing (`record:nova-2026-06-10-standup`), re-deciding the
-prefix per project. `scoped_types` removes that tax.
+Without scoping a record needs a globally-unique slug — projects end up hand-prefixing
+(`record:nova-2026-06-10-standup`), re-deciding the prefix per project. Scoping removes that tax.
 
-When a node's `type` is in `scoped_types` **and** it carries the `scope_field` (default
-`scope`), its address is a **path of typed IDs** — `<container-id>/<type>:<local-id>`:
+Scoping is **data-driven**: whenever a node carries the `scope_field` (default `scope`), its
+address is a **path of typed IDs** — `<container-id>/<type>:<local-id>` — regardless of type.
+(The `scoped_types_whitelist`/`scoped_types_blacklist` settings are a lint policy over which
+types *should* be scoped, §6; they do not gate this behaviour.)
 
 ```markdown
 # a record writes only its local id; scope: names the container
@@ -603,10 +605,9 @@ scope: project:atlas-2026-q2
 - The node's own ID is the last segment (`record:2026-06-10-standup`), and `type:` filters
   / counts use *that* type (`record`). The `project:atlas-2026-q2/` prefix is the scope.
 - `<local-id>` (the `id:` field) need only be unique **within its container**.
-- Composition is **purely local** — the scope is the node's own `scope_field` value, so no
-  per-container declaration and no cross-file lookup is needed (single-pass indexing). The
-  container's ID *is* the scope, so uniqueness and stability come for free (its ID is
-  unique and doesn't get renamed in place).
+- A node's own scope is **purely local** — it is the node's own `scope_field` value, so no
+  per-container declaration is needed. The container's ID *is* the scope, so uniqueness and
+  stability come for free (its ID is unique and doesn't get renamed in place).
 - **The container can be any type.** The type lives in the field's value, so the same field
   scopes under different containers: `scope: project:atlas-2026-q2` →
   `project:atlas-2026-q2/record:…`, `scope: org:some-firm` → `org:some-firm/record:…`. Only
@@ -618,9 +619,10 @@ scope: project:atlas-2026-q2
 **References:**
 
 - Full anywhere: `[[project:atlas-2026-q2/record:2026-06-10-standup]]`.
-- **Relative** within the same container: `[[record:2026-06-10-standup]]` (a scoped-type ref
-  with no scope) resolves against the referencing node's own `scope:`. Cross-container links
-  must be written in full.
+- **Relative**, resolved **scope-first then global**: a bare `[[type:id]]` inside a scoped node
+  resolves to `<container>/type:id` when that sibling exists, otherwise to the global `type:id`.
+  So `[[record:2026-06-10-standup]]` finds the same-container record, while `[[person:jane]]`
+  (no scoped sibling) resolves globally. Existence-based, so it needs no type list.
 
 **Entities stay global** — no `project:`, no scope; the entity/record split is expressed in
 the ID. Nesting is one level (project) today; the grammar (a `/`-separated path of typed

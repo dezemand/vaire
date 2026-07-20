@@ -87,8 +87,9 @@ Drives the [[method:event-sourcing]] rollout; owns [[system:ingest-api]].
   addressed `<container-id>/type:local`, e.g. `project:atlas/record:2026-06-10-standup`, so
   records only need a container-local id.
 
-See [`spec/design.md`](spec/design.md) for the full design and rationale, and
-[`spec/cli.md`](spec/cli.md) for the exact command surface.
+See [`spec/design.md`](spec/design.md) for the full design and rationale,
+[`spec/cli.md`](spec/cli.md) for the exact command surface, and
+[`spec/manifest.md`](spec/manifest.md) for the `knowledge.toml` package manifest.
 
 ## Commands
 

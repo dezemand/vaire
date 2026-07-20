@@ -9,7 +9,11 @@ use vaire::error::ExitCode;
 #[test]
 fn render_keeps_frontmatter_and_resolves_links() {
     let c = Corpus::fixture();
-    let out = commands::render::run(&c.ctx(), "record:2026-06-10-broker-sync").unwrap();
+    let out = commands::render::run(
+        &c.ctx(),
+        "project:atlas-2026-q2/record:2026-06-10-broker-sync",
+    )
+    .unwrap();
     let md = out.markdown;
 
     // Frontmatter is kept verbatim.

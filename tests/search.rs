@@ -18,7 +18,7 @@ fn finds_prose_match_with_anchor() {
     let hit = out
         .results
         .iter()
-        .find(|r| r.id == "record:2026-06-10-broker-sync")
+        .find(|r| r.id == "project:atlas-2026-q2/record:2026-06-10-broker-sync")
         .expect("broker-sync should match");
     assert!(
         hit.anchors

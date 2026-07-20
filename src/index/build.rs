@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use rusqlite::{Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::config::Config;
 use crate::corpus::frontmatter;
@@ -119,7 +119,7 @@ pub fn run(
     // isn't mistaken for a reference (cli.md §6, issue: spurious dangling_ref). Inline
     // `[[...]]` are deliberate, so they're not gated.
     let configured: std::collections::HashSet<&str> =
-        config.id_prefixes.iter().map(String::as_str).collect();
+        config.types.iter().map(String::as_str).collect();
 
     let tx = index.conn_mut().transaction()?;
     for rel in &to_delete {
@@ -143,11 +143,13 @@ pub fn run(
                         configured.contains(e.to.node_type.as_str())
                     }
                 });
-                apply_scoping(&mut node, &config.scoped_types, &config.scope_field);
+                apply_scoping(&mut node, &config.scope_field);
                 index_node(&tx, &node, prose_start, embedder)?;
             }
         }
     }
+    // Now that every node is present, resolve relative scoped references scope-first.
+    resolve_scoped_edges(&tx)?;
     tx.commit()?;
 
     // A working-tree index does not correspond to a commit, so record null. The
@@ -256,31 +258,66 @@ fn committed_matching(root: &Path, scanner: &Scanner) -> Result<Vec<String>> {
 }
 
 /// Apply scoping to a freshly-parsed node (cli.md §6.1) — purely from the node's own
-/// frontmatter, no cross-file lookup. For a node of a scoped type that carries the
-/// configured `scope_field` (default `project`), the address becomes
-/// `<container-id>/<type>:<local>`; its **relative** scoped references (a scoped-type
-/// target with no scope of its own) inherit that same container as their scope. A no-op
-/// when scoping is off or the node lacks the field.
-fn apply_scoping(node: &mut Node, scoped_types: &[String], scope_field: &str) {
-    let is_scoped_type = scoped_types.iter().any(|t| t == node.id.node_type.as_str());
-    if is_scoped_type
-        && let Some(container) = node.frontmatter.get(scope_field).and_then(|v| v.as_str())
-    {
+/// frontmatter, no cross-file lookup. Scoping is **data-driven**: any node that carries the
+/// configured `scope_field` (default `scope`) gets the composed address
+/// `<container-id>/<type>:<local>`, regardless of type. Edge targets are left as parsed
+/// (bare); relative scoped references are resolved **scope-first** after all nodes exist —
+/// see [`resolve_scoped_edges`].
+fn apply_scoping(node: &mut Node, scope_field: &str) {
+    if let Some(container) = node.frontmatter.get(scope_field).and_then(|v| v.as_str()) {
         node.id.scope = Some(container.to_string());
     }
-
     let from = node.id.clone();
     for edge in &mut node.edges {
         edge.from = from.clone();
-        if let Some(scope) = &from.scope {
-            // Relative scoped ref (scoped-type target with no scope) → this node's scope.
-            if scoped_types.iter().any(|t| t == edge.to.node_type.as_str())
-                && edge.to.scope.is_none()
-            {
-                edge.to.scope = Some(scope.clone());
+    }
+}
+
+/// Resolve relative scoped references, **scope-first then global**, once every node is in the
+/// index (cli.md §6.1). For each edge from a scoped node to a *bare* target, if a node at
+/// `<referrer-scope>/<target>` exists it is the sibling being referenced, so the edge is
+/// rewritten to that composed id; otherwise the bare (global) target stands. Existence-based,
+/// so it needs no type list and never scopes a reference that lacks a scoped sibling.
+fn resolve_scoped_edges(tx: &Transaction) -> Result<()> {
+    let mut rewrites: Vec<(i64, String)> = Vec::new();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT rowid, from_id, to_id FROM edges
+             WHERE from_id LIKE '%/%' AND to_id NOT LIKE '%/%'",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (rowid, from_id, to_id) = row?;
+            // The referrer's scope is everything before the last '/'.
+            if let Some((scope, _)) = from_id.rsplit_once('/') {
+                let candidate = format!("{scope}/{to_id}");
+                let exists = tx
+                    .query_row(
+                        "SELECT 1 FROM nodes WHERE id = ?1",
+                        [&candidate],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if exists {
+                    rewrites.push((rowid, candidate));
+                }
             }
         }
     }
+    for (rowid, to_id) in rewrites {
+        tx.execute(
+            "UPDATE edges SET to_id = ?1 WHERE rowid = ?2",
+            params![to_id, rowid],
+        )?;
+    }
+    Ok(())
 }
 
 /// All matching files in the working tree on disk (the non-Git / fresh-repo path).

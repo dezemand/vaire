@@ -10,6 +10,7 @@
 use crate::commands::Ctx;
 use crate::error::{Result, VaireError};
 use crate::index::Index;
+use crate::index::query::ResolvedNode;
 use crate::model::id::NodeId;
 use crate::model::reference::Reference;
 use crate::output::RenderOutput;
@@ -26,13 +27,7 @@ pub fn run(ctx: &Ctx, id: &str) -> Result<RenderOutput> {
 
     let raw = std::fs::read_to_string(ctx.repo.root().join(&source_path))?;
     let (header, prose) = split_raw(&raw);
-    let body = render_prose(
-        &prose,
-        &source_path,
-        source_scope.as_deref(),
-        &ctx.config.scoped_types,
-        &index,
-    );
+    let body = render_prose(&prose, &source_path, source_scope.as_deref(), &index);
 
     let mut markdown = String::new();
     if !header.is_empty() {
@@ -71,7 +66,6 @@ fn render_prose(
     prose: &str,
     source_path: &str,
     source_scope: Option<&str>,
-    scoped_types: &[String],
     index: &Index,
 ) -> String {
     let mut out = String::new();
@@ -87,26 +81,14 @@ fn render_prose(
         if in_fence {
             out.push_str(line);
         } else {
-            out.push_str(&render_line(
-                line,
-                source_path,
-                source_scope,
-                scoped_types,
-                index,
-            ));
+            out.push_str(&render_line(line, source_path, source_scope, index));
         }
         out.push('\n');
     }
     out
 }
 
-fn render_line(
-    line: &str,
-    source_path: &str,
-    source_scope: Option<&str>,
-    scoped_types: &[String],
-    index: &Index,
-) -> String {
+fn render_line(line: &str, source_path: &str, source_scope: Option<&str>, index: &Index) -> String {
     let mut result = String::new();
     let mut rest = line;
     while let Some(start) = rest.find("[[") {
@@ -116,40 +98,38 @@ fn render_line(
             result.push_str(&rest[start..]); // unterminated — keep verbatim
             return result;
         };
-        result.push_str(&render_ref(
-            &after[..end],
-            source_path,
-            source_scope,
-            scoped_types,
-            index,
-        ));
+        result.push_str(&render_ref(&after[..end], source_path, source_scope, index));
         rest = &after[end + 2..];
     }
     result.push_str(rest);
     result
 }
 
-fn render_ref(
-    inner: &str,
-    source_path: &str,
-    source_scope: Option<&str>,
-    scoped_types: &[String],
+/// Resolve a reference target **scope-first, then global** (cli.md §6.1): a bare target inside
+/// a scoped node prefers a same-scope sibling; otherwise the global target. `None` if neither
+/// exists.
+fn resolve_scope_first(
     index: &Index,
-) -> String {
+    target: &NodeId,
+    source_scope: Option<&str>,
+) -> Option<ResolvedNode> {
+    if let Some(scope) = source_scope
+        && target.scope().is_none()
+    {
+        let mut scoped = target.clone();
+        scoped.scope = Some(scope.to_string());
+        if let Ok(node) = index.resolve(&scoped) {
+            return Some(node);
+        }
+    }
+    index.resolve(target).ok()
+}
+
+fn render_ref(inner: &str, source_path: &str, source_scope: Option<&str>, index: &Index) -> String {
     match Reference::parse_inner(inner) {
-        Some(Reference::Resolved {
-            mut target,
-            display,
-        }) => {
-            // Expand a relative scoped ref against the rendering node's own scope.
-            if let Some(scope) = source_scope
-                && scoped_types.iter().any(|t| t == target.node_type.as_str())
-                && target.scope().is_none()
-            {
-                target.scope = Some(scope.to_string());
-            }
-            match index.resolve(&target) {
-                Ok(node) => {
+        Some(Reference::Resolved { target, display }) => {
+            match resolve_scope_first(index, &target, source_scope) {
+                Some(node) => {
                     let name = node
                         .frontmatter
                         .get("name")
@@ -160,7 +140,7 @@ fn render_ref(
                     let href = relative_path(source_path, &node.path);
                     format!("[{text}]({href})")
                 }
-                Err(_) => format!("[[{inner}]]"), // dangling — keep verbatim
+                None => format!("[[{inner}]]"), // dangling — keep verbatim
             }
         }
         // Loose ends are not links: render the author's descriptor as plain text.
