@@ -44,7 +44,9 @@ derived index lives at `<root>/.vaire/index.db`.
 
 Override with `--repo <path>` or the `VAIRE_REPO` environment variable (`--repo` wins); an
 explicit path that has no `knowledge.toml` is an error rather than a silent guess. If no
-corpus is found and none is given, exit `4`.
+corpus is found and none is given, exit `4`. If a directory (or an ancestor) has a legacy
+`.vaire/config.toml` but no `knowledge.toml`, the error points at `vaire init` to migrate it,
+rather than reporting "no corpus".
 
 Discovery is deliberately decoupled from Git: the corpus root need not be a Git repo root.
 Whether the index is built from the committed tree or the working tree is a separate

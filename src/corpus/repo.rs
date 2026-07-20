@@ -30,15 +30,24 @@ impl Repo {
             return Self::require_manifest(Path::new(&env));
         }
         let mut cur = Some(start);
+        // Remember the nearest legacy `.vaire/config.toml` seen; if the walk finds no
+        // `knowledge.toml`, that's a not-yet-migrated corpus — point the user at `vaire init`.
+        let mut legacy: Option<PathBuf> = None;
         while let Some(dir) = cur {
             if dir.join("knowledge.toml").is_file() {
                 return Ok(Repo {
                     root: dir.to_path_buf(),
                 });
             }
+            if legacy.is_none() && dir.join(".vaire").join("config.toml").is_file() {
+                legacy = Some(dir.to_path_buf());
+            }
             cur = dir.parent();
         }
-        Err(VaireError::NoRepo)
+        match legacy {
+            Some(dir) => Err(VaireError::LegacyConfig(dir.display().to_string())),
+            None => Err(VaireError::NoRepo),
+        }
     }
 
     fn require_manifest(p: &Path) -> Result<Repo> {
@@ -46,6 +55,8 @@ impl Repo {
             Ok(Repo {
                 root: p.to_path_buf(),
             })
+        } else if p.join(".vaire").join("config.toml").is_file() {
+            Err(VaireError::LegacyConfig(p.display().to_string()))
         } else {
             Err(VaireError::NoRepo)
         }

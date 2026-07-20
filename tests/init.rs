@@ -117,3 +117,38 @@ fn init_refuses_when_knowledge_toml_already_present() {
     .unwrap();
     assert!(commands::init::run(Some(dir.path())).is_err());
 }
+
+#[test]
+fn discover_on_a_legacy_corpus_points_to_init() {
+    // A dir with the old .vaire/config.toml but no knowledge.toml: discovery should not
+    // say "no corpus" — it should tell the user to run `vaire init` to migrate.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".vaire")).unwrap();
+    std::fs::write(
+        dir.path().join(".vaire/config.toml"),
+        "id_prefixes = [\"x\"]\n",
+    )
+    .unwrap();
+
+    let err = Repo::discover(Some(dir.path()), dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("migrate"),
+        "legacy corpus error should point to `vaire init`, got: {err}"
+    );
+}
+
+#[test]
+fn discover_walkup_finds_legacy_config_and_points_to_init() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".vaire")).unwrap();
+    std::fs::write(
+        dir.path().join(".vaire/config.toml"),
+        "id_prefixes = [\"x\"]\n",
+    )
+    .unwrap();
+    let sub = dir.path().join("a/b");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    let err = Repo::discover(None, &sub).unwrap_err();
+    assert!(err.to_string().contains("migrate"), "got: {err}");
+}
