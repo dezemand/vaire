@@ -107,7 +107,7 @@ See [`spec/design.md`](spec/design.md) for the full design and rationale,
 | `unresolved` | Every `[[?…]]` loose end (the entity-creation work list). |
 
 **Maintain** — `init`, `index` (`--full` / `--working-tree` / `--re-embed`), `check`
-(`--strict`), `status`. Not exposed over MCP.
+(`--strict`), `status`, `configure`. Not exposed over MCP.
 
 The index is bound to commit (commit-as-publish): `vaire index` reads the committed tree.
 `vaire check` guards integrity — duplicate IDs and dangling references (failures); orphans,
@@ -116,12 +116,14 @@ drift, frontmatter-`[[ ]]`, and unknown-type references (warnings).
 ## Embeddings
 
 Pluggable, **local by default** (a built-in, offline, dependency-free embedder). Embeddings
-are machine-local config, not part of the package manifest (see [`spec/manifest.md`](spec/manifest.md) §6):
+are machine-local config — not part of a package manifest — set with `vaire configure` and
+stored in the user config (see `spec/cli.md` §6.3):
 
 - `provider = "local"` — built-in, no network, no model file.
 - `provider = "command"` — shell out to any local model (JSON texts in, JSON vectors out).
 - `provider = "openai"` — the OpenAI embeddings API; reads `OPENAI_API_KEY` from the
-  environment or a gitignored `.vaire/.env`. Sends corpus text to OpenAI (data egress).
+  environment or `credentials.toml` (`vaire configure --openai-key …`). Sends corpus text to
+  OpenAI (data egress).
 
 After switching models, `vaire index --re-embed` refreshes vectors without re-parsing.
 

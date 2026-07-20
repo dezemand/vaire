@@ -8,6 +8,7 @@
 
 pub mod backlinks;
 pub mod check;
+pub mod configure;
 pub mod index;
 pub mod init;
 pub mod refs;
@@ -58,10 +59,10 @@ impl Ctx {
         }
     }
 
-    /// Build the configured embedder, giving it `.vaire/` so providers that need secrets
-    /// (e.g. OpenAI) can read `.vaire/.env`.
+    /// Build the embedder from the global user config (M2); providers that need secrets
+    /// (e.g. OpenAI) resolve them from the environment or `credentials.toml`.
     pub fn embedder(&self) -> Result<Box<dyn crate::embed::Embedder>> {
-        let vaire_dir = self.repo.vaire_dir();
-        crate::embed::from_config(&self.config, Some(vaire_dir.as_path()))
+        let user = crate::userconfig::UserConfig::load()?;
+        crate::embed::from_user_config(&user)
     }
 }

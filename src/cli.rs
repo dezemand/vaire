@@ -141,6 +141,28 @@ pub enum Command {
     /// Report index state.
     Status,
 
+    /// Set embedding settings and secrets in the global user config.
+    Configure {
+        /// Embedding provider: local | command | openai.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Embedding model (for the openai provider).
+        #[arg(long)]
+        model: Option<String>,
+        /// Embedding vector dimensions.
+        #[arg(long)]
+        dimensions: Option<usize>,
+        /// Command to run for the `command` provider.
+        #[arg(long)]
+        command: Option<String>,
+        /// OpenAI API key. Stored in credentials.toml (owner-only), never the config file.
+        #[arg(long = "openai-key")]
+        openai_key: Option<String>,
+        /// OpenAI base URL override. Stored in credentials.toml.
+        #[arg(long = "base-url")]
+        base_url: Option<String>,
+    },
+
     // ---- agent surface ----
     /// Start a STDIO MCP server exposing the read commands as tools.
     Mcp,

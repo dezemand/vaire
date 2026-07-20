@@ -44,6 +44,31 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         return Ok(ExitCode::Success);
     }
 
+    // `configure` writes the global user config; corpus-independent, so no discovery.
+    if let Command::Configure {
+        provider,
+        model,
+        dimensions,
+        command,
+        openai_key,
+        base_url,
+    } = &cli.command
+    {
+        let opts = commands::configure::ConfigureOpts {
+            provider: provider.clone(),
+            model: model.clone(),
+            dimensions: *dimensions,
+            command: command.clone(),
+            openai_key: openai_key.clone(),
+            base_url: base_url.clone(),
+        };
+        emit(
+            &commands::configure::run(&vaire::userconfig::config_home(), opts)?,
+            json,
+        );
+        return Ok(ExitCode::Success);
+    }
+
     // `mcp` builds its own long-lived context and never returns output.
     if let Command::Mcp = cli.command {
         let ctx = Ctx::new(cli.repo, cli.config)?;
@@ -127,7 +152,9 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Status => {
             emit(&commands::status::run(&ctx)?, json);
         }
-        Command::Init { .. } | Command::Mcp => unreachable!("handled above"),
+        Command::Init { .. } | Command::Mcp | Command::Configure { .. } => {
+            unreachable!("handled above")
+        }
     }
 
     Ok(ExitCode::Success)

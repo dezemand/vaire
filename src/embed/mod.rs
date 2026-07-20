@@ -12,11 +12,11 @@
 pub mod cache;
 
 use std::io::Write;
-use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::config::{Config, EmbeddingProvider};
+use crate::config::EmbeddingProvider;
 use crate::error::{Result, VaireError};
+use crate::userconfig::UserConfig;
 
 /// The one seam every embedding provider implements.
 pub trait Embedder {
@@ -27,74 +27,36 @@ pub trait Embedder {
     fn dimensions(&self) -> usize;
 }
 
-/// Build the configured embedder. `vaire_dir` (the corpus's `.vaire/`) is consulted for
-/// secrets like `OPENAI_API_KEY` via `.vaire/.env` when the provider needs them; pass
-/// `None` for providers that don't (local/command).
-pub fn from_config(config: &Config, vaire_dir: Option<&Path>) -> Result<Box<dyn Embedder>> {
-    let dims = config.embeddings.dimensions;
-    match config.embeddings.provider {
+/// Build the configured embedder from the global user config (M2). Secrets
+/// (`OPENAI_API_KEY`, `OPENAI_BASE_URL`) resolve via [`crate::userconfig::credential`] — an
+/// environment variable first, then `credentials.toml`.
+pub fn from_user_config(user: &UserConfig) -> Result<Box<dyn Embedder>> {
+    let emb = &user.embeddings;
+    let dims = emb.dimensions;
+    match emb.provider {
         EmbeddingProvider::Local => Ok(Box::new(LocalEmbedder { dims })),
         EmbeddingProvider::Command => Ok(Box::new(CommandEmbedder {
-            command: config.embeddings.command.clone(),
+            command: emb.command.clone(),
             dims,
         })),
         EmbeddingProvider::OpenAi => {
-            let api_key = resolve_secret("OPENAI_API_KEY", vaire_dir).ok_or_else(|| {
+            let api_key = crate::userconfig::credential("OPENAI_API_KEY").ok_or_else(|| {
                 VaireError::Config(
-                    "embeddings.provider = \"openai\" but OPENAI_API_KEY is not set \
-                     (in .vaire/.env or the environment)"
+                    "embeddings provider is \"openai\" but OPENAI_API_KEY is not set \
+                     (env var or credentials.toml — run `vaire configure`)"
                         .into(),
                 )
             })?;
-            let base_url = resolve_secret("OPENAI_BASE_URL", vaire_dir)
+            let base_url = crate::userconfig::credential("OPENAI_BASE_URL")
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
             Ok(Box::new(OpenAiEmbedder {
                 api_key,
                 base_url,
-                model: config.embeddings.embedding_model.clone(),
+                model: emb.embedding_model.clone(),
                 dims,
             }))
         }
     }
-}
-
-/// Resolve a secret. An existing **environment variable wins**; otherwise the value is
-/// read from `<vaire_dir>/.env`. Returns `None` if found in neither.
-pub fn resolve_secret(key: &str, vaire_dir: Option<&Path>) -> Option<String> {
-    if let Ok(v) = std::env::var(key)
-        && !v.is_empty()
-    {
-        return Some(v);
-    }
-    let content = std::fs::read_to_string(vaire_dir?.join(".env")).ok()?;
-    parse_env(&content).remove(key)
-}
-
-/// Parse a `.env` file: `KEY=VALUE` per line, `#` comments, optional `export `, optional
-/// surrounding single/double quotes on the value.
-fn parse_env(content: &str) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        if let Some((k, v)) = line.split_once('=') {
-            let k = k.trim();
-            if k.is_empty() {
-                continue;
-            }
-            let v = v.trim();
-            let v = v
-                .strip_prefix('"')
-                .and_then(|s| s.strip_suffix('"'))
-                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
-                .unwrap_or(v);
-            map.insert(k.to_string(), v.to_string());
-        }
-    }
-    map
 }
 
 /// The built-in, in-process embedder (no network, no model file).
@@ -217,7 +179,7 @@ impl Embedder for CommandEmbedder {
 
 /// Embeds via the OpenAI embeddings API (network). Opt-in (`provider = "openai"`) — it
 /// means data egress per section, so it is never the default. The key comes from
-/// `OPENAI_API_KEY` (env or `.vaire/.env`); `OPENAI_BASE_URL` overrides the endpoint for
+/// `OPENAI_API_KEY` (env or `credentials.toml`); `OPENAI_BASE_URL` overrides the endpoint for
 /// proxies/Azure-style gateways.
 pub struct OpenAiEmbedder {
     api_key: String,
@@ -330,24 +292,22 @@ mod tests {
     use super::*;
     use crate::config::EmbeddingConfig;
 
-    fn command_config(command: &str) -> Config {
-        Config {
+    fn command_user_config(command: &str) -> UserConfig {
+        UserConfig {
             embeddings: EmbeddingConfig {
                 provider: EmbeddingProvider::Command,
                 command: command.to_string(),
                 ..EmbeddingConfig::default()
             },
-            ..Config::default()
         }
     }
 
     #[test]
     fn command_embedder_pipes_texts_and_parses_vectors() {
         // Reads (and ignores) the JSON on stdin, returns one vector per the two inputs.
-        let emb = from_config(
-            &command_config("cat >/dev/null; printf '[[1.0,0.0],[0.0,1.0]]'"),
-            None,
-        )
+        let emb = from_user_config(&command_user_config(
+            "cat >/dev/null; printf '[[1.0,0.0],[0.0,1.0]]'",
+        ))
         .unwrap();
         let out = emb
             .embed(&["alpha".to_string(), "beta".to_string()])
@@ -357,60 +317,32 @@ mod tests {
 
     #[test]
     fn command_embedder_rejects_wrong_vector_count() {
-        let emb = from_config(
-            &command_config("cat >/dev/null; printf '[[1.0,0.0]]'"),
-            None,
-        )
-        .unwrap();
+        let emb =
+            from_user_config(&command_user_config("cat >/dev/null; printf '[[1.0,0.0]]'")).unwrap();
         let err = emb.embed(&["a".to_string(), "b".to_string()]).unwrap_err();
         assert!(err.to_string().contains("returned 1 vectors for 2 texts"));
     }
 
     #[test]
     fn command_embedder_reports_command_failure() {
-        let emb = from_config(&command_config("exit 3"), None).unwrap();
+        let emb = from_user_config(&command_user_config("exit 3")).unwrap();
         assert!(emb.embed(&["a".to_string()]).is_err());
     }
 
     #[test]
-    fn parse_env_handles_comments_quotes_and_export() {
-        let env =
-            parse_env("# a comment\n\nexport FOO=bar\nKEY = \"quoted value\"\nQ='single'\nBAD\n");
-        assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
-        assert_eq!(env.get("KEY").map(String::as_str), Some("quoted value"));
-        assert_eq!(env.get("Q").map(String::as_str), Some("single"));
-        assert!(!env.contains_key("BAD"));
-    }
-
-    #[test]
-    fn secret_falls_back_to_dotenv_when_env_unset() {
-        let dir = tempfile::tempdir().unwrap();
-        let vaire = dir.path().join(".vaire");
-        std::fs::create_dir_all(&vaire).unwrap();
-        std::fs::write(vaire.join(".env"), "VAIRE_TEST_SECRET_XYZ=from-dotenv\n").unwrap();
-
-        // A uniquely-named key not present in the real environment.
-        assert_eq!(
-            resolve_secret("VAIRE_TEST_SECRET_XYZ", Some(&vaire)).as_deref(),
-            Some("from-dotenv")
-        );
-        assert_eq!(resolve_secret("VAIRE_TEST_MISSING_KEY", Some(&vaire)), None);
-    }
-
-    #[test]
     fn openai_missing_key_is_a_clear_error() {
-        // Only meaningful when the env has no key; skip otherwise to stay deterministic.
-        if std::env::var("OPENAI_API_KEY").is_ok() {
+        // Only meaningful when no key is configured anywhere; skip otherwise to stay
+        // deterministic (from_user_config reads the real credential source).
+        if crate::userconfig::credential("OPENAI_API_KEY").is_some() {
             return;
         }
-        let cfg = Config {
+        let cfg = UserConfig {
             embeddings: EmbeddingConfig {
                 provider: EmbeddingProvider::OpenAi,
                 ..EmbeddingConfig::default()
             },
-            ..Config::default()
         };
-        let result = from_config(&cfg, None);
+        let result = from_user_config(&cfg);
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("OPENAI_API_KEY"));
     }

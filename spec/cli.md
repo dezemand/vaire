@@ -26,8 +26,8 @@ Two classes of command:
 - **Read** — `resolve`, `render`, `backlinks`, `refs`, `search`, `suggest`, `unresolved`. Queries
   against the index. Available over MCP. Every read command accepts `--json`. (`render`
   is the one read that returns a file *body* rather than pointers — see §3.6.)
-- **Maintain** — `init`, `index`, `check`, `status`. Scaffold, build, validate, and report.
-  **Not** exposed over MCP; run by humans, git hooks, or CI.
+- **Maintain** — `init`, `index`, `check`, `status`, `configure`. Scaffold, build, validate,
+  report, and set global user settings. **Not** exposed over MCP; run by humans, git hooks, or CI.
 
 A read command run before the index exists is an error directing the user to `vaire index`
 (exit `4`, see §7) — `vaire` never silently builds the index as a side effect of a query,
@@ -576,19 +576,37 @@ defaults.
 `command` shelling out via `sh -c`, `openai` via the API) are unchanged; the API key resolves
 as in §6.2.
 
-### 6.2 Secrets — `.vaire/.env`
+### 6.2 Secrets — `credentials.toml`
 
 Providers that need credentials (currently `openai`) resolve them with the precedence
-**environment variable first, then `.vaire/.env`**:
+**environment variable first, then `<config-home>/credentials.toml`** (the user config home,
+§6.3):
 
-- `OPENAI_API_KEY` — required for `provider = "openai"`. Set it in the shell environment,
-  or in `.vaire/.env` as `OPENAI_API_KEY=sk-…`.
+- `OPENAI_API_KEY` — required for `provider = "openai"`. Set it in the shell environment, or
+  via `vaire configure --openai-key sk-…` (which writes `credentials.toml`).
 - `OPENAI_BASE_URL` — optional; overrides the API endpoint (proxies / Azure-style gateways).
 
-`.vaire/.env` is `KEY=VALUE` per line (`#` comments, optional `export `, optional quotes).
-It lives under `.vaire/`, which `vaire init` gitignores entirely (the committed manifest is
-`knowledge.toml` at the package root), so secrets are never committed. `vaire` reads it on
-demand — it does not mutate the process environment.
+`credentials.toml` is a TOML `KEY = "value"` table written with `600` permissions (owner
+read/write only) on Unix. It lives in the user config home, never in a corpus, so secrets are
+never committed. `vaire` reads it on demand — it does not mutate the process environment.
+
+### 6.3 Global user config — `vaire configure`
+
+Machine/consumer settings are **not** part of any package manifest (a package must not dictate
+how a consumer indexes it). They live in a per-user config, set with `vaire configure`:
+
+```
+vaire configure [--provider local|command|openai] [--model <m>] [--dimensions <n>]
+                [--command <cmd>] [--openai-key <key>] [--base-url <url>]
+```
+
+- Non-secret settings (embedding provider, model, dimensions, command) → `config.toml`.
+- Secrets (`--openai-key`, `--base-url`) → `credentials.toml` (§6.2).
+- Only the flags you pass are changed; the rest are preserved.
+
+The **config home** is `VAIRE_CONFIG_HOME` if set, else the platform config directory for
+`vaire` (`~/.config/vaire` on Linux, `~/Library/Application Support/vaire` on macOS,
+`%APPDATA%\vaire` on Windows).
 
 ### 6.1 Scoped IDs
 

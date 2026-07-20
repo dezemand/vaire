@@ -30,5 +30,6 @@ pub mod mcp;
 pub mod model;
 pub mod output;
 pub mod search;
+pub mod userconfig;
 
 pub use error::{ExitCode, Result, VaireError};
