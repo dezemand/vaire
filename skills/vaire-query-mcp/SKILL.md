@@ -55,7 +55,7 @@ agent-facing surface is bounded to reads. The six tools and their arguments:
 | `unresolved` | `type`, `scope` | Every `[[?...]]` loose end in the corpus. |
 
 `id` is the node's address: global nodes are `type:id` (`person:jane-doe`), while
-**scoped** nodes (corpora with `scoped_types`, commonly `record`) are a path —
+**scoped** nodes (any node carrying a `scope:`) are a path —
 `<container-id>/type:id`, e.g. `project:atlas-2026-q2/record:2026-06-10-standup`. Pass the
 full address to `resolve`/`render`/`backlinks`/`refs` (obtain it from `search`/`resolve`,
 don't construct it). `scope` is a container ID (`project:atlas-2026-q2`, or any container

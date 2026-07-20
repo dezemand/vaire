@@ -43,7 +43,7 @@ cargo install --path .        # installs the `vaire` binary
 ## Quickstart
 
 ```bash
-vaire init my-notes && cd my-notes      # scaffolds .vaire/config.toml
+vaire init my-notes && cd my-notes      # scaffolds knowledge.toml
 # author some files (see "The model" below), then:
 git init && git add -A && git commit -m "notes"
 vaire index                              # build the index from the committed tree
@@ -83,9 +83,10 @@ Drives the [[method:event-sourcing]] rollout; owns [[system:ingest-api]].
 - **Loose ends.** Reference something not yet created with `[[?person: someone from ops]]`
   (inline) or `head: "?person: …"` (frontmatter) — a *descriptor*, never a guessed ID. These
   surface in `vaire unresolved` and never become edges.
-- **Scoped IDs** (opt-in). With `scoped_types = ["record"]`, a record under a container is
-  addressed `<container-id>/type:local`, e.g. `project:atlas/record:2026-06-10-standup`, so
-  records only need a container-local id.
+- **Scoped IDs** (data-driven). A node carrying `scope: <container-id>` is addressed
+  `<container-id>/type:local`, e.g. `project:atlas/record:2026-06-10-standup`, so records only
+  need a container-local id. Any type can be scoped; `scoped_types_whitelist`/`blacklist` are a
+  `vaire check` lint policy, not a gate.
 
 See [`spec/design.md`](spec/design.md) for the full design and rationale,
 [`spec/cli.md`](spec/cli.md) for the exact command surface, and
@@ -114,8 +115,8 @@ drift, frontmatter-`[[ ]]`, and unknown-type references (warnings).
 
 ## Embeddings
 
-Pluggable, **local by default** (a built-in, offline, dependency-free embedder), configured
-in `.vaire/config.toml`:
+Pluggable, **local by default** (a built-in, offline, dependency-free embedder). Embeddings
+are machine-local config, not part of the package manifest (see [`spec/manifest.md`](spec/manifest.md) §6):
 
 - `provider = "local"` — built-in, no network, no model file.
 - `provider = "command"` — shell out to any local model (JSON texts in, JSON vectors out).

@@ -395,30 +395,26 @@ breaks the moment embeddings exist. Providers are opt-in beyond the local defaul
 accepting the egress) — the latter reads `OPENAI_API_KEY` from the environment or the
 gitignored `.vaire/.env` (cli.md §6.2).
 
-**On disk.** Everything Vairë owns lives under `.vaire/` in the repo root. That directory
-holds two things with opposite lifecycles: one **committed** file — `config.toml`, the
-authored, version-controlled settings (ID-prefix vocabulary, embedding config, include
-globs) — and everything else, which is **derived and gitignored**: `index.db` plus its
-WAL-mode `index.db-wal` / `index.db-shm` sidecars and lock, the embedding cache, and any
-future derived artifacts. The gitignore rule encodes exactly that boundary — ignore all of
-`.vaire/`, then re-include the one authored file:
+**On disk.** The one **committed** authored file is `knowledge.toml` at the repo root — the
+package manifest (type vocabulary, include globs, dependencies, …; full spec in manifest.md).
+Everything Vairë *derives* lives under `.vaire/` and is **entirely gitignored**: `index.db`
+plus its WAL-mode `index.db-wal` / `index.db-shm` sidecars and lock, the embedding cache, and
+any future derived artifacts. `vaire init` drops a self-contained gitignore under `.vaire/`:
 
 ```gitignore
 # Vairë — derived index, rebuildable from files
-.vaire/*
-!.vaire/config.toml
+*
+!.gitignore
 ```
 
-So *everything in `.vaire/` except `config.toml` is the disposable derived layer.* Keeping
-config beside the index it configures (rather than elsewhere in the repo) keeps all of
-Vairë's footprint in one directory, while the gitignore whitelist preserves the rule that
-nothing derived is ever committed.
+So *everything under `.vaire/` is the disposable derived layer* — nothing there is ever
+committed.
 
-The committed `.vaire/config.toml` is also what **marks a corpus**: `vaire` discovers the
-root by walking up to the nearest `.vaire/` (cli.md §2.1), and creates `index.db` inside
-that existing directory on first run. A fresh clone therefore has the truth (files) and the
-config, and no index until it is built — which is correct, and reinforces
-files-authoritative. Because the db is gitignored and per-checkout, every machine and agent
+The committed `knowledge.toml` is also what **marks a corpus**: `vaire` discovers the root by
+walking up to the nearest `knowledge.toml` (cli.md §2.1), and creates `.vaire/index.db` on
+first run. A fresh clone therefore has the truth (files) and the manifest, and no index until
+it is built — which is correct, and reinforces files-authoritative. Because the db is
+gitignored and per-checkout, every machine and agent
 runs its **own** local Vairë over the same shared corpus files: there is no index to sync,
 because each rebuilds from the canonical source.
 
@@ -480,9 +476,9 @@ Kept with their reasons, because decisions without reasons get undone.
   slug; `type:` is the authoritative type *and* the ID namespace. They compose to the
   address (`id: hr` + `type: department` ⇒ `department:hr`). No redundant prefix-in-`id:` to
   keep in sync — `type:` is the single source of a node's type.
-- **Optional project-scoped IDs for records** — a path of typed IDs,
-  `<project-id>/<type>:<local>` (config `scoped_types`, cli.md §6.1). A scoped record writes
-  only a container-local `id:`; the scope *is* its `scope:` value (the field is
+- **Data-driven scoped IDs** — a path of typed IDs, `<container-id>/<type>:<local>` (cli.md
+  §6.1). Any node carrying the `scope_field` is scoped, regardless of type. A scoped record
+  writes only a container-local `id:`; the scope *is* its `scope:` value (the field is
   `scope_field`, default `scope`; the value names any container type), so composition is
   purely local (no per-container declaration,
   no cross-file lookup, single-pass), and uniqueness + stability come free from the

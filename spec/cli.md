@@ -38,13 +38,13 @@ because indexing is bound to commit (commit-as-publish) and should be deliberate
 ### 2.1 Repo discovery
 
 `vaire` operates on one corpus repository. It locates the root by walking up from the
-working directory to the nearest directory containing a **`.vaire/`** directory — the
-committed `.vaire/config.toml` is what marks a directory as a corpus (run `vaire init` to
-create one, §4.4). The index lives at `<root>/.vaire/index.db`.
+working directory to the nearest directory containing a **`knowledge.toml`** — the committed
+manifest that marks a directory as a corpus (run `vaire init` to create one, §4.4). The
+derived index lives at `<root>/.vaire/index.db`.
 
 Override with `--repo <path>` or the `VAIRE_REPO` environment variable (`--repo` wins); an
-explicit path that has no `.vaire/` is an error rather than a silent guess. If no corpus is
-found and none is given, exit `4`.
+explicit path that has no `knowledge.toml` is an error rather than a silent guess. If no
+corpus is found and none is given, exit `4`.
 
 Discovery is deliberately decoupled from Git: the corpus root need not be a Git repo root.
 Whether the index is built from the committed tree or the working tree is a separate
@@ -56,7 +56,7 @@ question, decided by `vaire index` from the corpus's Git state (§4.1).
 | --- | --- |
 | `--repo <path>` | Corpus repo root. Overrides discovery and `VAIRE_REPO`. |
 | `--json` | Emit JSON instead of human-readable text. Read commands only. |
-| `--config <path>` | Path to the config file (default: `<root>/.vaire/config.toml`, see §6). |
+| `--config <path>` | Path to the config file (default: `<root>/knowledge.toml`, see §6). |
 | `--quiet` / `-q` | Suppress progress and non-essential output (errors still print). |
 | `--verbose` / `-v` | Extra diagnostics on stderr. Repeatable. |
 | `--no-color` | Disable ANSI color. Also honored via `NO_COLOR`. |
@@ -424,7 +424,7 @@ JSON:
 
 `kind` is one of `duplicate_id`, `dangling_ref` (violations), `drift`, `orphan`,
 `frontmatter_wikilink`, `unknown_type` (warnings). `unknown_type` flags a reference-shaped
-frontmatter value (`field: team:alpha`) whose type isn't in `id_prefixes` — it was *ignored*
+frontmatter value (`field: team:alpha`) whose type isn't in `types` — it was *ignored*
 rather than made an edge, so the warning surfaces the silent drop (usually a type you forgot
 to list). A colon in a non-reference value (a title, `summary: "TODO: …"`) is not flagged.
 
@@ -484,12 +484,16 @@ vaire init [path]
 ```
 
 - `path` — directory to initialize (default: the current directory). Created if absent.
-- Writes `<path>/.vaire/config.toml` (the committed corpus marker, with the §6 defaults)
-  and a self-contained `<path>/.vaire/.gitignore` that ignores everything derived under
-  `.vaire/` except `config.toml` — so `init` need not touch the repo's root `.gitignore`.
+- Writes `<path>/knowledge.toml` (the committed corpus marker, with the §6 defaults) and a
+  self-contained `<path>/.vaire/.gitignore` that ignores everything derived under `.vaire/` —
+  so `init` need not touch the repo's root `.gitignore`.
+- **Migration:** if a legacy `<path>/.vaire/config.toml` exists, it is migrated into
+  `knowledge.toml` (renaming `id_prefixes` → `types`, converting a non-empty `scoped_types`
+  into `scoped_types_whitelist`, dropping `[embeddings]`, injecting `name`/`version`) and set
+  aside as `.vaire/config.toml.migrated`.
 - Does **not** create a Git repo or build the index; it prints the next step (`vaire index`).
-- Exit `2` if the directory is already a corpus (`.vaire/config.toml` exists) — `init`
-  never clobbers an existing config.
+- Exit `2` if the directory is already a corpus (`knowledge.toml` exists) — `init`
+  never clobbers an existing manifest.
 
 ## 5. MCP server
 
@@ -522,25 +526,28 @@ MCP tools, one-to-one:
 
 ## 6. Configuration
 
-Authored config that should be version-controlled lives at `.vaire/config.toml`. It is the
-one committed file under `.vaire/`; everything else there is derived and gitignored via a
-whitelist rule (design.md §9). All keys are optional; defaults make `vaire` work with no
-config.
+Authored config lives in the committed **`knowledge.toml`** at the package root — the package
+manifest, specified in full in [`manifest.md`](manifest.md). Everything under `.vaire/` is
+derived and gitignored (design.md §9). All keys except `name`/`version` are optional; defaults
+make `vaire` work from a two-line manifest. The settings that affect the command surface:
 
 ```toml
-# .vaire/config.toml — committed, version-controlled
+# knowledge.toml — committed package manifest (full spec: manifest.md)
+
+name    = "my-package"   # required: package id (slug)
+version = "0.1.0"        # required: semver
 
 # Where to look (an `id:`+`type:` pair is still what makes a file a node; these only
 # bound the search space).
 include = ["knowledge/**/*.md", "projects/**/*.md"]
 exclude = ["**/node_modules/**", "**/drafts/**", "**/archive/**"]
 
-# Type vocabulary — the `type:` field / ID prefix in `type:id`. Growable, but
-# load-bearing for *reference detection*: a frontmatter value is only treated as a
-# `type:id` edge when its type is listed here, so a colon inside a non-reference value
-# (a title, a note) is not mistaken for a reference. List every type you reference —
-# `vaire check` warns (unknown_type) on a reference-shaped value with an unlisted type.
-id_prefixes = ["person", "department", "method", "system", "event", "record", "project"]
+# Type vocabulary — the `type:` field / ID prefix in `type:id`. The types this package
+# defines. Load-bearing for *reference detection*: a frontmatter value is only treated as a
+# `type:id` edge when its type is listed here, so a colon inside a non-reference value (a
+# title, a note) is not mistaken for a reference. `vaire check` warns (unknown_type) on a
+# reference-shaped value with an unlisted type.
+types = ["person", "department", "method", "system", "event", "record", "project"]
 vocabulary_strict = false
 
 # Scoped IDs. Scoping is DATA-DRIVEN: any node carrying the `scope_field` gets the composed
@@ -552,21 +559,18 @@ scoped_types_blacklist = []
 scope_field  = "scope"      # frontmatter field that supplies the scope; its value names the
                             # container (scope: project:atlas, scope: org:some-firm, …)
 
-[embeddings]
-# Pluggable, local by default:
-#   "local"   — built-in, offline, no model file.
-#   "command" — run via `sh -c`; receives a JSON array of strings on stdin and must return
-#               a JSON array of vectors ([[f32, ...], ...]) of the same length and order.
-#   "openai"  — OpenAI embeddings API; needs OPENAI_API_KEY (see Secrets, §6.2) and
-#               `embedding_model`. Sends corpus text to OpenAI (data egress).
-provider        = "local"                    # "local" | "command" | "openai"
-command         = ""                         # used when provider = "command"
-embedding_model = "text-embedding-3-small"   # used when provider = "openai"
-dimensions      = 384                        # output size (v3 OpenAI models honor this)
+# Dependencies on other packages: `name -> "^MAJOR"` (the only legal constraint form).
+[dependencies]
+# other-package = "^1"
 ```
 
-Resolution order for any setting: `--config` path > `<root>/.vaire/config.toml` > built-in
+Resolution order for any setting: `--config` path > `<root>/knowledge.toml` > built-in
 defaults.
+
+**Embeddings** are a machine/consumer choice, not part of the package contract, so they are
+**not** manifest settings — see `manifest.md` §6. The providers themselves (`local` built-in,
+`command` shelling out via `sh -c`, `openai` via the API) are unchanged; the API key resolves
+as in §6.2.
 
 ### 6.2 Secrets — `.vaire/.env`
 
@@ -578,9 +582,9 @@ Providers that need credentials (currently `openai`) resolve them with the prece
 - `OPENAI_BASE_URL` — optional; overrides the API endpoint (proxies / Azure-style gateways).
 
 `.vaire/.env` is `KEY=VALUE` per line (`#` comments, optional `export `, optional quotes).
-It lives under `.vaire/`, which `vaire init` gitignores (only `config.toml` is committed),
-so secrets are never committed. `vaire` reads it on demand — it does not mutate the process
-environment.
+It lives under `.vaire/`, which `vaire init` gitignores entirely (the committed manifest is
+`knowledge.toml` at the package root), so secrets are never committed. `vaire` reads it on
+demand — it does not mutate the process environment.
 
 ### 6.1 Scoped IDs
 
@@ -633,7 +637,7 @@ segments) leaves room for deeper containers later.
 Frontmatter references are **bare** — the `[[ ]]` brackets are an inline-prose convention,
 not a frontmatter one. A frontmatter field value is interpreted as:
 
-- a composed `type:id` **whose type is in `id_prefixes`** → a resolved **edge** keyed by
+- a composed `type:id` **whose type is in `types`** → a resolved **edge** keyed by
   the field (`org: department:platform`, `head: person:jane-doe`). A value whose prefix is
   not a configured type is left alone, so a colon in a title or note isn't mistaken for a
   reference. (`name` and `aliases` are display fields and are never scanned for references.)
