@@ -483,7 +483,9 @@ exception that does **not** use discovery — it is what makes the repo discover
 vaire init [path]
 ```
 
-- `path` — directory to initialize (default: the current directory). Created if absent.
+- `path` — directory to initialize. If omitted, `--repo`/`VAIRE_REPO` is used as the target;
+  if neither is given, the current directory. An explicit `path` takes precedence over
+  `--repo`/`VAIRE_REPO`. Created if absent.
 - Writes `<path>/knowledge.toml` (the committed corpus marker, with the §6 defaults) and a
   self-contained `<path>/.vaire/.gitignore` that ignores everything derived under `.vaire/` —
   so `init` need not touch the repo's root `.gitignore`.
