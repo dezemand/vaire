@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Transaction, params};
 
 use crate::config::Config;
 use crate::corpus::frontmatter;
@@ -285,6 +285,8 @@ fn resolve_scoped_edges(tx: &Transaction) -> Result<()> {
             "SELECT rowid, from_id, to_id FROM edges
              WHERE from_id LIKE '%/%' AND to_id NOT LIKE '%/%'",
         )?;
+        // Prepared once and reused per row (this scans the whole edges table each build).
+        let mut exists_stmt = tx.prepare("SELECT 1 FROM nodes WHERE id = ?1")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -297,15 +299,7 @@ fn resolve_scoped_edges(tx: &Transaction) -> Result<()> {
             // The referrer's scope is everything before the last '/'.
             if let Some((scope, _)) = from_id.rsplit_once('/') {
                 let candidate = format!("{scope}/{to_id}");
-                let exists = tx
-                    .query_row(
-                        "SELECT 1 FROM nodes WHERE id = ?1",
-                        [&candidate],
-                        |_| Ok(()),
-                    )
-                    .optional()?
-                    .is_some();
-                if exists {
+                if exists_stmt.exists([&candidate])? {
                     rewrites.push((rowid, candidate));
                 }
             }

@@ -18,7 +18,7 @@ package. Discovery walks up from the working directory to the nearest ancestor c
 `.vaire/` sits beside the manifest and holds only the derived index (`.vaire/index.db`) plus a
 self-contained `.vaire/.gitignore`. It is no longer a corpus marker.
 
-```
+```text
 my-package/
 ├── knowledge.toml      # committed manifest — the package marker
 ├── knowledge/…         # entity files

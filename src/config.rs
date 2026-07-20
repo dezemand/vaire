@@ -186,11 +186,13 @@ fn is_slug(s: &str) -> bool {
 
 /// Semver `MAJOR.MINOR.PATCH`, each a non-empty run of ASCII digits.
 fn is_semver(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('.').collect();
-    parts.len() == 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    let mut parts = s.split('.');
+    let valid = parts
+        .by_ref()
+        .take(3)
+        .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        .count();
+    valid == 3 && parts.next().is_none()
 }
 
 /// The only legal dependency constraint form: `^MAJOR` (a caret then a non-empty run of
