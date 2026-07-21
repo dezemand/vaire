@@ -118,6 +118,10 @@ pub enum Command {
     Add {
         /// The package to depend on: `<name>` or `<name>@^MAJOR` (default `^1`).
         spec: String,
+        /// Also link where it lives: creates the `.vaire/packages/<name>` symlink to
+        /// this path (a package directory declaring the same name).
+        #[arg(long)]
+        link: Option<PathBuf>,
     },
 
     /// (Re)build the index from the committed files.

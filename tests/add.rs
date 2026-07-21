@@ -15,7 +15,7 @@ fn manifest(c: &Corpus) -> String {
 #[test]
 fn add_writes_a_default_caret_one_dependency() {
     let c = Corpus::empty();
-    let out = commands::add::run(Some(c.root()), None, "acme-core").unwrap();
+    let out = commands::add::run(Some(c.root()), None, "acme-core", None).unwrap();
     assert_eq!(out.name, "acme-core");
     assert_eq!(out.constraint, "^1");
     assert!(!out.updated);
@@ -31,7 +31,7 @@ fn add_writes_a_default_caret_one_dependency() {
 #[test]
 fn add_honours_an_explicit_caret_major() {
     let c = Corpus::empty();
-    let out = commands::add::run(Some(c.root()), None, "acme-web@^2").unwrap();
+    let out = commands::add::run(Some(c.root()), None, "acme-web@^2", None).unwrap();
     assert_eq!(out.constraint, "^2");
     let cfg = Config::load(&c.root().join("knowledge.toml")).unwrap();
     assert_eq!(
@@ -43,8 +43,8 @@ fn add_honours_an_explicit_caret_major() {
 #[test]
 fn add_is_idempotent_and_updates_in_place() {
     let c = Corpus::empty();
-    commands::add::run(Some(c.root()), None, "acme-core@^1").unwrap();
-    let out = commands::add::run(Some(c.root()), None, "acme-core@^2").unwrap();
+    commands::add::run(Some(c.root()), None, "acme-core@^1", None).unwrap();
+    let out = commands::add::run(Some(c.root()), None, "acme-core@^2", None).unwrap();
     assert!(out.updated, "second add of same package updates in place");
 
     let cfg = Config::load(&c.root().join("knowledge.toml")).unwrap();
@@ -64,7 +64,7 @@ fn add_preserves_comments_and_formatting() {
         "knowledge.toml",
         "name = \"test-corpus\"\nversion = \"0.1.0\"\n\n# our entity vocabulary\ntypes = [\"person\"]\n",
     );
-    commands::add::run(Some(c.root()), None, "acme-core").unwrap();
+    commands::add::run(Some(c.root()), None, "acme-core", None).unwrap();
 
     let text = manifest(&c);
     assert!(
@@ -79,8 +79,8 @@ fn add_preserves_comments_and_formatting() {
 fn add_rejects_a_bad_name_or_constraint() {
     let c = Corpus::empty();
     // Uppercase / non-slug name.
-    assert!(commands::add::run(Some(c.root()), None, "Acme_Core").is_err());
+    assert!(commands::add::run(Some(c.root()), None, "Acme_Core", None).is_err());
     // A tighter pin than ^MAJOR is not allowed.
-    assert!(commands::add::run(Some(c.root()), None, "acme-core@1.2.3").is_err());
-    assert!(commands::add::run(Some(c.root()), None, "acme-core@^").is_err());
+    assert!(commands::add::run(Some(c.root()), None, "acme-core@1.2.3", None).is_err());
+    assert!(commands::add::run(Some(c.root()), None, "acme-core@^", None).is_err());
 }

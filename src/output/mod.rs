@@ -359,18 +359,27 @@ pub struct AddOutput {
     pub config_path: String,
     /// True when the dependency already existed and its constraint was updated in place.
     pub updated: bool,
+    /// The `.vaire/packages/<name>` link target as stored (with `--link`), else null.
+    pub linked: Option<String>,
 }
 
 impl Output for AddOutput {
     fn render_human(&self) -> String {
         let verb = if self.updated { "updated" } else { "added" };
-        format!(
+        let mut s = format!(
             "{} {verb} dependency\n  {} = \"{}\"\n  manifest: {}",
             green("✓"),
             self.name,
             self.constraint,
             self.config_path,
-        )
+        );
+        if let Some(target) = &self.linked {
+            s.push_str(&format!(
+                "\n  linked:   .vaire/packages/{} → {}",
+                self.name, target
+            ));
+        }
+        s
     }
 }
 

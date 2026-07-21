@@ -73,10 +73,16 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         return Ok(ExitCode::Success);
     }
 
-    // `add` edits the manifest's [dependencies]; it needs the package root but not the
-    // index, so it runs before `Ctx` is built (like `init`/`configure`).
-    if let Command::Add { spec } = &cli.command {
-        let out = commands::add::run(cli.repo.as_deref(), cli.config.as_deref(), spec)?;
+    // `add` edits the manifest's [dependencies] (and with --link, the package links);
+    // it needs the package root but not the index, so it runs before `Ctx` is built
+    // (like `init`/`configure`).
+    if let Command::Add { spec, link } = &cli.command {
+        let out = commands::add::run(
+            cli.repo.as_deref(),
+            cli.config.as_deref(),
+            spec,
+            link.as_deref(),
+        )?;
         emit(&out, json);
         return Ok(ExitCode::Success);
     }
