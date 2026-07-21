@@ -307,7 +307,11 @@ pub fn aliases_for(member: &PackageHandle, target: &PackageId) -> Vec<String> {
 
 /// Follow `alias` out of `source`: declared in the source's manifest, then located
 /// through the source's links (own-first, run-root fallback — cli.md §6.5).
-fn step_into(ws: &Workspace, source: &Rc<PackageHandle>, alias: &str) -> Result<Rc<PackageHandle>> {
+pub(crate) fn step_into(
+    ws: &Workspace,
+    source: &Rc<PackageHandle>,
+    alias: &str,
+) -> Result<Rc<PackageHandle>> {
     if !source.config.dependencies.contains_key(alias) {
         return Err(VaireError::Dependency(format!(
             "package '{alias}' is not a declared dependency of '{}' — see [dependencies] in knowledge.toml (or run `vaire add {alias} --link <path>`)",

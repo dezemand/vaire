@@ -12,7 +12,7 @@ use vaire::commands;
 #[test]
 fn finds_prose_match_with_anchor() {
     let c = Corpus::fixture();
-    let out = commands::search::run(&c.ctx(), "throughput", None, None, Some(10)).unwrap();
+    let out = commands::search::run(&c.ctx(), "throughput", None, None, Some(10), false).unwrap();
 
     // "throughput" appears only in the broker-sync note.
     let hit = out
@@ -33,15 +33,23 @@ fn alias_match_finds_entity() {
     let c = Corpus::fixture();
     // "logistics contact" is an alias of department:logistics; "contact" appears in no
     // prose, so only the alias path can surface it.
-    let out = commands::search::run(&c.ctx(), "logistics contact", None, None, Some(10)).unwrap();
+    let out =
+        commands::search::run(&c.ctx(), "logistics contact", None, None, Some(10), false).unwrap();
     assert!(out.results.iter().any(|r| r.id == "department:logistics"));
 }
 
 #[test]
 fn type_filter_restricts_to_type() {
     let c = Corpus::fixture();
-    let out =
-        commands::search::run(&c.ctx(), "scope first", Some("record"), None, Some(10)).unwrap();
+    let out = commands::search::run(
+        &c.ctx(),
+        "scope first",
+        Some("record"),
+        None,
+        Some(10),
+        false,
+    )
+    .unwrap();
     assert!(!out.results.is_empty());
     assert!(out.results.iter().all(|r| r.node_type == "record"));
 }
@@ -57,6 +65,7 @@ fn scope_filter_keeps_only_project_records() {
         None,
         Some("project:atlas-2026-q2"),
         Some(10),
+        false,
     )
     .unwrap();
     assert!(!out.results.is_empty());
@@ -68,7 +77,7 @@ fn scope_filter_keeps_only_project_records() {
 fn limit_caps_results() {
     let c = Corpus::fixture();
     // "scope" appears in both records.
-    let out = commands::search::run(&c.ctx(), "scope", None, None, Some(1)).unwrap();
+    let out = commands::search::run(&c.ctx(), "scope", None, None, Some(1), false).unwrap();
     assert_eq!(out.results.len(), 1);
     assert_eq!(out.count, 1);
 }
@@ -76,13 +85,15 @@ fn limit_caps_results() {
 #[test]
 fn results_sorted_by_score_descending() {
     let c = Corpus::fixture();
-    let out = commands::search::run(&c.ctx(), "ingest scope first", None, None, Some(10)).unwrap();
+    let out =
+        commands::search::run(&c.ctx(), "ingest scope first", None, None, Some(10), false).unwrap();
     assert!(out.results.windows(2).all(|w| w[0].score >= w[1].score));
 }
 
 #[test]
 fn nonsense_query_returns_nothing() {
     let c = Corpus::fixture();
-    let out = commands::search::run(&c.ctx(), "zzqxwvbnmlkjhgf", None, None, Some(10)).unwrap();
+    let out =
+        commands::search::run(&c.ctx(), "zzqxwvbnmlkjhgf", None, None, Some(10), false).unwrap();
     assert_eq!(out.count, 0);
 }

@@ -73,6 +73,29 @@ pub fn search(
     query: &str,
     opts: &SearchOpts,
 ) -> Result<Vec<SearchHit>> {
+    let qvec = embed_query(embedder, query)?;
+    search_prepared(index, qvec.as_deref(), query, opts)
+}
+
+/// Embed the query once (the blob is reused across every member in a workspace search).
+/// `None` when the embedder returns nothing or a zero vector (undefined cosine).
+fn embed_query(embedder: &dyn Embedder, query: &str) -> Result<Option<Vec<f32>>> {
+    let Some(qvec) = embedder.embed(&[query.to_string()])?.into_iter().next() else {
+        return Ok(None);
+    };
+    if qvec.iter().all(|x| *x == 0.0) {
+        return Ok(None);
+    }
+    Ok(Some(qvec))
+}
+
+/// [`search`] against one index with an already-embedded query vector.
+pub fn search_prepared(
+    index: &Index,
+    qvec: Option<&[f32]>,
+    query: &str,
+    opts: &SearchOpts,
+) -> Result<Vec<SearchHit>> {
     let tokens = tokenize(query);
     if tokens.is_empty() {
         return Ok(Vec::new());
@@ -81,7 +104,9 @@ pub fn search(
 
     fts_pass(index, &tokens, &mut acc)?;
     alias_pass(index, &tokens, &mut acc)?;
-    vector_pass(index, embedder, query, &tokens, &mut acc)?;
+    if let Some(qvec) = qvec {
+        vector_pass(index, qvec, &tokens, &mut acc)?;
+    }
 
     // Filters.
     if let Some(t) = &opts.type_filter {
@@ -239,22 +264,14 @@ fn alias_pass(
 /// `similarity = 1 - distance`); the hand-rolled brute-force loop is retired.
 fn vector_pass(
     index: &Index,
-    embedder: &dyn Embedder,
-    query: &str,
+    qvec: &[f32],
     tokens: &[String],
     acc: &mut std::collections::BTreeMap<String, Acc>,
 ) -> Result<()> {
-    let qvec = match embedder.embed(&[query.to_string()])?.into_iter().next() {
-        Some(v) => v,
-        None => return Ok(()),
-    };
-    // A zero query vector has an undefined cosine; skip the pass rather than error in SQL.
-    if qvec.iter().all(|x| *x == 0.0) {
-        return Ok(());
-    }
     // The query vector as a little-endian f32 blob — Turso reads it as a Float32-dense
-    // vector directly (same layout the stored `vector` column uses).
-    let qblob = vector::encode_vector(&qvec);
+    // vector directly (same layout the stored `vector` column uses). Zero/empty query
+    // vectors were already filtered by `embed_query`.
+    let qblob = vector::encode_vector(qvec);
     // `vector_distance_cos` hard-errors on a dimension mismatch, so only compare against
     // stored vectors of the same width (byte length ⇒ f32 count ⇒ dims). This makes a
     // stale-dimension index — one built before an embedding-dimensions change and not yet
@@ -524,4 +541,179 @@ fn snippet(body: &str, tokens: &[String]) -> String {
         }
         None => words.iter().take(12).copied().collect::<Vec<_>>().join(" "),
     }
+}
+
+// ---- workspace fan-out (M5, design.md §9) ----------------------------------
+
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use crate::workspace::{PackageHandle, Workspace, resolver};
+
+/// A search hit located in a workspace member. `hit.id` is qualified (`@pkg/…`) exactly
+/// when the member is not the run-root package.
+pub struct WsHit {
+    pub package: Option<String>,
+    /// The member's canonical root (for consumer-relative display paths).
+    pub root: PathBuf,
+    pub hit: SearchHit,
+}
+
+/// A suggestion located in a workspace member (same conventions as [`WsHit`]).
+pub struct WsSuggestion {
+    pub package: Option<String>,
+    pub root: PathBuf,
+    pub suggestion: Suggestion,
+}
+
+/// Which members a fan-out read consults, plus the dependencies it could not
+/// (unlinked / broken / no index) — surfaced, never silently dropped.
+///
+/// Routing: an `@pkg/…` `--scope` selects exactly that member; `--local` restricts to
+/// the run-root; otherwise the run-root + its whole locatable closure.
+fn members_for(
+    ws: &Workspace,
+    scope_pkg: Option<&str>,
+    local: bool,
+) -> Result<(Vec<Rc<PackageHandle>>, Vec<String>)> {
+    let current = ws.current();
+    if let Some(alias) = scope_pkg {
+        let member = resolver::step_into(ws, &current, alias)?;
+        return Ok((vec![member], Vec::new()));
+    }
+    if local {
+        return Ok((vec![current], Vec::new()));
+    }
+    let mut members = vec![current];
+    let mut skipped = Vec::new();
+    for (id, entry) in ws.closure() {
+        match entry {
+            Ok(handle) => members.push(handle),
+            Err(_) => skipped.push(id.to_string()),
+        }
+    }
+    members.sort_by(|a, b| a.root.cmp(&b.root));
+    members.dedup_by(|a, b| a.root == b.root);
+    Ok((members, skipped))
+}
+
+/// [`search`] across the run-root + its dependency closure: the query is embedded ONCE,
+/// each member runs the same three passes against its own index (scores are cross-index
+/// comparable: Rust term-frequency FTS re-score, absolute cosine, db-independent alias
+/// scoring), per-member results carry the per-member LIMIT, and the merge re-ranks by
+/// (score desc, qualified id asc) before the global limit. A member whose index is
+/// unavailable is skipped and surfaced — except the run-root, whose failure is the
+/// classic local error.
+pub fn search_workspace(
+    ws: &Workspace,
+    embedder: &dyn Embedder,
+    query: &str,
+    opts: &SearchOpts,
+    local: bool,
+) -> Result<(Vec<WsHit>, Vec<String>)> {
+    let scope_pkg = opts
+        .scope
+        .as_ref()
+        .and_then(|s| s.package())
+        .map(str::to_string);
+    let (members, mut skipped) = members_for(ws, scope_pkg.as_deref(), local)?;
+    let current_root = ws.current().root.clone();
+
+    let qvec = embed_query(embedder, query)?;
+    // The member-local view of --scope: the container id without its @pkg/ qualifier
+    // (scope edges store bare within-package targets).
+    let member_opts = SearchOpts {
+        type_filter: opts.type_filter.clone(),
+        scope: opts.scope.as_ref().map(|s| {
+            let mut bare = s.clone();
+            bare.package = None;
+            bare
+        }),
+        limit: opts.limit,
+        scope_field: opts.scope_field.clone(),
+    };
+
+    let mut all: Vec<WsHit> = Vec::new();
+    for member in members {
+        let is_run_root = member.root == current_root;
+        let index = match member.index() {
+            Ok(index) => index,
+            Err(e) if is_run_root => return Err(e),
+            Err(e) if scope_pkg.is_some() => return Err(e), // the one member asked for
+            Err(_) => {
+                skipped.push(member.id.to_string());
+                continue;
+            }
+        };
+        for mut hit in search_prepared(index, qvec.as_deref(), query, &member_opts)? {
+            if !is_run_root {
+                hit.id = hit.id.with_package(member.id.0.clone());
+            }
+            all.push(WsHit {
+                package: (!is_run_root).then(|| member.id.to_string()),
+                root: member.root.clone(),
+                hit,
+            });
+        }
+    }
+
+    all.sort_by(|x, y| {
+        y.hit
+            .score
+            .partial_cmp(&x.hit.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| x.hit.id.cmp(&y.hit.id))
+    });
+    all.truncate(opts.limit.unwrap_or(10));
+    skipped.sort();
+    skipped.dedup();
+    Ok((all, skipped))
+}
+
+/// [`suggest`] across the run-root + its dependency closure (same member routing and
+/// merge discipline as [`search_workspace`]; no vectors, so nothing to share).
+pub fn suggest_workspace(
+    ws: &Workspace,
+    descriptor: &str,
+    type_filter: Option<&NodeType>,
+    limit: usize,
+    local: bool,
+) -> Result<(Vec<WsSuggestion>, Vec<String>)> {
+    let (members, mut skipped) = members_for(ws, None, local)?;
+    let current_root = ws.current().root.clone();
+
+    let mut all: Vec<WsSuggestion> = Vec::new();
+    for member in members {
+        let is_run_root = member.root == current_root;
+        let index = match member.index() {
+            Ok(index) => index,
+            Err(e) if is_run_root => return Err(e),
+            Err(_) => {
+                skipped.push(member.id.to_string());
+                continue;
+            }
+        };
+        for mut suggestion in suggest(index, descriptor, type_filter, limit)? {
+            if !is_run_root {
+                suggestion.id = suggestion.id.with_package(member.id.0.clone());
+            }
+            all.push(WsSuggestion {
+                package: (!is_run_root).then(|| member.id.to_string()),
+                root: member.root.clone(),
+                suggestion,
+            });
+        }
+    }
+
+    all.sort_by(|a, b| {
+        b.suggestion
+            .score
+            .partial_cmp(&a.suggestion.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.suggestion.id.cmp(&b.suggestion.id))
+    });
+    all.truncate(limit);
+    skipped.sort();
+    skipped.dedup();
+    Ok((all, skipped))
 }

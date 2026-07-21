@@ -220,7 +220,7 @@ Hybrid full-text + vector search over the corpus. Returns files (the file is the
 unit) with the matching section anchors.
 
 ```
-vaire search <query> [--type <T>] [--scope <project-id>] [--limit <N>] [--json]
+vaire search <query> [--type <T>] [--scope <container-id>] [--limit <N>] [--local] [--json]
 ```
 
 - `--type <T>` — restrict to nodes of a type.
@@ -228,10 +228,18 @@ vaire search <query> [--type <T>] [--scope <project-id>] [--limit <N>] [--json]
   configured `scope_field`, default `scope`, §6.1). With `--scope`, every result is in that
   scope, so result `id`s are shown **scope-relative** — the node's own `type:id`, with the
   prefix omitted. Without `--scope`, scoped nodes show their full `<scope>/type:id`. (`path`
-  is always the full repo-relative path.)
+  is always the full package-root-relative path.)
 - `--limit <N>` — max results (default: `10`).
 - Ranking: FTS + aliases first, vectors for recall (design.md §9). Sorted by descending
-  score; ties broken by `id` ascending for determinism.
+  score; ties broken by (qualified) `id` ascending for determinism.
+- **Cross-package** (§6.5): the query runs over this package **and its linked dependency
+  closure** — that is the selective-consumption payoff: what you depend on is part of
+  your knowledge. The query is embedded once and reused per member; a dependency indexed
+  with different embedding dimensions contributes FTS/alias hits only (vector recall
+  silently absent for it — `status` surfaces the mismatch). `--local` restricts to this
+  package; `--scope @pkg/container` searches inside a dependency's container.
+  Cross-package hits carry `package` in JSON; unavailable dependencies are listed in
+  `skipped`.
 
 JSON:
 
@@ -339,14 +347,18 @@ turn a prose mention into an ID (then write `[[type:id]]`), or to confirm nothin
 (then write `[[?type: descriptor]]`).
 
 ```
-vaire suggest <descriptor> [--type <T>] [--limit <N>] [--json]
+vaire suggest <descriptor> [--type <T>] [--limit <N>] [--local] [--json]
 ```
 
 - Matches the descriptor against each node's `name`/`aliases` first (high precision), with
   prose full-text as a backup; no vectors (bare embeddings are weak for short descriptors,
   design.md §9). `--type <T>` restricts candidates to a type (the §8 type-gate). `--limit`
   default `5`.
-- Sorted by descending score; ties broken by `id` ascending.
+- Sorted by descending score; ties broken by (qualified) `id` ascending.
+- **Cross-package** (§6.5): candidates come from this package and its linked dependency
+  closure — a dependency hit arrives pre-qualified (`@pkg/type:id`), ready to paste as a
+  reference. `--local` restricts to this package; unavailable dependencies are listed in
+  `skipped`.
 
 JSON:
 

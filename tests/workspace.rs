@@ -390,6 +390,120 @@ fn backlinks_limit_applies_after_the_merge() {
     assert_eq!(one.backlinks[0].id, all.backlinks[0].id);
 }
 
+// ---- search / suggest across packages (M5b) ---------------------------------
+
+#[test]
+fn search_covers_the_dependency_closure() {
+    // "What you depend on is part of your knowledge": a query from acme-web finds
+    // acme-core's platform team, qualified and package-tagged.
+    let ws = Ws::acceptance();
+    let out = commands::search::run(&ws.ctx("acme-web"), "platform", None, None, Some(10), false)
+        .unwrap();
+    let hit = out
+        .results
+        .iter()
+        .find(|r| r.id == "@acme-core/team:platform")
+        .unwrap_or_else(|| {
+            panic!(
+                "dep hit expected: {:?}",
+                out.results.iter().map(|r| &r.id).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(hit.package.as_deref(), Some("acme-core"));
+    assert_eq!(hit.path, "knowledge/platform.md");
+    assert!(out.skipped.is_empty());
+}
+
+#[test]
+fn search_local_restricts_to_this_package() {
+    let ws = Ws::acceptance();
+    let out =
+        commands::search::run(&ws.ctx("acme-web"), "platform", None, None, Some(10), true).unwrap();
+    assert!(
+        out.results.iter().all(|r| r.package.is_none()),
+        "{:?}",
+        out.results.iter().map(|r| &r.id).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn search_ranking_is_deterministic_across_members() {
+    // Same query twice → identical ordering (score desc, qualified id asc ties).
+    let ws = Ws::acceptance();
+    let ids = |o: &vaire::output::SearchOutput| {
+        o.results.iter().map(|r| r.id.clone()).collect::<Vec<_>>()
+    };
+    let a = commands::search::run(
+        &ws.ctx("acme-web"),
+        "checkout team",
+        None,
+        None,
+        Some(10),
+        false,
+    )
+    .unwrap();
+    let b = commands::search::run(
+        &ws.ctx("acme-web"),
+        "checkout team",
+        None,
+        None,
+        Some(10),
+        false,
+    )
+    .unwrap();
+    assert_eq!(ids(&a), ids(&b));
+    assert!(!a.results.is_empty());
+}
+
+#[test]
+fn search_skips_and_surfaces_unavailable_dependency() {
+    let ws = Ws::acceptance();
+    std::fs::remove_file(ws.root("acme-shared").join(".vaire/index.db")).unwrap();
+    let out = commands::search::run(
+        &ws.ctx("acme-web"),
+        "headquarters",
+        None,
+        None,
+        Some(10),
+        false,
+    )
+    .unwrap();
+    assert!(
+        out.skipped.contains(&"acme-shared".to_string()),
+        "{:?}",
+        out.skipped
+    );
+    assert!(
+        !out.results.iter().any(|r| r.id.contains("acme-shared")),
+        "no hits from the skipped member"
+    );
+}
+
+#[test]
+fn suggest_returns_pre_qualified_dep_ids() {
+    // The lookup-before-reference flow across packages: the suggestion is ready to
+    // paste as [[@acme-core/person:jane-doe]].
+    let ws = Ws::acceptance();
+    let out =
+        commands::suggest::run(&ws.ctx("acme-web"), "jane doe", None, Some(5), false).unwrap();
+    let hit = out
+        .suggestions
+        .iter()
+        .find(|s| s.id == "@acme-core/person:jane-doe")
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                out.suggestions.iter().map(|s| &s.id).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(hit.package.as_deref(), Some("acme-core"));
+
+    // --local: dep suggestions disappear.
+    let local =
+        commands::suggest::run(&ws.ctx("acme-web"), "jane doe", None, Some(5), true).unwrap();
+    assert!(local.suggestions.iter().all(|s| s.package.is_none()));
+}
+
 // ---- per-consumer link precedence (the reason for the npm model) ------------
 
 /// The diamond: acme-app (run-root) depends on acme-mid and acme-shared; TWO directories

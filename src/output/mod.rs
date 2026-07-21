@@ -190,7 +190,7 @@ impl Output for SearchOutput {
                 "  {}  {}  {}\n",
                 dim(&format!("{:.2}", r.score)),
                 cyan(&r.id),
-                dim(&r.path),
+                dim(r.display_path.as_deref().unwrap_or(&r.path)),
             ));
             for a in &r.anchors {
                 out.push_str(&format!(
@@ -200,7 +200,9 @@ impl Output for SearchOutput {
                 ));
             }
         }
-        out.trim_end().to_string()
+        let mut out = out.trim_end().to_string();
+        out.push_str(&skipped_note(&self.skipped));
+        out
     }
 }
 
@@ -615,6 +617,9 @@ pub struct SearchOutput {
     pub query: String,
     pub results: Vec<SearchResult>,
     pub count: usize,
+    /// Dependencies that could not be consulted — surfaced, never silently dropped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -622,9 +627,16 @@ pub struct SearchResult {
     pub id: String,
     #[serde(rename = "type")]
     pub node_type: String,
+    /// Package-root-relative — stable across workspace and future cache layouts.
     pub path: String,
+    /// The owning package for a cross-package hit; absent/null = the current package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     pub score: f32,
     pub anchors: Vec<AnchorOut>,
+    /// Human display only: clickable consumer-relative path for a cross-package hit.
+    #[serde(skip)]
+    pub display_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -642,6 +654,9 @@ pub struct SuggestOutput {
     pub descriptor: String,
     pub suggestions: Vec<SuggestionItem>,
     pub count: usize,
+    /// Dependencies that could not be consulted — surfaced, never silently dropped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -650,8 +665,15 @@ pub struct SuggestionItem {
     #[serde(rename = "type")]
     pub node_type: String,
     pub name: String,
+    /// Package-root-relative — stable across workspace and future cache layouts.
     pub path: String,
+    /// The owning package for a cross-package suggestion; absent/null = local.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     pub score: f32,
+    /// Human display only: clickable consumer-relative path for a cross-package hit.
+    #[serde(skip)]
+    pub display_path: Option<String>,
 }
 
 impl Output for SuggestOutput {
@@ -671,10 +693,12 @@ impl Output for SuggestOutput {
                 dim(&format!("{:.2}", s.score)),
                 cyan(&format!("{:<w$}", s.id)),
                 s.name,
-                dim(&s.path),
+                dim(s.display_path.as_deref().unwrap_or(&s.path)),
             ));
         }
-        out.trim_end().to_string()
+        let mut out = out.trim_end().to_string();
+        out.push_str(&skipped_note(&self.skipped));
+        out
     }
 }
 
