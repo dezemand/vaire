@@ -1,6 +1,6 @@
 ---
 name: vaire-query-mcp
-description: How to query a Vairë reference-graph index through its STDIO MCP server, started with `vaire mcp`. The server exposes the read tools resolve, render, backlinks, refs, search, and unresolved; their results are the CLI `--json` shapes verbatim. Use this when an agent should query a Vairë knowledge corpus via MCP tools rather than shelling out — registering/starting the server, calling the tools with the right arguments (including scoped record IDs like `container-id/type:local`), and interpreting their JSON results and errors.
+description: How to query a Vairë reference-graph index through its STDIO MCP server, started with `vaire mcp`. The server exposes the read tools resolve, render, backlinks, refs, search, suggest, unresolved, and deps; their results are the CLI `--json` shapes verbatim. Use this when an agent should query a Vairë knowledge corpus via MCP tools rather than shelling out — registering/starting the server, calling the tools with the right arguments (including scoped record IDs like `container-id/type:local`), and interpreting their JSON results and errors.
 metadata:
   project: vaire
 ---
@@ -42,17 +42,23 @@ claude mcp add vaire -- vaire mcp --repo /path/to/corpus
 ## Tools
 
 Maintenance commands (`init`, `index`, `check`, `status`) are **not** exposed — the
-agent-facing surface is bounded to reads. The six tools and their arguments:
+agent-facing surface is bounded to reads. The eight tools and their arguments:
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `resolve` | `id` (required) | Node location + frontmatter; follows `superseded_by`. |
+| `resolve` | `id` (required) | Node location + frontmatter; follows `superseded_by` (which may hop packages). |
 | `render` | `id` (required) | The node as portable Markdown (frontmatter kept, links resolved). |
-| `backlinks` | `id` (required), `type`, `limit` | Nodes referencing `id` (inbound edges). |
-| `refs` | `id` (required), `depth`, `type` | Nodes `id` references (outbound edges); `depth>1` traverses. |
-| `search` | `query` (required), `type`, `scope`, `limit` | Hybrid full-text + vector search; files with section anchors. |
-| `suggest` | `descriptor` (required), `type`, `limit` | Ranked existing IDs a descriptor might be (name/aliases first). Lookup-before-reference. |
-| `unresolved` | `type`, `scope` | Every `[[?...]]` loose end in the corpus. |
+| `backlinks` | `id` (required), `type`, `limit` | Nodes referencing `id` (inbound edges, gathered across linked dependencies). |
+| `refs` | `id` (required), `depth`, `type` | Nodes `id` references (outbound edges); `depth>1` traverses, crossing package boundaries. |
+| `search` | `query` (required), `type`, `scope`, `limit`, `local` | Hybrid full-text + vector search over the package and its linked dependencies; files with section anchors. |
+| `suggest` | `descriptor` (required), `type`, `limit`, `local` | Ranked existing IDs a descriptor might be (name/aliases first); dependency hits arrive pre-qualified (`@pkg/type:id`). |
+| `unresolved` | `type`, `scope`, `all_packages` | Every `[[?...]]` loose end — this package's worklist by default. |
+| `deps` | — | The resolved linked-dependency tree (no index needed). |
+
+Cross-package ids carry an `@<package>/` qualifier (`@acme-core/team:platform`) and are
+accepted wherever an `id` is; cross-package results include a `package` field (`path`
+stays package-root-relative). Fan-out reads list unavailable dependencies under
+`skipped` — never silently dropped.
 
 `id` is the node's address: global nodes are `type:id` (`person:jane-doe`), while
 **scoped** nodes (any node carrying a `scope:`) are a path —

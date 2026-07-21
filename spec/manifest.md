@@ -110,16 +110,19 @@ in place, preserving your formatting and comments (cli.md §4.2a). Dependency *r
 concern layered on top of this file; the manifest only declares the constraints.
 
 A reference to another package is written `@<name>/<type>:<id>` (design.md §6) and must name
-a declared dependency. `vaire check` enforces the manifest side of this today:
+a declared dependency, linked at `.vaire/packages/<name>` (cli.md §6.5). `vaire check`
+enforces the full set (packages.md §8):
 
 | finding | severity | when |
 |---|---|---|
 | **undeclared import** | error | an `@pkg/…` reference whose package is not in `[dependencies]` (a pure table check — no resolution needed) |
+| **dangling cross-package** | error | a declared, linked `@pkg/…` reference whose target — after tombstone-following in the owning package — does not exist |
+| **missing dependency** | error | a declared dependency that is unavailable (not linked / broken link / name mismatch); once per name, with the fix |
 | undeclared type | warning | a value matching the reference grammar whose `type` is not in `types` (quote it, or declare the type) |
+| unused dependency | warning | declared in `[dependencies]` but never referenced |
+| version mismatch | warning | a linked dependency whose MAJOR falls outside the `^N` constraint — surfaced only; *enforcement* is v0.3 |
 
-The findings that need actual cross-package *resolution* — a declared dependency that
-resolves to nothing (dangling), a declared-but-unreferenced dependency (unused) — are layered
-on top once workspace resolution lands.
+`vaire deps` (cli.md §3.8) prints the resolved tree these constraints declare.
 
 ## 6. Machine and consumer settings are not here
 
