@@ -425,10 +425,15 @@ JSON:
 ```
 
 `kind` is one of `duplicate_id`, `dangling_ref` (violations), `drift`, `orphan`,
-`frontmatter_wikilink`, `unknown_type` (warnings). `unknown_type` flags a reference-shaped
-frontmatter value (`field: team:alpha`) whose type isn't in `types` — it was *ignored*
-rather than made an edge, so the warning surfaces the silent drop (usually a type you forgot
-to list). A colon in a non-reference value (a title, `summary: "TODO: …"`) is not flagged.
+`frontmatter_wikilink`, `unknown_type`, `unreferenceable_id`, `scoped_type_not_permitted`
+(warnings). `unknown_type` flags a frontmatter value that matches the reference `target`
+grammar (`field: team:alpha`) whose type isn't in `types` — it was *ignored* rather than
+made an edge, so the warning surfaces the silent drop (declare the type, or quote the value
+as a string). Identification is by shape (design.md §6), so a URL, a time, or a colon in a
+non-reference value (`url: https://…`, `summary: "TODO: …"`) is structurally not a
+reference and is never flagged. `unreferenceable_id` flags a node whose *declared* id or
+scope falls outside the target grammar (`id: Jane_Doe`) — the file still indexes (files are
+truth), but no reference can ever address it, so the trap is surfaced instead of silent.
 
 ### 4.3 `vaire status`
 
@@ -547,10 +552,11 @@ include = ["knowledge/**/*.md", "projects/**/*.md"]
 exclude = ["**/node_modules/**", "**/drafts/**", "**/archive/**"]
 
 # Type vocabulary — the `type:` field / ID prefix in `type:id`. The types this package
-# defines. Load-bearing for *reference detection*: a frontmatter value is only treated as a
-# `type:id` edge when its type is listed here, so a colon inside a non-reference value (a
-# title, a note) is not mistaken for a reference. `vaire check` warns (unknown_type) on a
-# reference-shaped value with an unlisted type.
+# defines. Load-bearing for *classification* (design.md §6): a frontmatter value that
+# matches the reference target grammar becomes an edge only when its type is listed here;
+# a matching value with an unlisted type is surfaced by `vaire check` (unknown_type).
+# Identification is by shape, not by this list — URLs, titles, and notes are structurally
+# not references and are left alone.
 types = ["person", "department", "method", "system", "event", "record", "project"]
 vocabulary_strict = false
 
@@ -625,16 +631,23 @@ segments) leaves room for deeper containers later.
 ### 6.2 Frontmatter references (and the `[[ ]]` trap)
 
 Frontmatter references are **bare** — the `[[ ]]` brackets are an inline-prose convention,
-not a frontmatter one. A frontmatter field value is interpreted as:
+not a frontmatter one. A frontmatter field value is interpreted in **two steps**
+(design.md §6): *identification* — does the value match the reference `target` grammar? —
+which is purely syntactic and config-free, then *classification* against the manifest
+`types`:
 
-- a composed `type:id` **whose type is in `types`** → a resolved **edge** keyed by
-  the field (`org: department:platform`, `head: person:jane-doe`). A value whose prefix is
-  not a configured type is left alone, so a colon in a title or note isn't mistaken for a
-  reference. (`name` and `aliases` are display fields and are never scanned for references.)
+- a value matching `target` whose type is in `types` → a resolved **edge** keyed by the
+  field (`org: department:platform`, `head: person:jane-doe`).
+- a value matching `target` whose type is **not** in `types` → **no edge**, and
+  `vaire check` warns (`unknown_type`) — the ambiguity is surfaced, never silently
+  swallowed: quote the value as a string, or declare the type.
+- a value that does not match `target` → a plain scalar, full stop. The strict charset
+  means URLs, emails, times, and dates (`url: https://…`, `summary: "TODO: …"`) are
+  structurally not references — no config consulted. (`name` and `aliases` are display
+  fields and are never scanned for references.)
 - `"?type: descriptor"` / `"?: descriptor"` → an **unresolved** loose end (§6), surfaced by
   `vaire unresolved` — quote it because of the leading `?`. This lets a structured field
   name something not yet created: `head: "?person: someone senior"`. It is *not* an edge.
-- anything else → ignored.
 
 **The trap:** writing an inline-style `[[ ]]` in frontmatter (`head: [[?person: Foo]]`) is
 a natural muscle-memory mistake. Unquoted, YAML parses it to nested junk (a silent no-op);
