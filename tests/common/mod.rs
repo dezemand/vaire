@@ -373,7 +373,7 @@ impl Ws {
             .add_file(
                 "acme-core",
                 "knowledge/platform.md",
-                "---\nid: platform\ntype: team\nname: Platform Team\nflagship: \"@acme-web/service:checkout\"\n---\n# Platform Team\n\nLed by [[person:jane-doe]]. Ships [[@acme-web/service:checkout]].\n",
+                "---\nid: platform\ntype: team\nname: Platform Team\nflagship: \"@acme-web/service:checkout\"\n---\n# Platform Team\n\nLed by [[person:jane-doe]]. Ships [[@acme-web/service:checkout]].\n\nContact [[?person: the incident manager]].\n",
             )
             .add_file(
                 "acme-core",
@@ -398,7 +398,7 @@ impl Ws {
         .add_file(
             "acme-web",
             "knowledge/checkout.md",
-            "---\nid: checkout\ntype: service\nname: Checkout\nowner: \"@acme-core/team:platform\"\nsite: \"@acme-shared/site:hq\"\nwiki: \"@acme-shared/wiki:home\"\n---\n# Checkout\n\nOwned by [[@acme-core/team:platform]] at [[@acme-shared/site:hq|HQ]].\n",
+            "---\nid: checkout\ntype: service\nname: Checkout\nowner: \"@acme-core/team:platform\"\nsite: \"@acme-shared/site:hq\"\nwiki: \"@acme-shared/wiki:home\"\n---\n# Checkout\n\nOwned by [[@acme-core/team:platform]] at [[@acme-shared/site:hq|HQ]].\n\nEscalation: [[?person: the on-call lead]].\n",
         )
         .add_file(
             "acme-web",

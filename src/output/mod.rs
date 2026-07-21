@@ -112,7 +112,11 @@ impl Output for ResolveOutput {
 impl Output for BacklinksOutput {
     fn render_human(&self) -> String {
         if self.backlinks.is_empty() {
-            return dim(&format!("no nodes reference {}", self.id));
+            return format!(
+                "{}{}",
+                dim(&format!("no nodes reference {}", self.id)),
+                skipped_note(&self.skipped)
+            );
         }
         let mut out = format!(
             "{} reference {}\n",
@@ -125,17 +129,23 @@ impl Output for BacklinksOutput {
                 "  {}  {}  {}\n",
                 cyan(&format!("{:<w$}", b.id)),
                 dim(&format!("{:<12}", b.ref_type)),
-                loc(&b.path, b.line),
+                loc(b.human_path(), b.line),
             ));
         }
-        out.trim_end().to_string()
+        let mut out = out.trim_end().to_string();
+        out.push_str(&skipped_note(&self.skipped));
+        out
     }
 }
 
 impl Output for RefsOutput {
     fn render_human(&self) -> String {
         if self.refs.is_empty() {
-            return dim(&format!("{} references nothing", self.id));
+            return format!(
+                "{}{}",
+                dim(&format!("{} references nothing", self.id)),
+                skipped_note(&self.skipped)
+            );
         }
         let mut out = format!(
             "{} → {} (depth {})\n",
@@ -156,17 +166,23 @@ impl Output for RefsOutput {
                 prefix,
                 cyan(&format!("{:<w$}", r.id)),
                 dim(&format!("{:<12}", r.ref_type)),
-                loc(&r.path, r.line),
+                loc(r.human_path(), r.line),
             ));
         }
-        out.trim_end().to_string()
+        let mut out = out.trim_end().to_string();
+        out.push_str(&skipped_note(&self.skipped));
+        out
     }
 }
 
 impl Output for SearchOutput {
     fn render_human(&self) -> String {
         if self.results.is_empty() {
-            return dim(&format!("no results for \"{}\"", self.query));
+            return format!(
+                "{}{}",
+                dim(&format!("no results for \"{}\"", self.query)),
+                skipped_note(&self.skipped)
+            );
         }
         let mut out = format!(
             "{} for {}\n",
@@ -178,7 +194,7 @@ impl Output for SearchOutput {
                 "  {}  {}  {}\n",
                 dim(&format!("{:.2}", r.score)),
                 cyan(&r.id),
-                dim(&r.path),
+                dim(r.display_path.as_deref().unwrap_or(&r.path)),
             ));
             for a in &r.anchors {
                 out.push_str(&format!(
@@ -188,14 +204,20 @@ impl Output for SearchOutput {
                 ));
             }
         }
-        out.trim_end().to_string()
+        let mut out = out.trim_end().to_string();
+        out.push_str(&skipped_note(&self.skipped));
+        out
     }
 }
 
 impl Output for UnresolvedOutput {
     fn render_human(&self) -> String {
         if self.unresolved.is_empty() {
-            return dim("no unresolved references");
+            return format!(
+                "{}{}",
+                dim("no unresolved references"),
+                skipped_note(&self.skipped)
+            );
         }
         let mut out = format!("{}\n", pluralize(self.count, "unresolved reference"));
         let tags: Vec<String> = self
@@ -217,11 +239,13 @@ impl Output for UnresolvedOutput {
             out.push_str(&format!(
                 "  {}  {desc:<dw$}  {}  {}\n",
                 yellow(&format!("{:<w$}", tag)),
-                loc(&u.path, u.line),
+                loc(u.display_path.as_deref().unwrap_or(&u.path), u.line),
                 dim(&format!("({})", u.record)),
             ));
         }
-        out.trim_end().to_string()
+        let mut out = out.trim_end().to_string();
+        out.push_str(&skipped_note(&self.skipped));
+        out
     }
 }
 
@@ -276,6 +300,57 @@ impl Output for StatusOutput {
                 self.embeddings.cached, self.embeddings.sections
             ),
         );
+        if !self.dependencies.is_empty() {
+            out.push_str("dependencies:\n");
+            let w = col_width(self.dependencies.iter().map(|d| d.name.as_str()));
+            for d in &self.dependencies {
+                if !d.linked || d.index == "missing" || d.index == "unreadable" {
+                    // Unavailable in some way: name + state + the note/fix.
+                    let detail = d.note.as_deref().unwrap_or("no index — run `vaire index`");
+                    out.push_str(&format!(
+                        "  {}  {}\n",
+                        cyan(&format!("{:<w$}", d.name)),
+                        yellow(&format!("{} — {detail}", d.index)),
+                    ));
+                    continue;
+                }
+                let commit = match &d.last_indexed_commit {
+                    Some(c) => {
+                        let short = &c[..c.len().min(7)];
+                        if d.commits_behind_head == 0 {
+                            format!("{short} {}", dim("(up to date)"))
+                        } else {
+                            format!(
+                                "{short} {}",
+                                yellow(&format!("({} behind)", d.commits_behind_head))
+                            )
+                        }
+                    }
+                    None => dim("working tree").to_string(),
+                };
+                let mut line = format!(
+                    "  {}  {}  {}  {}",
+                    cyan(&format!("{:<w$}", d.name)),
+                    d.index,
+                    pluralize(d.nodes, "node"),
+                    commit,
+                );
+                // The observability point for silent vector-recall gaps: a dep embedded
+                // by a different provider contributes FTS/alias hits only.
+                if let (Some(theirs), Some(ours)) = (&d.embed_provider, &self.embed_provider)
+                    && theirs != ours
+                {
+                    line.push_str(&format!(
+                        "  {}",
+                        yellow(&format!(
+                            "vectors {theirs} vs yours {ours} — vector search skipped"
+                        ))
+                    ));
+                }
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
         out.trim_end().to_string()
     }
 }
@@ -535,6 +610,10 @@ pub struct BacklinksOutput {
     pub id: String,
     pub backlinks: Vec<EdgeRef>,
     pub count: usize,
+    /// Dependencies that could not be consulted (unlinked / broken / no index) —
+    /// surfaced, never silently dropped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -542,12 +621,41 @@ pub struct EdgeRef {
     pub id: String,
     #[serde(rename = "type")]
     pub node_type: String,
+    /// Package-root-relative — stable across workspace and future cache layouts.
     pub path: String,
+    /// The owning package for a cross-package row; absent/null = the current package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     pub ref_type: String,
     pub line: u32,
     /// Present on `refs` output (distance from the query node); omitted on backlinks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distance: Option<u32>,
+    /// Human display only: clickable consumer-relative path for a cross-package row.
+    #[serde(skip)]
+    pub display_path: Option<String>,
+}
+
+impl EdgeRef {
+    /// The path as shown to a human: clickable consumer-relative when cross-package.
+    fn human_path(&self) -> &str {
+        self.display_path.as_deref().unwrap_or(&self.path)
+    }
+}
+
+/// The shared "skipped dependencies" trailer for fan-out reads.
+fn skipped_note(skipped: &[String]) -> String {
+    if skipped.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n{}",
+            yellow(&format!(
+                "  note: skipped unavailable dependencies: {} (run `vaire index`)",
+                skipped.join(", ")
+            ))
+        )
+    }
 }
 
 // ---- refs (cli.md §3.3) ----------------------------------------------------
@@ -558,6 +666,9 @@ pub struct RefsOutput {
     pub depth: u32,
     pub refs: Vec<EdgeRef>,
     pub count: usize,
+    /// Dependencies that could not be consulted — surfaced, never silently dropped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 // ---- search (cli.md §3.4) --------------------------------------------------
@@ -567,6 +678,9 @@ pub struct SearchOutput {
     pub query: String,
     pub results: Vec<SearchResult>,
     pub count: usize,
+    /// Dependencies that could not be consulted — surfaced, never silently dropped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -574,9 +688,16 @@ pub struct SearchResult {
     pub id: String,
     #[serde(rename = "type")]
     pub node_type: String,
+    /// Package-root-relative — stable across workspace and future cache layouts.
     pub path: String,
+    /// The owning package for a cross-package hit; absent/null = the current package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     pub score: f32,
     pub anchors: Vec<AnchorOut>,
+    /// Human display only: clickable consumer-relative path for a cross-package hit.
+    #[serde(skip)]
+    pub display_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -594,6 +715,9 @@ pub struct SuggestOutput {
     pub descriptor: String,
     pub suggestions: Vec<SuggestionItem>,
     pub count: usize,
+    /// Dependencies that could not be consulted — surfaced, never silently dropped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -602,14 +726,25 @@ pub struct SuggestionItem {
     #[serde(rename = "type")]
     pub node_type: String,
     pub name: String,
+    /// Package-root-relative — stable across workspace and future cache layouts.
     pub path: String,
+    /// The owning package for a cross-package suggestion; absent/null = local.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     pub score: f32,
+    /// Human display only: clickable consumer-relative path for a cross-package hit.
+    #[serde(skip)]
+    pub display_path: Option<String>,
 }
 
 impl Output for SuggestOutput {
     fn render_human(&self) -> String {
         if self.suggestions.is_empty() {
-            return dim(&format!("no suggestions for \"{}\"", self.descriptor));
+            return format!(
+                "{}{}",
+                dim(&format!("no suggestions for \"{}\"", self.descriptor)),
+                skipped_note(&self.skipped)
+            );
         }
         let mut out = format!(
             "{} for {}\n",
@@ -623,10 +758,12 @@ impl Output for SuggestOutput {
                 dim(&format!("{:.2}", s.score)),
                 cyan(&format!("{:<w$}", s.id)),
                 s.name,
-                dim(&s.path),
+                dim(s.display_path.as_deref().unwrap_or(&s.path)),
             ));
         }
-        out.trim_end().to_string()
+        let mut out = out.trim_end().to_string();
+        out.push_str(&skipped_note(&self.skipped));
+        out
     }
 }
 
@@ -636,15 +773,26 @@ impl Output for SuggestOutput {
 pub struct UnresolvedOutput {
     pub unresolved: Vec<UnresolvedItem>,
     pub count: usize,
+    /// Dependencies that could not be consulted (`--all-packages` only) — surfaced,
+    /// never silently dropped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct UnresolvedItem {
     pub record: String,
+    /// Package-root-relative — stable across workspace and future cache layouts.
     pub path: String,
+    /// The owning package (`--all-packages` rows); absent/null = the current package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     pub type_guess: Option<String>,
     pub descriptor: String,
     pub line: u32,
+    /// Human display only: clickable consumer-relative path for a cross-package row.
+    #[serde(skip)]
+    pub display_path: Option<String>,
 }
 
 // ---- status (cli.md §4.3) --------------------------------------------------
@@ -662,6 +810,34 @@ pub struct StatusOutput {
     pub nodes: NodeCounts,
     pub edges: usize,
     pub embeddings: EmbeddingCounts,
+    /// Which embedder produced this index's vectors (`provider[:model]:dims`), or null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embed_provider: Option<String>,
+    /// One row per linked dependency (transitive closure); empty for a standalone package.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<DepStatus>,
+}
+
+/// One linked dependency's state as reported by `vaire status` (cli.md §4.3).
+#[derive(Debug, Serialize)]
+pub struct DepStatus {
+    pub name: String,
+    pub linked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_indexed_commit: Option<String>,
+    pub commits_behind_head: u32,
+    pub nodes: usize,
+    /// `"fresh"`, `"stale-schema"`, `"missing"`, or `"unreadable"`.
+    pub index: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embed_provider: Option<String>,
+    /// Why the dependency is unavailable, when it is (with the fix).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

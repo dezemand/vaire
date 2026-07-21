@@ -121,7 +121,7 @@ fn search_shows_full_ids_unscoped_and_local_ids_under_scope() {
     let c = two_project_corpus();
 
     // No --scope: scoped results carry their full `<scope>/type:id`.
-    let unscoped = commands::search::run(&c.ctx(), "standup", None, None, Some(10)).unwrap();
+    let unscoped = commands::search::run(&c.ctx(), "standup", None, None, Some(10), false).unwrap();
     assert!(
         unscoped
             .results
@@ -136,6 +136,7 @@ fn search_shows_full_ids_unscoped_and_local_ids_under_scope() {
         None,
         Some("project:atlas-2026-q2"),
         Some(10),
+        false,
     )
     .unwrap();
     assert!(scoped.results.iter().any(|r| r.id == "record:standup"));

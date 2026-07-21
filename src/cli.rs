@@ -75,17 +75,21 @@ pub enum Command {
         type_filter: Option<String>,
     },
 
-    /// Hybrid full-text + vector search over the corpus.
+    /// Hybrid full-text + vector search over the corpus and its linked dependencies.
     Search {
         query: String,
         #[arg(long = "type")]
         type_filter: Option<String>,
-        /// Restrict to records in a project (matches the `project:` field).
+        /// Restrict to records in a container (`project:atlas`, or `@pkg/project:atlas`
+        /// to search inside a dependency's container).
         #[arg(long)]
         scope: Option<String>,
         /// Max results (default: 10).
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// Search only this package (skip linked dependencies).
+        #[arg(long)]
+        local: bool,
     },
 
     /// Suggest existing node IDs a descriptor might refer to (lookup-before-reference).
@@ -96,6 +100,9 @@ pub enum Command {
         /// Max suggestions (default: 5).
         #[arg(long, default_value_t = 5)]
         limit: usize,
+        /// Suggest only from this package (skip linked dependencies).
+        #[arg(long)]
+        local: bool,
     },
 
     /// Every unresolved reference ([[?...]]) currently in the corpus.
@@ -104,6 +111,10 @@ pub enum Command {
         type_filter: Option<String>,
         #[arg(long)]
         scope: Option<String>,
+        /// Also list linked dependencies' loose ends (default: this package only —
+        /// a dependency's worklist belongs to its owner).
+        #[arg(long = "all-packages")]
+        all_packages: bool,
     },
 
     // ---- maintain commands (NOT on the MCP surface) ----

@@ -292,6 +292,338 @@ fn index_builds_linked_dependencies_and_snapshots() {
     assert!(snapshot.contains("\"constraint\":\"^1\""), "{snapshot}");
 }
 
+// ---- backlinks / refs across packages (M5b) ---------------------------------
+
+#[test]
+fn backlinks_of_a_dep_node_finds_referencing_services_here() {
+    // Acceptance: from acme-web, `backlinks @acme-core/team:platform` → the acme-web
+    // services that reference it (frontmatter owner edge + the inline mention).
+    let ws = Ws::acceptance();
+    let out = commands::backlinks::run(&ws.ctx("acme-web"), "@acme-core/team:platform", None, None)
+        .unwrap();
+    let ids: Vec<&str> = out.backlinks.iter().map(|b| b.id.as_str()).collect();
+    assert!(ids.contains(&"service:checkout"), "{ids:?}");
+    assert!(
+        out.backlinks
+            .iter()
+            .all(|b| b.package.is_none() && b.path.starts_with("knowledge/")),
+        "local referencers, package-relative paths: {ids:?}"
+    );
+    assert!(out.skipped.is_empty());
+}
+
+#[test]
+fn backlinks_of_a_local_node_includes_cross_package_referencers() {
+    // The other direction: who references MY service:checkout? acme-core's platform
+    // team does, via its flagship edge — a cross-package inbound row.
+    let ws = Ws::acceptance();
+    let out =
+        commands::backlinks::run(&ws.ctx("acme-web"), "service:checkout", None, None).unwrap();
+    let row = out
+        .backlinks
+        .iter()
+        .find(|b| b.id == "@acme-core/team:platform")
+        .unwrap_or_else(|| panic!("cross-package inbound expected: {:?}", out.backlinks));
+    assert_eq!(row.package.as_deref(), Some("acme-core"));
+    assert_eq!(row.path, "knowledge/platform.md");
+}
+
+#[test]
+fn refs_shows_cross_package_edges_and_depth_two_comes_back() {
+    // Acceptance: `refs service:checkout` → its @acme-core / @acme-shared edges.
+    let ws = Ws::acceptance();
+    let out = commands::refs::run(&ws.ctx("acme-web"), "service:checkout", 1, None).unwrap();
+    let ids: Vec<&str> = out.refs.iter().map(|r| r.id.as_str()).collect();
+    assert!(ids.contains(&"@acme-core/team:platform"), "{ids:?}");
+    assert!(ids.contains(&"@acme-shared/site:hq"), "{ids:?}");
+
+    // Depth 2: platform's edges (jane locally, checkout back HERE) — the cycle
+    // terminates and the start node never reappears.
+    let out = commands::refs::run(&ws.ctx("acme-web"), "service:checkout", 2, None).unwrap();
+    let ids: Vec<&str> = out.refs.iter().map(|r| r.id.as_str()).collect();
+    assert!(ids.contains(&"@acme-core/person:jane-doe"), "{ids:?}");
+    assert!(
+        !ids.contains(&"service:checkout"),
+        "start node deduped: {ids:?}"
+    );
+    let jane = out
+        .refs
+        .iter()
+        .find(|r| r.id == "@acme-core/person:jane-doe")
+        .unwrap();
+    assert_eq!(jane.distance, Some(2));
+}
+
+#[test]
+fn refs_skips_and_surfaces_an_unavailable_dependency() {
+    // Break acme-shared's link: its edges drop like dangling refs, but the package is
+    // named in `skipped` rather than silently vanishing.
+    let ws = Ws::acceptance();
+    std::fs::remove_dir_all(ws.root("acme-shared")).unwrap();
+    let out = commands::refs::run(&ws.ctx("acme-web"), "service:checkout", 1, None).unwrap();
+    let ids: Vec<&str> = out.refs.iter().map(|r| r.id.as_str()).collect();
+    assert!(ids.contains(&"@acme-core/team:platform"), "{ids:?}");
+    assert!(!ids.iter().any(|i| i.contains("acme-shared")), "{ids:?}");
+    assert!(
+        out.skipped.contains(&"acme-shared".to_string()),
+        "{:?}",
+        out.skipped
+    );
+}
+
+#[test]
+fn backlinks_limit_applies_after_the_merge() {
+    // LIMIT push-down: per-member caps, then a global re-limit — the final count is
+    // exact even when hits span members.
+    let ws = Ws::acceptance();
+    let all =
+        commands::backlinks::run(&ws.ctx("acme-web"), "service:checkout", None, None).unwrap();
+    assert!(
+        all.count >= 2,
+        "fixture has local+cross inbound: {}",
+        all.count
+    );
+    let one =
+        commands::backlinks::run(&ws.ctx("acme-web"), "service:checkout", None, Some(1)).unwrap();
+    assert_eq!(one.count, 1);
+    // Deterministic: the first row of the unlimited result.
+    assert_eq!(one.backlinks[0].id, all.backlinks[0].id);
+}
+
+// ---- search / suggest across packages (M5b) ---------------------------------
+
+#[test]
+fn search_covers_the_dependency_closure() {
+    // "What you depend on is part of your knowledge": a query from acme-web finds
+    // acme-core's platform team, qualified and package-tagged.
+    let ws = Ws::acceptance();
+    let out = commands::search::run(&ws.ctx("acme-web"), "platform", None, None, Some(10), false)
+        .unwrap();
+    let hit = out
+        .results
+        .iter()
+        .find(|r| r.id == "@acme-core/team:platform")
+        .unwrap_or_else(|| {
+            panic!(
+                "dep hit expected: {:?}",
+                out.results.iter().map(|r| &r.id).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(hit.package.as_deref(), Some("acme-core"));
+    assert_eq!(hit.path, "knowledge/platform.md");
+    assert!(out.skipped.is_empty());
+}
+
+#[test]
+fn search_local_restricts_to_this_package() {
+    let ws = Ws::acceptance();
+    let out =
+        commands::search::run(&ws.ctx("acme-web"), "platform", None, None, Some(10), true).unwrap();
+    assert!(
+        out.results.iter().all(|r| r.package.is_none()),
+        "{:?}",
+        out.results.iter().map(|r| &r.id).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn search_ranking_is_deterministic_across_members() {
+    // Same query twice → identical ordering (score desc, qualified id asc ties).
+    let ws = Ws::acceptance();
+    let ids = |o: &vaire::output::SearchOutput| {
+        o.results.iter().map(|r| r.id.clone()).collect::<Vec<_>>()
+    };
+    let a = commands::search::run(
+        &ws.ctx("acme-web"),
+        "checkout team",
+        None,
+        None,
+        Some(10),
+        false,
+    )
+    .unwrap();
+    let b = commands::search::run(
+        &ws.ctx("acme-web"),
+        "checkout team",
+        None,
+        None,
+        Some(10),
+        false,
+    )
+    .unwrap();
+    assert_eq!(ids(&a), ids(&b));
+    assert!(!a.results.is_empty());
+}
+
+#[test]
+fn search_skips_and_surfaces_unavailable_dependency() {
+    let ws = Ws::acceptance();
+    std::fs::remove_file(ws.root("acme-shared").join(".vaire/index.db")).unwrap();
+    let out = commands::search::run(
+        &ws.ctx("acme-web"),
+        "headquarters",
+        None,
+        None,
+        Some(10),
+        false,
+    )
+    .unwrap();
+    assert!(
+        out.skipped.contains(&"acme-shared".to_string()),
+        "{:?}",
+        out.skipped
+    );
+    assert!(
+        !out.results.iter().any(|r| r.id.contains("acme-shared")),
+        "no hits from the skipped member"
+    );
+}
+
+#[test]
+fn suggest_returns_pre_qualified_dep_ids() {
+    // The lookup-before-reference flow across packages: the suggestion is ready to
+    // paste as [[@acme-core/person:jane-doe]].
+    let ws = Ws::acceptance();
+    let out =
+        commands::suggest::run(&ws.ctx("acme-web"), "jane doe", None, Some(5), false).unwrap();
+    let hit = out
+        .suggestions
+        .iter()
+        .find(|s| s.id == "@acme-core/person:jane-doe")
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                out.suggestions.iter().map(|s| &s.id).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(hit.package.as_deref(), Some("acme-core"));
+
+    // --local: dep suggestions disappear.
+    let local =
+        commands::suggest::run(&ws.ctx("acme-web"), "jane doe", None, Some(5), true).unwrap();
+    assert!(local.suggestions.iter().all(|s| s.package.is_none()));
+}
+
+// ---- unresolved / status across packages (M5b) ------------------------------
+
+#[test]
+fn unresolved_defaults_to_this_packages_worklist() {
+    // A dependency's loose ends are its owner's worklist (packages.md §7).
+    let ws = Ws::acceptance();
+    let out = commands::unresolved::run(&ws.ctx("acme-web"), None, None, false).unwrap();
+    let descs: Vec<&str> = out
+        .unresolved
+        .iter()
+        .map(|u| u.descriptor.as_str())
+        .collect();
+    assert!(descs.contains(&"the on-call lead"), "{descs:?}");
+    assert!(!descs.contains(&"the incident manager"), "{descs:?}");
+    assert!(out.unresolved.iter().all(|u| u.package.is_none()));
+}
+
+#[test]
+fn unresolved_all_packages_tags_dependency_rows() {
+    let ws = Ws::acceptance();
+    let out = commands::unresolved::run(&ws.ctx("acme-web"), None, None, true).unwrap();
+    let dep_row = out
+        .unresolved
+        .iter()
+        .find(|u| u.descriptor == "the incident manager")
+        .unwrap_or_else(|| panic!("{:?}", out.unresolved));
+    assert_eq!(dep_row.package.as_deref(), Some("acme-core"));
+    assert_eq!(dep_row.record, "@acme-core/team:platform");
+    // The run-root's own row stays untagged.
+    assert!(
+        out.unresolved
+            .iter()
+            .any(|u| u.descriptor == "the on-call lead" && u.package.is_none())
+    );
+}
+
+#[test]
+fn unresolved_scope_and_all_packages_conflict() {
+    let ws = Ws::acceptance();
+    let err =
+        commands::unresolved::run(&ws.ctx("acme-web"), None, Some("project:x"), true).unwrap_err();
+    assert!(matches!(err, VaireError::Usage(_)), "{err}");
+}
+
+#[test]
+fn status_reports_each_dependency_state() {
+    let ws = Ws::acceptance();
+    let out = commands::status::run(&ws.ctx("acme-web")).unwrap();
+    assert_eq!(
+        out.embed_provider.as_deref(),
+        Some("unknown:8"),
+        "dummy identity"
+    );
+
+    let core = out
+        .dependencies
+        .iter()
+        .find(|d| d.name == "acme-core")
+        .unwrap();
+    assert!(core.linked);
+    assert_eq!(core.index, "fresh");
+    assert!(core.nodes > 0);
+    assert_eq!(core.version.as_deref(), Some("1.0.0"));
+    assert_eq!(core.commits_behind_head, 0);
+
+    // Stale schema is reported, not fatal.
+    let shared_db = ws.root("acme-shared").join(".vaire/index.db");
+    let index = vaire::index::Index::open(&shared_db).unwrap();
+    index.set_schema_version(999).unwrap();
+    drop(index);
+    let out = commands::status::run(&ws.ctx("acme-web")).unwrap();
+    let shared = out
+        .dependencies
+        .iter()
+        .find(|d| d.name == "acme-shared")
+        .unwrap();
+    assert_eq!(shared.index, "stale-schema");
+
+    // An unlinked dependency is a reported row with the fix, never a failure.
+    std::fs::remove_file(ws.root("acme-web").join(".vaire/packages/acme-shared")).unwrap();
+    let out = commands::status::run(&ws.ctx("acme-web")).unwrap();
+    let shared = out
+        .dependencies
+        .iter()
+        .find(|d| d.name == "acme-shared")
+        .unwrap();
+    assert!(!shared.linked);
+    assert!(
+        shared
+            .note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("--link"),
+        "{:?}",
+        shared.note
+    );
+}
+
+#[test]
+fn empty_results_still_surface_skipped_dependencies() {
+    // "Surfaced, never silently dropped" holds even when a fan-out read finds nothing.
+    let ws = Ws::acceptance();
+    std::fs::remove_file(ws.root("acme-shared").join(".vaire/index.db")).unwrap();
+    let out = commands::search::run(
+        &ws.ctx("acme-web"),
+        "zzqxnomatchqq",
+        None,
+        None,
+        Some(10),
+        false,
+    )
+    .unwrap();
+    assert!(out.results.is_empty());
+    assert!(out.skipped.contains(&"acme-shared".to_string()));
+    assert!(
+        vaire::output::Output::render_human(&out).contains("acme-shared"),
+        "human empty output keeps the skipped note"
+    );
+}
+
 // ---- per-consumer link precedence (the reason for the npm model) ------------
 
 /// The diamond: acme-app (run-root) depends on acme-mid and acme-shared; TWO directories

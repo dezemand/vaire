@@ -124,6 +124,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             type_filter,
             scope,
             limit,
+            local,
         } => {
             let out = commands::search::run(
                 &ctx,
@@ -131,6 +132,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 type_filter.as_deref(),
                 scope.as_deref(),
                 Some(limit),
+                local,
             )?;
             emit(&out, json);
         }
@@ -138,13 +140,28 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             descriptor,
             type_filter,
             limit,
+            local,
         } => {
-            let out =
-                commands::suggest::run(&ctx, &descriptor, type_filter.as_deref(), Some(limit))?;
+            let out = commands::suggest::run(
+                &ctx,
+                &descriptor,
+                type_filter.as_deref(),
+                Some(limit),
+                local,
+            )?;
             emit(&out, json);
         }
-        Command::Unresolved { type_filter, scope } => {
-            let out = commands::unresolved::run(&ctx, type_filter.as_deref(), scope.as_deref())?;
+        Command::Unresolved {
+            type_filter,
+            scope,
+            all_packages,
+        } => {
+            let out = commands::unresolved::run(
+                &ctx,
+                type_filter.as_deref(),
+                scope.as_deref(),
+                all_packages,
+            )?;
             emit(&out, json);
         }
         Command::Index {

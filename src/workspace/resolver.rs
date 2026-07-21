@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::error::{Result, VaireError};
-use crate::index::query::{ResolvedNode, frontmatter_view};
+use crate::index::query::{EdgeRow, ResolvedNode, frontmatter_view};
 use crate::model::id::{NodeId, NodeType};
 use crate::workspace::{PackageHandle, PackageId, Workspace};
 
@@ -88,6 +88,198 @@ pub fn resolve(ws: &Workspace, source: Rc<PackageHandle>, id: &NodeId) -> Result
     }
 }
 
+/// One row of a cross-package read: the edge (its `id` already qualified for display
+/// from the run-root's perspective) plus which member it came from.
+pub struct MemberRow {
+    /// The member holding the row; `None` = the run-root package.
+    pub package: Option<PackageId>,
+    /// That member's canonical root (for consumer-relative display paths).
+    pub root: PathBuf,
+    pub row: EdgeRow,
+}
+
+/// Rows merged across members, plus the dependencies that could not be consulted
+/// (unlinked / broken / index missing) — surfaced, never silently dropped.
+pub struct CrossRows {
+    pub rows: Vec<MemberRow>,
+    pub skipped: Vec<String>,
+}
+
+/// `backlinks <target>` across the dependency closure ∪ the target's owner: who
+/// references this node? The owner member contributes its *local* inbound edges; every
+/// other member contributes edges whose `to_package` matches one of ITS aliases for the
+/// owner (`aliases_for` — never the canonical name directly). LIMIT is pushed down per
+/// member, then re-applied after the merge. Like the local query, the target need not
+/// exist — inbound edges are facts about the *referencing* files.
+pub fn backlinks(
+    ws: &Workspace,
+    target: &NodeId,
+    type_filter: Option<&NodeType>,
+    limit: Option<usize>,
+) -> Result<CrossRows> {
+    let current = ws.current();
+    let owner = match target.package() {
+        None => current.clone(),
+        Some(alias) => step_into(ws, &current, alias)?,
+    };
+    let bare_target = bare(target);
+
+    // Members to consult: the run-root + every locatable closure member (the owner is
+    // among them by construction — it was stepped into from the run-root's manifest).
+    let (members, mut skipped) = ws.consult_closure();
+
+    let mut rows: Vec<MemberRow> = Vec::new();
+    for member in members {
+        let is_run_root = member.root == current.root;
+        let index = match member.index() {
+            Ok(index) => index,
+            // The run-root's own index failing is the classic local error; a dep's is
+            // tolerated and surfaced.
+            Err(e) if is_run_root => return Err(e),
+            Err(_) => {
+                skipped.push(member.id.to_string());
+                continue;
+            }
+        };
+        let mut collected = Vec::new();
+        if member.root == owner.root {
+            collected.extend(index.backlinks(&bare_target, type_filter, limit)?);
+        } else {
+            for alias in aliases_for(&member, &owner.id) {
+                collected.extend(index.backlinks_via(
+                    &alias,
+                    &bare_target.to_string(),
+                    type_filter,
+                    limit,
+                )?);
+            }
+        }
+        let pkg = (!is_run_root).then(|| member.id.clone());
+        for mut row in collected {
+            if let Some(p) = &pkg {
+                row.id = row.id.with_package(p.0.clone());
+            }
+            rows.push(MemberRow {
+                package: pkg.clone(),
+                root: member.root.clone(),
+                row,
+            });
+        }
+    }
+
+    rows.sort_by(|a, b| a.row.id.cmp(&b.row.id).then(a.row.line.cmp(&b.row.line)));
+    if let Some(n) = limit {
+        rows.truncate(n);
+    }
+    skipped.sort();
+    skipped.dedup();
+    Ok(CrossRows { rows, skipped })
+}
+
+/// `refs <start> --depth N`: the outbound BFS, now crossing package boundaries. Each
+/// edge's `@alias` resolves through the edge's OWNING member (source-package keying);
+/// dedup key is `(package, within-package id)`; dangling targets — including targets in
+/// an unavailable dependency — are dropped exactly like local dangling refs (check
+/// surfaces them), with unavailable dependencies additionally listed in `skipped`.
+pub fn refs(
+    ws: &Workspace,
+    start: &NodeId,
+    depth: u32,
+    type_filter: Option<&NodeType>,
+) -> Result<CrossRows> {
+    let current = ws.current();
+    let start_owner = match start.package() {
+        None => current.clone(),
+        Some(alias) => step_into(ws, &current, alias)?,
+    };
+    let bare_start = bare(start);
+
+    let mut seen: HashSet<(PackageId, String)> =
+        [(start_owner.id.clone(), bare_start.to_string())].into();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut found: Vec<MemberRow> = Vec::new();
+    let mut frontier: Vec<(Rc<PackageHandle>, NodeId)> = vec![(start_owner, bare_start)];
+
+    for dist in 1..=depth {
+        let mut next = Vec::new();
+        for (owner, node) in &frontier {
+            let index = match owner.index() {
+                Ok(index) => index,
+                // The start owner's index failing at depth 1 is the query failing;
+                // deeper members are tolerated.
+                Err(e) if dist == 1 => return Err(e),
+                Err(_) => {
+                    skipped.push(owner.id.to_string());
+                    continue;
+                }
+            };
+            for (to, ref_type, line) in index.outbound(node)? {
+                let (t_owner, t_bare) = match to.package() {
+                    None => (owner.clone(), bare(&to)),
+                    Some(alias) => match step_into(ws, owner, alias) {
+                        Ok(handle) => (handle, bare(&to)),
+                        // Undeclared/unavailable target package: drop like a dangling
+                        // ref (check owns escalation), but surface the package name.
+                        Err(VaireError::Dependency(_)) => {
+                            skipped.push(alias.to_string());
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    },
+                };
+                if !seen.insert((t_owner.id.clone(), t_bare.to_string())) {
+                    continue;
+                }
+                let stored = match t_owner.index() {
+                    Ok(index) => index.stored(&t_bare)?,
+                    Err(VaireError::Dependency(_)) => {
+                        skipped.push(t_owner.id.to_string());
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+                // Only real nodes are traversable / returned (dangling → dropped).
+                let Some(stored) = stored else { continue };
+                let pkg = (t_owner.root != current.root).then(|| t_owner.id.clone());
+                let mut qualified = t_bare.clone();
+                if let Some(p) = &pkg {
+                    qualified.package = Some(p.0.clone());
+                }
+                found.push(MemberRow {
+                    package: pkg,
+                    root: t_owner.root.clone(),
+                    row: EdgeRow {
+                        id: qualified,
+                        node_type: NodeType::new(stored.node_type),
+                        path: stored.path,
+                        ref_type,
+                        line,
+                        distance: dist,
+                    },
+                });
+                next.push((t_owner, t_bare));
+            }
+        }
+        frontier = next;
+    }
+
+    if let Some(t) = type_filter {
+        found.retain(|r| &r.row.node_type == t);
+    }
+    found.sort_by(|a, b| {
+        a.row
+            .distance
+            .cmp(&b.row.distance)
+            .then(a.row.id.cmp(&b.row.id))
+    });
+    skipped.sort();
+    skipped.dedup();
+    Ok(CrossRows {
+        rows: found,
+        skipped,
+    })
+}
+
 /// Which of `member`'s declared dependency names resolve to `target`. In v0.2 an alias
 /// *is* the declared package name, so this is (at most) an identity — but the API exists
 /// now so nothing ever queries `edges.to_package` by the target's canonical name
@@ -106,7 +298,11 @@ pub fn aliases_for(member: &PackageHandle, target: &PackageId) -> Vec<String> {
 
 /// Follow `alias` out of `source`: declared in the source's manifest, then located
 /// through the source's links (own-first, run-root fallback — cli.md §6.5).
-fn step_into(ws: &Workspace, source: &Rc<PackageHandle>, alias: &str) -> Result<Rc<PackageHandle>> {
+pub(crate) fn step_into(
+    ws: &Workspace,
+    source: &Rc<PackageHandle>,
+    alias: &str,
+) -> Result<Rc<PackageHandle>> {
     if !source.config.dependencies.contains_key(alias) {
         return Err(VaireError::Dependency(format!(
             "package '{alias}' is not a declared dependency of '{}' — see [dependencies] in knowledge.toml (or run `vaire add {alias} --link <path>`)",

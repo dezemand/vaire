@@ -26,7 +26,7 @@ fn corpus() -> Corpus {
 #[test]
 fn exact_alias_ranks_first() {
     let c = corpus();
-    let out = commands::suggest::run(&c.ctx(), "logistics contact", None, Some(5)).unwrap();
+    let out = commands::suggest::run(&c.ctx(), "logistics contact", None, Some(5), false).unwrap();
     assert_eq!(
         out.suggestions.first().map(|s| s.id.as_str()),
         Some("department:logistics")
@@ -36,7 +36,7 @@ fn exact_alias_ranks_first() {
 #[test]
 fn matches_token_in_name() {
     let c = corpus();
-    let out = commands::suggest::run(&c.ctx(), "jane", None, Some(5)).unwrap();
+    let out = commands::suggest::run(&c.ctx(), "jane", None, Some(5), false).unwrap();
     let ids: Vec<&str> = out.suggestions.iter().map(|s| s.id.as_str()).collect();
     assert!(ids.contains(&"person:jane-doe"));
     assert!(ids.contains(&"person:jane-smith"));
@@ -45,24 +45,30 @@ fn matches_token_in_name() {
 #[test]
 fn type_filter_narrows() {
     let c = corpus();
-    let people = commands::suggest::run(&c.ctx(), "jane", Some("person"), Some(5)).unwrap();
+    let people = commands::suggest::run(&c.ctx(), "jane", Some("person"), Some(5), false).unwrap();
     assert!(people.suggestions.iter().all(|s| s.node_type == "person"));
     // A department alias, restricted to person → nothing.
-    let none =
-        commands::suggest::run(&c.ctx(), "logistics contact", Some("person"), Some(5)).unwrap();
+    let none = commands::suggest::run(
+        &c.ctx(),
+        "logistics contact",
+        Some("person"),
+        Some(5),
+        false,
+    )
+    .unwrap();
     assert_eq!(none.count, 0);
 }
 
 #[test]
 fn limit_caps_suggestions() {
     let c = corpus();
-    let out = commands::suggest::run(&c.ctx(), "jane", None, Some(1)).unwrap();
+    let out = commands::suggest::run(&c.ctx(), "jane", None, Some(1), false).unwrap();
     assert_eq!(out.suggestions.len(), 1);
 }
 
 #[test]
 fn no_match_is_empty() {
     let c = corpus();
-    let out = commands::suggest::run(&c.ctx(), "zzqxnomatchqq", None, Some(5)).unwrap();
+    let out = commands::suggest::run(&c.ctx(), "zzqxnomatchqq", None, Some(5), false).unwrap();
     assert_eq!(out.count, 0);
 }
