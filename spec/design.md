@@ -251,10 +251,11 @@ same file resolves identically regardless of the consumer's dependencies. The `@
 declaration, not an inference: a cross-package reference is version-constrained and must
 name a declared dependency (manifest.md §5), and `grep '@'` enumerates every cross-package
 edge. In frontmatter, `@` is a YAML reserved indicator, so cross-package values must be
-quoted: `owner: "@acme-core/department:platform"`. (Recording of `@pkg` references lands
-with package groundwork; *resolving* them across a local workspace is the release gate.)
-Loose ends (`?`) stay package-agnostic — a descriptor's package is unknown by definition,
-and Vairë never guesses a package any more than it guesses an ID.
+quoted: `owner: "@acme-core/department:platform"`. Resolution routes through the linked
+package for that name — `.vaire/packages/<name>`, keyed by the *referencing* package's
+own dependencies (§9, "Linked packages"). Loose ends (`?`) stay package-agnostic — a
+descriptor's package is unknown by definition, and Vairë never guesses a package any more
+than it guesses an ID.
 
 **Identification vs classification — two separate steps.** Conflating them was the
 original `url:` bug:
@@ -477,6 +478,50 @@ it is built — which is correct, and reinforces files-authoritative. Because th
 gitignored and per-checkout, every machine and agent
 runs its **own** local Vairë over the same shared corpus files: there is no index to sync,
 because each rebuilds from the canonical source.
+
+**Linked packages — where dependencies live.** A dependency named in `[dependencies]`
+resolves to the directory **`.vaire/packages/<name>`** — a symlink (or a real directory)
+whose target is a package: a directory with a `knowledge.toml` declaring that same `name`
+(mismatch is an error; identity is declared, never path-derived). `vaire add acme-core
+--link ../acme-core` writes the manifest entry *and* the link. The split is deliberate:
+the **committed manifest carries only the contract** (`acme-core = "^1"` — no
+machine-local paths in git), while **link state is per-checkout**, under the
+already-gitignored `.vaire/`. The layout is the whole interface: today `add --link`
+populates it; a future `vaire install` populates the same entries as links into a shared
+local cache (`~/.cache/vaire/packages/<name>/<version>/`) resolved through a lockfile —
+and because the resolver only ever reads `.vaire/packages/<name>`, nothing above the
+populator changes when packages start arriving from a registry. Two consumers may point
+the same name at different targets (that is how per-consumer versions will work), which a
+global workspace scan could never represent.
+
+**Resolution is keyed (source package, dependency name).** An `@pkg/type:id` reference in
+one of acme-core's files resolves through **acme-core's** `[dependencies]` and
+acme-core's own links — never the querying consumer's — so a file resolves identically
+regardless of who consumes it (the §6 invariant). Lookup order for a package's alias: its
+**own** `.vaire/packages/<name>` first, then the **run-root package's** (the package the
+command was invoked from) as a fallback — so linking a whole closure flat at the top
+level works, while a package that manages its own links stays self-contained. A
+`superseded_by:` tombstone that points cross-package re-enters resolution *as the
+tombstone owner's reference* (same keying); supersession follows a visited set and, on a
+cycle, stops and returns the node where the cycle closed — same behaviour as local
+redirects. Dependency cycles between packages are legal and cost nothing: resolution
+needs existence, not topological order. Handles are keyed by canonicalized target, so one
+real directory reached through different links is one package.
+
+**The index stays federated.** There is no merged workspace index: every package —
+current, linked sibling, or future cache entry — carries exactly its own
+`.vaire/index.db`, built from its own manifest (its `types`, `include`/`exclude`, scope
+field), bound to its own commits, holding its own embeddings. Cross-package reads open
+the dependency's index in place and compose in the CLI. Nothing merges, so ids and paths
+can never collide across packages, a dependency's vectors are embedded once and shared by
+every consumer, and a registry can ship a package *with its index* — pre-built,
+pre-embedded — so consumers pay nothing to adopt it. Building a linked dependency's index
+(`vaire index` refreshes the closure) writes only that package's derived `.vaire/` cache
+— never its corpus. Concurrent consumers refreshing the same dependency should be guarded
+by an advisory `.vaire/index.lock` next to the db (specified here as the mitigation;
+readers treat a briefly-unopenable index as "run `vaire index`"). Deferred, by name: a
+registry-era **reverse query** — "which packages reference this entity of mine?" — an
+inversion the per-consumer alias map (`aliases_for`) is already shaped for.
 
 **Indexing prefers commit (commit-as-publish), with a working-tree fallback.** When the
 corpus root is a Git repo with commits, indexing reads the **committed** tree: committing

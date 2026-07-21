@@ -443,10 +443,12 @@ truth), but no reference can ever address it, so the trap is surfaced instead of
 
 ### 4.2a `vaire add`
 
-Declare a dependency on another package.
+Declare a dependency on another package — and, with `--link`, wire up where it lives.
 
 ```
-vaire add <name>[@^MAJOR]     # e.g. vaire add acme-core, vaire add acme-web@^2
+vaire add <name>[@^MAJOR] [--link <path>]
+# e.g. vaire add acme-core --link ../acme-core
+#      vaire add acme-web@^2
 ```
 
 Edits `[dependencies]` in `knowledge.toml`, **preserving the file's formatting and
@@ -454,6 +456,15 @@ comments** (the manifest is authored, not generated). `^MAJOR` is the only legal
 (manifest.md §5); the default is `^1`. Adding a package that is already present updates its
 constraint in place — idempotent. A malformed name or constraint is a usage error (exit `2`),
 caught before the manifest is touched. Needs the package root but not the index.
+
+`--link <path>` additionally creates (or replaces) the **`.vaire/packages/<name>`**
+symlink pointing at `<path>` (§6.5) — the local answer to "where does this dependency
+live". The target must be a package whose `knowledge.toml` declares that same `name`
+(usage error otherwise — identity is declared, never path-derived). Without `--link` the
+dependency is declared but unlinked; `vaire deps` and `vaire check` surface exactly that,
+with the `--link` command to run. The manifest never carries the path: the committed
+contract stays machine-independent, the link is per-checkout state under gitignored
+`.vaire/`.
 
 ```json
 { "name": "acme-core", "constraint": "^1", "config_path": "knowledge.toml", "updated": false }
@@ -718,6 +729,35 @@ vaire configure embeddings [--provider local|command|openai] [--model <m>]
 The **config home** is `VAIRE_CONFIG_HOME` if set, else the platform config directory for
 `vaire` (`~/.config/vaire` on Linux, `~/Library/Application Support/vaire` on macOS,
 `%APPDATA%\vaire` on Windows).
+
+### 6.5 Linked packages — `.vaire/packages/`
+
+Where a declared dependency **lives** on this machine. Each entry
+`.vaire/packages/<name>` is a symlink (or a real directory) whose target is a package: a
+directory with a `knowledge.toml` declaring that same `name`. `vaire add <name> --link
+<path>` creates the entry (§4.2a); everything under `.vaire/` is gitignored, so links are
+per-checkout state — the committed manifest carries only `name = "^MAJOR"`.
+
+**Resolution.** An `@pkg/type:id` reference resolves through the *referencing* package's
+own dependencies (design.md §9): the alias must be in that package's `[dependencies]`
+(else `undeclared_import`), then the target package is found at
+
+1. the referencing package's own `.vaire/packages/<name>`, else
+2. the **run-root** package's `.vaire/packages/<name>` (the package the command was
+   invoked from) — the fallback that lets one flat set of links at your top level serve
+   the whole transitive closure.
+
+Own links win; the fallback is a convenience. Failure modes are specific and actionable:
+**declared but not linked** ("run `vaire add <name> --link <path>`"), **broken link**
+(target missing), **name mismatch** (target declares a different `name`), and an invalid
+target manifest (parse error attached as a note). A package cannot depend on itself —
+bare references are already local.
+
+The layout is the forward-compatible seam: a future `vaire install` will populate the
+same entries as links into a shared local cache resolved through a lockfile, changing
+nothing about how references resolve. Linked-dependency indexes live inside each linked
+package's own `.vaire/` (design.md §9, federated index) — `vaire index` refreshes them
+through the link; reads never build.
 
 ## 7. Exit codes
 
