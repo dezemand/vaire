@@ -156,9 +156,11 @@ impl Workspace {
     }
 
     /// Locate dependency `name` **for** `source`: the source package's own
-    /// `.vaire/packages/<name>` first, else the run-root's (cli.md §6.5 — own links win;
-    /// the fallback lets one flat set of links serve the whole closure). Errors are
-    /// specific: not linked / broken link / name mismatch / unreadable manifest.
+    /// `.vaire/packages/<name>` first; then the run-root package **itself** (a dependency
+    /// cycle back into the package you're standing in needs no link — you're already
+    /// there); then the run-root's links (cli.md §6.5 — own links win; the fallback lets
+    /// one flat set of links serve the whole closure). Errors are specific: not linked /
+    /// broken link / name mismatch / unreadable manifest.
     pub fn locate(&self, source: &PackageHandle, name: &str) -> Result<Rc<PackageHandle>> {
         if name == source.id.as_str() {
             return Err(VaireError::Dependency(format!(
@@ -166,19 +168,21 @@ impl Workspace {
             )));
         }
         let own = Repo::packages_dir_at(&source.root).join(name);
+        if entry_exists(&own) {
+            return self.open(name, &own);
+        }
+        if name == self.run_root_id.as_str() {
+            return Ok(self.current());
+        }
         let fallback = Repo::packages_dir_at(&self.run_root).join(name);
-        let entry = if entry_exists(&own) {
-            own
-        } else if entry_exists(&fallback) {
-            fallback
-        } else {
-            return Err(VaireError::Dependency(format!(
-                "dependency '{name}' (declared by '{}') is not linked — run `vaire add {name} --link <path>` in {}",
-                source.id,
-                display_root(&source.root),
-            )));
-        };
-        self.open(name, &entry)
+        if entry_exists(&fallback) {
+            return self.open(name, &fallback);
+        }
+        Err(VaireError::Dependency(format!(
+            "dependency '{name}' (declared by '{}') is not linked — run `vaire add {name} --link <path>` in {}",
+            source.id,
+            display_root(&source.root),
+        )))
     }
 
     /// Open (memoized) the package behind a `.vaire/packages/<name>` entry.

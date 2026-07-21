@@ -111,6 +111,9 @@ fn validate_link_target(name: &str, path: &Path) -> Result<PathBuf> {
 fn create_link(root: &Path, name: &str, target: &Path) -> Result<String> {
     let packages = Repo::packages_dir_at(root);
     std::fs::create_dir_all(&packages)?;
+    // Canonicalize so the relative computation sees the same prefix shape as the
+    // (already canonical) target — e.g. macOS's /var → /private/var.
+    let packages = std::fs::canonicalize(&packages)?;
     // `.vaire/` may predate this command or be freshly created here; either way the
     // derived dir must carry its self-contained gitignore (design.md §9).
     let gitignore = root.join(".vaire").join(".gitignore");
