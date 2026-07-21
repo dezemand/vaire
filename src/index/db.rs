@@ -146,8 +146,10 @@ impl Index {
     /// Build the runtime, open the local Turso file, and connect. The experimental index
     /// method is enabled per-connection so the native FTS index is available.
     fn connect(path: &Path) -> Result<Index> {
+        // A bare current-thread runtime: Turso owns its own async I/O (io_uring), so we need
+        // none of tokio's resource drivers (no `enable_all`, no io/time features) — the runtime
+        // exists only to `block_on` Turso's futures.
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
             .build()
             .map_err(|e| VaireError::IndexCorrupt(format!("tokio runtime: {e}")))?;
         let path_str = path.to_string_lossy().into_owned();

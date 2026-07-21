@@ -179,6 +179,10 @@ fn alias_pass(
             col_text(r, 3)?,
         ))
     })?;
+    // Nodes that alias-match but have no anchor yet need a fallback first-section anchor.
+    // Collect them, then fetch all their first sections in one query (avoids an N+1 of
+    // per-node round-trips through the block_on facade).
+    let mut needs_anchor: Vec<String> = Vec::new();
     for (id, node_type, path, fm) in rows {
         let json: serde_json::Value = serde_json::from_str(&fm).unwrap_or(serde_json::Value::Null);
         let mut candidates: Vec<String> = Vec::new();
@@ -205,8 +209,16 @@ fn alias_pass(
             anchors: Default::default(),
         });
         entry.score += ALIAS_WEIGHT;
-        if entry.anchors.is_empty()
-            && let Some((heading, line, body)) = first_section(index, &id)?
+        // An earlier FTS pass may already have anchored this node; only alias-only matches
+        // (no lexical prose hit) fall back to the first section.
+        if entry.anchors.is_empty() {
+            needs_anchor.push(id);
+        }
+    }
+
+    for (id, heading, line, body) in first_sections(index, &needs_anchor)? {
+        if let Some(entry) = acc.get_mut(&id)
+            && entry.anchors.is_empty()
         {
             entry.anchors.insert(
                 line,
@@ -272,6 +284,12 @@ fn vector_pass(
         },
     )?;
     for (id, line, dist, node_type, path, heading, body) in rows {
+        // A zero-magnitude stored vector (e.g. an empty section) gives an undefined cosine,
+        // which Turso returns as NaN. Skip it rather than let NaN poison the score — matching
+        // the old brute-force cosine, which returned 0 similarity for a zero vector.
+        if !dist.is_finite() {
+            continue;
+        }
         let sim = 1.0 - dist as f32;
         if sim < VECTOR_THRESHOLD {
             continue;
@@ -429,13 +447,45 @@ fn scope_set(
     Ok(rows.into_iter().collect())
 }
 
-/// The first section of a node (lowest line), for an anchor when nothing else matched.
-fn first_section(index: &Index, node_id: &str) -> Result<Option<(String, u32, String)>> {
-    index.query_opt(
-        "SELECT heading, line, body FROM sections WHERE node_id = ?1 ORDER BY line LIMIT 1",
-        [node_id],
-        |r| Ok((col_text(r, 0)?, col_u32(r, 1)?, col_text(r, 2)?)),
-    )
+/// The first section (lowest line) of each of `node_ids`, for a fallback anchor when
+/// nothing else matched — fetched in a single query. Returns one `(node_id, heading, line,
+/// body)` per node that has any section.
+fn first_sections(
+    index: &Index,
+    node_ids: &[String],
+) -> Result<Vec<(String, String, u32, String)>> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = (1..=node_ids.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let params: Vec<turso::Value> = node_ids
+        .iter()
+        .map(|id| turso::Value::from(id.clone()))
+        .collect();
+    let sql = format!(
+        "SELECT node_id, heading, line, body FROM sections
+         WHERE node_id IN ({placeholders}) ORDER BY node_id, line"
+    );
+    let rows = index.query_rows(&sql, params, |r| {
+        Ok((
+            col_text(r, 0)?,
+            col_text(r, 1)?,
+            col_u32(r, 2)?,
+            col_text(r, 3)?,
+        ))
+    })?;
+    // The sections are ordered by (node_id, line), so keep the first seen for each node_id.
+    let mut out: Vec<(String, String, u32, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (id, heading, line, body) in rows {
+        if seen.insert(id.clone()) {
+            out.push((id, heading, line, body));
+        }
+    }
+    Ok(out)
 }
 
 /// Lowercase alphanumeric tokens, de-duplicated, order-preserving.
