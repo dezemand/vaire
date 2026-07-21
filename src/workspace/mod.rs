@@ -12,6 +12,8 @@
 //! standalone package — no `[dependencies]`, no `@pkg/` references — never constructs
 //! any of this.
 
+pub mod resolver;
+
 use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
