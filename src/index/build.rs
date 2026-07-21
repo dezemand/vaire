@@ -170,6 +170,11 @@ pub fn run(
             "committed"
         },
     )?;
+    // Which package this index belongs to (workspace sanity check, cli.md §6.5) and which
+    // embedder produced its vectors (the content-hash cache keys on text only, so this
+    // identity is the guard against mixing providers/models in one index).
+    index.set_meta("package_name", &config.name)?;
+    index.set_meta("embed_provider", &embedder.identity())?;
 
     Ok(IndexSummary {
         nodes: count(&index, "SELECT count(*) FROM nodes")?,
@@ -232,6 +237,9 @@ pub fn reembed(repo: &Repo, embedder: &dyn Embedder) -> Result<IndexSummary> {
         Ok(embedded)
     })?;
 
+    // The vectors just changed hands — record the new provider identity.
+    index.set_meta("embed_provider", &embedder.identity())?;
+
     Ok(IndexSummary {
         nodes: count(&index, "SELECT count(*) FROM nodes")?,
         edges: count(&index, "SELECT count(*) FROM edges")?,
@@ -241,11 +249,19 @@ pub fn reembed(repo: &Repo, embedder: &dyn Embedder) -> Result<IndexSummary> {
     })
 }
 
-/// Drop the index file (and its WAL sidecars) and recreate the schema.
+/// Drop the index file (and its WAL sidecars) and recreate the schema. Also guarantees
+/// the derived dir carries its self-contained `.gitignore` (design.md §9) — an index can
+/// be created in a package that never ran `vaire init` (notably a linked dependency built
+/// by a consumer's ensure pass), and derived files must never show up as untracked noise
+/// in that package's repo.
 fn recreate(db_path: &Path) -> Result<Index> {
     for suffix in ["", "-wal", "-shm"] {
         let p = format!("{}{suffix}", db_path.display());
         let _ = std::fs::remove_file(p);
+    }
+    if let Some(vaire_dir) = db_path.parent() {
+        std::fs::create_dir_all(vaire_dir)?;
+        Repo::ensure_derived_gitignore(vaire_dir)?;
     }
     Index::create(db_path)
 }

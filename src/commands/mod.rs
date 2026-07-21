@@ -31,6 +31,9 @@ use crate::error::Result;
 pub struct Ctx {
     pub repo: Repo,
     pub config: Config,
+    /// The linked-package view (cli.md §6.5), built lazily on first cross-package need —
+    /// a standalone package never constructs it.
+    workspace: std::cell::OnceCell<crate::workspace::Workspace>,
 }
 
 impl Ctx {
@@ -40,7 +43,20 @@ impl Ctx {
         let repo = Repo::discover(repo_override.as_deref(), &cwd)?;
         let config_path = config_override.unwrap_or_else(|| repo.config_path());
         let config = Config::load(&config_path)?;
-        Ok(Ctx { repo, config })
+        Ok(Ctx {
+            repo,
+            config,
+            workspace: std::cell::OnceCell::new(),
+        })
+    }
+
+    /// The linked-package view rooted at this package (memoized).
+    pub fn workspace(&self) -> Result<&crate::workspace::Workspace> {
+        if self.workspace.get().is_none() {
+            let ws = crate::workspace::Workspace::new(&self.repo, &self.config)?;
+            let _ = self.workspace.set(ws);
+        }
+        Ok(self.workspace.get().expect("just initialized"))
     }
 
     /// Open the already-built index, mapping a missing/corrupt file to the documented

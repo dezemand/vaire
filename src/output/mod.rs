@@ -84,8 +84,16 @@ impl Output for ResolveOutput {
         if let (Some(req), Some(_target)) = (&self.requested_id, &self.superseded_by) {
             out.push_str(&dim(&format!("  ↳ superseded; requested {req}\n")));
         }
-        kv(&mut out, "path", 8, &self.path);
+        kv(
+            &mut out,
+            "path",
+            8,
+            self.display_path.as_deref().unwrap_or(&self.path),
+        );
         kv(&mut out, "type", 8, &self.node_type);
+        if let Some(package) = &self.package {
+            kv(&mut out, "package", 8, package);
+        }
         if let Some(obj) = self.frontmatter.as_object() {
             // `name` is the display name — show it first; then the rest, alphabetical.
             if let Some(name) = obj.get("name") {
@@ -289,6 +297,63 @@ impl Output for IndexSummary {
     }
 }
 
+/// One linked dependency's outcome during `vaire index`'s ensure pass (cli.md §6.5).
+#[derive(Debug, Serialize)]
+pub struct DepIndexed {
+    pub name: String,
+    /// `"indexed"` (built or refreshed, possibly a no-op) or `"missing"` (not linked /
+    /// broken link / name mismatch — see `note`; tolerated with a warning, `vaire check`
+    /// escalates).
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// `vaire index`: the current package's summary plus the linked-dependency ensure pass.
+#[derive(Debug, Serialize)]
+pub struct IndexRunOutput {
+    #[serde(flatten)]
+    pub summary: IndexSummary,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<DepIndexed>,
+}
+
+impl Output for IndexRunOutput {
+    fn render_human(&self) -> String {
+        let mut out = self.summary.render_human();
+        for dep in &self.dependencies {
+            out.push('\n');
+            match dep.status.as_str() {
+                "indexed" => {
+                    let commit = match &dep.commit {
+                        Some(c) => format!("commit {}", &c[..c.len().min(7)]),
+                        None => "working tree".to_string(),
+                    };
+                    out.push_str(&format!(
+                        "  dep {}: indexed {}  {}",
+                        dep.name,
+                        pluralize(dep.nodes.unwrap_or(0), "node"),
+                        dim(&format!("({commit})")),
+                    ));
+                }
+                _ => {
+                    out.push_str(&yellow(&format!(
+                        "  dep {}: {} — {}",
+                        dep.name,
+                        dep.status,
+                        dep.note.as_deref().unwrap_or("unavailable"),
+                    )));
+                }
+            }
+        }
+        out
+    }
+}
+
 impl Output for CheckReport {
     fn render_human(&self) -> String {
         if self.violations.is_empty() && self.warnings.is_empty() {
@@ -359,18 +424,28 @@ pub struct AddOutput {
     pub config_path: String,
     /// True when the dependency already existed and its constraint was updated in place.
     pub updated: bool,
+    /// The `.vaire/packages/<name>` link target as stored (with `--link`), else absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linked: Option<String>,
 }
 
 impl Output for AddOutput {
     fn render_human(&self) -> String {
         let verb = if self.updated { "updated" } else { "added" };
-        format!(
+        let mut s = format!(
             "{} {verb} dependency\n  {} = \"{}\"\n  manifest: {}",
             green("✓"),
             self.name,
             self.constraint,
             self.config_path,
-        )
+        );
+        if let Some(target) = &self.linked {
+            s.push_str(&format!(
+                "\n  linked:   .vaire/packages/{} → {}",
+                self.name, target
+            ));
+        }
+        s
     }
 }
 
@@ -417,7 +492,11 @@ impl Output for ConfigureOutput {
 #[derive(Debug, Serialize)]
 pub struct RenderOutput {
     pub id: String,
+    /// Package-root-relative (see [`ResolveOutput::path`]).
     pub path: String,
+    /// The owning package for a cross-package node; absent/null = the current package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     pub markdown: String,
 }
 
@@ -434,11 +513,19 @@ pub struct ResolveOutput {
     pub id: String,
     #[serde(rename = "type")]
     pub node_type: String,
+    /// Package-root-relative — stable across workspace and future cache layouts.
     pub path: String,
+    /// The owning package for a cross-package node; absent/null = the current package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     pub frontmatter: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_id: Option<String>,
     pub superseded_by: Option<String>,
+    /// Human display only: the clickable consumer-relative path for a cross-package
+    /// node (`../acme-core/…`), computed live — never serialized.
+    #[serde(skip)]
+    pub display_path: Option<String>,
 }
 
 // ---- backlinks (cli.md §3.2) -----------------------------------------------

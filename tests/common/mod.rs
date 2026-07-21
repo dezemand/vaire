@@ -51,6 +51,23 @@ impl Embedder for CountingEmbedder {
     }
 }
 
+/// Point `VAIRE_CONFIG_HOME` at a per-process temp dir, once, before any fixture exists.
+///
+/// Commands that embed (`vaire index`'s ensure pass, `check --working-tree`) build their
+/// embedder from the GLOBAL user config — without this, tests on a machine whose real
+/// config says `provider = "openai"` would silently hit the network (and spend money)
+/// from the test suite. An empty hermetic home means the default local provider, always.
+fn hermetic_config_home() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("vaire-test-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("hermetic config home");
+        // Safe in practice: every fixture constructor funnels through this Once before
+        // any embedder is built, and the value is identical process-wide.
+        unsafe { std::env::set_var("VAIRE_CONFIG_HOME", &dir) };
+    });
+}
+
 pub struct Corpus {
     pub dir: tempfile::TempDir,
 }
@@ -59,6 +76,7 @@ impl Corpus {
     /// A fresh, empty Git repo with a `knowledge.toml` marker (so discovery finds it). The
     /// declared `types` mirror the old default vocabulary so `check` behaves as before.
     pub fn empty() -> Self {
+        hermetic_config_home();
         let dir = tempfile::tempdir().expect("tempdir");
         git(dir.path(), &["init", "-q"]);
         git(dir.path(), &["config", "user.email", "test@vaire.test"]);
@@ -115,9 +133,12 @@ impl Corpus {
         self.build_with(&DummyEmbedder { dims: 8 }, Mode::Full)
     }
 
-    /// Build/reindex with a specific embedder and mode (for cache tests).
+    /// Build/reindex with a specific embedder and mode (for cache tests). Uses the
+    /// corpus's actual manifest (as commands do), so `nodes.package`/`package_name`
+    /// reflect the declared name.
     pub fn build_with(&self, embedder: &dyn Embedder, mode: Mode) -> &Self {
-        self.build_cfg(&Config::default(), embedder, mode)
+        let config = Config::load(&self.dir.path().join("knowledge.toml")).expect("manifest");
+        self.build_cfg(&config, embedder, mode)
     }
 
     /// Build/reindex with an explicit config (for scoped-ID tests).
@@ -134,6 +155,11 @@ impl Corpus {
 
     pub fn repo(&self) -> Repo {
         Repo::discover(Some(self.dir.path()), self.dir.path()).unwrap()
+    }
+
+    /// This corpus's `.vaire/packages` dir (for asserting link state).
+    pub fn packages_dir(&self) -> std::path::PathBuf {
+        self.dir.path().join(".vaire").join("packages")
     }
 
     /// A command context pointed at this corpus.
@@ -225,6 +251,170 @@ Decision to scope [[system:ingest-api]] first — see [[record:2026-06-08-ingest
         );
         c.commit().build();
         c
+    }
+}
+
+/// A multi-package workspace: sibling package dirs under one tempdir, linked via
+/// `.vaire/packages` (cli.md §6.5). Each member is its own hermetic git repo built with
+/// the `DummyEmbedder`, exactly like [`Corpus`] but plural.
+pub struct Ws {
+    pub dir: tempfile::TempDir,
+}
+
+#[allow(unused)]
+impl Ws {
+    pub fn new() -> Self {
+        hermetic_config_home();
+        Ws {
+            dir: tempfile::tempdir().expect("tempdir"),
+        }
+    }
+
+    pub fn root(&self, pkg: &str) -> PathBuf {
+        self.dir.path().join(pkg)
+    }
+
+    /// Create a member package: its own git repo + a manifest declaring `name`, the given
+    /// `types`, and `[dependencies]`.
+    pub fn add_package(&self, name: &str, types: &[&str], deps: &[(&str, &str)]) -> &Self {
+        self.add_package_named(name, name, types, deps)
+    }
+
+    /// Like [`Ws::add_package`] but the directory name and the **declared** name differ —
+    /// identity is declared, never path-derived, so tests can prove matching goes by the
+    /// manifest.
+    pub fn add_package_named(
+        &self,
+        dir: &str,
+        name: &str,
+        types: &[&str],
+        deps: &[(&str, &str)],
+    ) -> &Self {
+        let root = self.root(dir);
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.email", "test@vaire.test"]);
+        git(&root, &["config", "user.name", "Vaire Test"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+        let types_toml = types
+            .iter()
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut manifest =
+            format!("name = \"{name}\"\nversion = \"1.0.0\"\ntypes = [{types_toml}]\n");
+        if !deps.is_empty() {
+            manifest.push_str("\n[dependencies]\n");
+            for (dep, constraint) in deps {
+                manifest.push_str(&format!("{dep} = \"{constraint}\"\n"));
+            }
+        }
+        std::fs::write(root.join("knowledge.toml"), manifest).unwrap();
+        self
+    }
+
+    /// Write a file into a member (creating parent dirs). Chainable.
+    pub fn add_file(&self, pkg: &str, rel: &str, contents: &str) -> &Self {
+        let p = self.root(pkg).join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, contents).unwrap();
+        self
+    }
+
+    /// Stage and commit everything in a member. Chainable.
+    pub fn commit(&self, pkg: &str) -> &Self {
+        git(&self.root(pkg), &["add", "-A"]);
+        git(&self.root(pkg), &["commit", "-q", "-m", "snapshot"]);
+        self
+    }
+
+    /// Link `dep` into `pkg` via the real `vaire add --link` (also normalizes the
+    /// manifest constraint to `^1` if absent — idempotent).
+    pub fn link(&self, pkg: &str, dep: &str) -> &Self {
+        self.link_to(pkg, dep, dep)
+    }
+
+    /// Link dependency `dep_name` of `pkg` to a specific member directory (which must
+    /// declare `dep_name` — the real `vaire add --link` validates that).
+    pub fn link_to(&self, pkg: &str, dep_name: &str, target_dir: &str) -> &Self {
+        vaire::commands::add::run(
+            Some(&self.root(pkg)),
+            None,
+            dep_name,
+            Some(&self.root(target_dir)),
+        )
+        .expect("add --link");
+        self
+    }
+
+    /// Full index build of one member with the dummy embedder (like `Corpus::build`).
+    pub fn build(&self, pkg: &str) -> &Self {
+        let root = self.root(pkg);
+        let repo = Repo::discover(Some(&root), &root).unwrap();
+        let config = Config::load(&root.join("knowledge.toml")).unwrap();
+        build::run(&repo, &config, &DummyEmbedder { dims: 8 }, Mode::Full).expect("index build");
+        self
+    }
+
+    /// A command context rooted at one member.
+    pub fn ctx(&self, pkg: &str) -> Ctx {
+        Ctx::new(Some(self.root(pkg)), None).unwrap()
+    }
+
+    /// The acceptance-criteria workspace (issue #2): acme-core [team, person] and
+    /// acme-web [service] in a dependency cycle, acme-shared [site] a leaf. acme-web
+    /// links both deps; acme-core deliberately links nothing (exercising the run-root
+    /// fallback and the run-root-itself case). Includes a cross-package tombstone
+    /// (`service:legacy` → `@acme-core/team:platform`) and a deliberately dangling
+    /// `@acme-shared/wiki:home` reference. All members committed and indexed.
+    pub fn acceptance() -> Self {
+        let ws = Ws::new();
+        ws.add_package("acme-core", &["team", "person"], &[("acme-web", "^1")])
+            .add_file(
+                "acme-core",
+                "knowledge/platform.md",
+                "---\nid: platform\ntype: team\nname: Platform Team\nflagship: \"@acme-web/service:checkout\"\n---\n# Platform Team\n\nLed by [[person:jane-doe]]. Ships [[@acme-web/service:checkout]].\n",
+            )
+            .add_file(
+                "acme-core",
+                "knowledge/jane.md",
+                "---\nid: jane-doe\ntype: person\nname: Jane Doe\n---\n# Jane Doe\n",
+            )
+            .commit("acme-core");
+
+        ws.add_package("acme-shared", &["site", "person"], &[])
+            .add_file(
+                "acme-shared",
+                "knowledge/hq.md",
+                "---\nid: hq\ntype: site\nname: Headquarters\n---\n# Headquarters\n",
+            )
+            .commit("acme-shared");
+
+        ws.add_package(
+            "acme-web",
+            &["service"],
+            &[("acme-core", "^1"), ("acme-shared", "^1")],
+        )
+        .add_file(
+            "acme-web",
+            "knowledge/checkout.md",
+            "---\nid: checkout\ntype: service\nname: Checkout\nowner: \"@acme-core/team:platform\"\nsite: \"@acme-shared/site:hq\"\nwiki: \"@acme-shared/wiki:home\"\n---\n# Checkout\n\nOwned by [[@acme-core/team:platform]] at [[@acme-shared/site:hq|HQ]].\n",
+        )
+        .add_file(
+            "acme-web",
+            "knowledge/legacy.md",
+            "---\nid: legacy\ntype: service\nname: Legacy\nsuperseded_by: \"@acme-core/team:platform\"\n---\n# Legacy\n",
+        )
+        .commit("acme-web");
+
+        // acme-web links both dependencies; acme-core stays link-less on purpose.
+        ws.link("acme-web", "acme-core")
+            .link("acme-web", "acme-shared");
+        // Re-commit acme-web: `vaire add --link` normalized its manifest.
+        ws.commit("acme-web");
+
+        ws.build("acme-core").build("acme-shared").build("acme-web");
+        ws
     }
 }
 

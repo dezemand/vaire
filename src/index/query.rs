@@ -47,16 +47,17 @@ pub struct UnresolvedRow {
     pub line: u32,
 }
 
-/// A node's stored core fields.
-struct Stored {
-    node_type: String,
-    path: String,
-    frontmatter: String,
-    superseded_by: Option<String>,
+/// A node's stored core fields. `pub(crate)` so the workspace resolver can compose
+/// per-package lookups without re-following redirects locally.
+pub(crate) struct Stored {
+    pub(crate) node_type: String,
+    pub(crate) path: String,
+    pub(crate) frontmatter: String,
+    pub(crate) superseded_by: Option<String>,
 }
 
 impl Index {
-    fn stored(&self, id: &NodeId) -> Result<Option<Stored>> {
+    pub(crate) fn stored(&self, id: &NodeId) -> Result<Option<Stored>> {
         self.query_opt(
             "SELECT type, path, frontmatter, superseded_by FROM nodes WHERE id = ?1",
             [id.to_string()],
@@ -253,7 +254,7 @@ fn parse_id(s: String) -> NodeId {
 
 /// The frontmatter view returned by `resolve`: the stored JSON minus `id`/`type`, which
 /// are surfaced as top-level fields (cli.md §3.1).
-fn frontmatter_view(json: &str) -> serde_json::Value {
+pub(crate) fn frontmatter_view(json: &str) -> serde_json::Value {
     let mut value: serde_json::Value =
         serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
     if let Some(obj) = value.as_object_mut() {

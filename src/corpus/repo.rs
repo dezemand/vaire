@@ -82,6 +82,34 @@ impl Repo {
         self.vaire_dir().join("index.db")
     }
 
+    /// The index path for an arbitrary package root (linked dependencies open their own
+    /// index at the same well-known location — design.md §9, federated index).
+    pub fn index_db_at(root: &Path) -> PathBuf {
+        root.join(".vaire").join("index.db")
+    }
+
+    /// `<root>/.vaire/packages/` — where this package's dependency links live
+    /// (cli.md §6.5).
+    pub fn packages_dir_at(root: &Path) -> PathBuf {
+        root.join(".vaire").join("packages")
+    }
+
+    /// Write the derived dir's self-contained `.gitignore` if absent (design.md §9). A
+    /// `.vaire/` can come into existence outside `vaire init` — an index build in a
+    /// never-initialized package (notably a linked dependency during a consumer's ensure
+    /// pass) or a first `vaire add --link` — and derived files must never show up as
+    /// untracked noise in that package's repo.
+    pub fn ensure_derived_gitignore(vaire_dir: &Path) -> std::io::Result<()> {
+        let gitignore = vaire_dir.join(".gitignore");
+        if !gitignore.exists() {
+            std::fs::write(
+                &gitignore,
+                "# Vairë — derived index, rebuildable from the corpus files.\n*\n!.gitignore\n",
+            )?;
+        }
+        Ok(())
+    }
+
     /// `<root>/knowledge.toml` — the committed package manifest (v0.2).
     pub fn config_path(&self) -> PathBuf {
         self.root.join("knowledge.toml")

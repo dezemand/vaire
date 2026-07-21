@@ -118,6 +118,10 @@ pub enum Command {
     Add {
         /// The package to depend on: `<name>` or `<name>@^MAJOR` (default `^1`).
         spec: String,
+        /// Also link where it lives: creates the `.vaire/packages/<name>` symlink to
+        /// this path (a package directory declaring the same name).
+        #[arg(long)]
+        link: Option<PathBuf>,
     },
 
     /// (Re)build the index from the committed files.
@@ -132,6 +136,9 @@ pub enum Command {
         /// after changing the embedding model/provider). Keeps the graph as-is.
         #[arg(long = "re-embed")]
         re_embed: bool,
+        /// Skip the linked-dependency ensure pass (index only this package).
+        #[arg(long = "no-deps")]
+        no_deps: bool,
     },
 
     /// Run the integrity guards ID-based discovery enables.
