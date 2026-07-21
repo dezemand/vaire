@@ -25,6 +25,15 @@ pub trait Embedder {
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
 
     fn dimensions(&self) -> usize;
+
+    /// A stable identity string for the provider — `provider[:model]:dims`, e.g.
+    /// `openai:text-embedding-3-small:1536`, `local:384`. Recorded as index meta
+    /// (`embed_provider`) at every build: the content-hash cache keys on section *text*
+    /// only, so this identity is what guards against mixing vectors from different
+    /// providers/models in one index (design.md §9).
+    fn identity(&self) -> String {
+        format!("unknown:{}", self.dimensions())
+    }
 }
 
 /// Build the configured embedder from the global user config (M2). Secrets
@@ -76,6 +85,9 @@ impl Embedder for LocalEmbedder {
     }
     fn dimensions(&self) -> usize {
         self.dims
+    }
+    fn identity(&self) -> String {
+        format!("local:{}", self.dims)
     }
 }
 
@@ -175,6 +187,9 @@ impl Embedder for CommandEmbedder {
     fn dimensions(&self) -> usize {
         self.dims
     }
+    fn identity(&self) -> String {
+        format!("command:{}", self.dims)
+    }
 }
 
 /// Embeds via the OpenAI embeddings API (network). Opt-in (`provider = "openai"`) — it
@@ -234,6 +249,10 @@ impl Embedder for OpenAiEmbedder {
 
     fn dimensions(&self) -> usize {
         self.dims
+    }
+
+    fn identity(&self) -> String {
+        format!("openai:{}:{}", self.model, self.dims)
     }
 }
 

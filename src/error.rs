@@ -45,6 +45,7 @@ pub enum ErrorKind {
     IndexNotBuilt,
     IdNotFound,
     CheckViolations,
+    Dependency,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -74,6 +75,12 @@ pub enum VaireError {
     #[error("`vaire check` found {0} violation(s)")]
     CheckViolations(usize),
 
+    /// A declared dependency is unavailable on this machine — not linked, a broken link,
+    /// a name mismatch, or an unreadable target (cli.md §6.5). The message carries the
+    /// exact fix (usually a `vaire add <name> --link <path>` or `vaire index`).
+    #[error("dependency error: {0}")]
+    Dependency(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -97,6 +104,7 @@ impl VaireError {
             VaireError::IndexCorrupt(_) => ExitCode::IndexCorrupt,
             VaireError::IdNotFound(_) => ExitCode::IdNotFound,
             VaireError::CheckViolations(_) => ExitCode::CheckViolations,
+            VaireError::Dependency(_) => ExitCode::NoRepoOrIndex,
             _ => ExitCode::Generic,
         }
     }
@@ -110,6 +118,7 @@ impl VaireError {
             VaireError::IndexCorrupt(_) => ErrorKind::IndexCorrupt,
             VaireError::IdNotFound(_) => ErrorKind::IdNotFound,
             VaireError::CheckViolations(_) => ErrorKind::CheckViolations,
+            VaireError::Dependency(_) => ErrorKind::Dependency,
             _ => ErrorKind::Generic,
         }
     }

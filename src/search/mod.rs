@@ -440,7 +440,9 @@ fn scope_set(
     scope_field: &str,
 ) -> Result<std::collections::HashSet<String>> {
     let rows = index.query_rows(
-        "SELECT from_id FROM edges WHERE ref_type = ?1 AND to_id = ?2",
+        // Local edges only: a cross-package edge's bare to_id could coincide with the
+        // container's id but points at another package's node.
+        "SELECT from_id FROM edges WHERE to_package IS NULL AND ref_type = ?1 AND to_id = ?2",
         turso::params![scope_field, container.to_string()],
         |r| col_text(r, 0),
     )?;

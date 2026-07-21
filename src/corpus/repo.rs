@@ -82,6 +82,18 @@ impl Repo {
         self.vaire_dir().join("index.db")
     }
 
+    /// The index path for an arbitrary package root (linked dependencies open their own
+    /// index at the same well-known location — design.md §9, federated index).
+    pub fn index_db_at(root: &Path) -> PathBuf {
+        root.join(".vaire").join("index.db")
+    }
+
+    /// `<root>/.vaire/packages/` — where this package's dependency links live
+    /// (cli.md §6.5).
+    pub fn packages_dir_at(root: &Path) -> PathBuf {
+        root.join(".vaire").join("packages")
+    }
+
     /// `<root>/knowledge.toml` — the committed package manifest (v0.2).
     pub fn config_path(&self) -> PathBuf {
         self.root.join("knowledge.toml")

@@ -170,6 +170,11 @@ pub fn run(
             "committed"
         },
     )?;
+    // Which package this index belongs to (workspace sanity check, cli.md §6.5) and which
+    // embedder produced its vectors (the content-hash cache keys on text only, so this
+    // identity is the guard against mixing providers/models in one index).
+    index.set_meta("package_name", &config.name)?;
+    index.set_meta("embed_provider", &embedder.identity())?;
 
     Ok(IndexSummary {
         nodes: count(&index, "SELECT count(*) FROM nodes")?,
@@ -231,6 +236,9 @@ pub fn reembed(repo: &Repo, embedder: &dyn Embedder) -> Result<IndexSummary> {
         }
         Ok(embedded)
     })?;
+
+    // The vectors just changed hands — record the new provider identity.
+    index.set_meta("embed_provider", &embedder.identity())?;
 
     Ok(IndexSummary {
         nodes: count(&index, "SELECT count(*) FROM nodes")?,
