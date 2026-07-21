@@ -498,9 +498,11 @@ global workspace scan could never represent.
 one of acme-core's files resolves through **acme-core's** `[dependencies]` and
 acme-core's own links — never the querying consumer's — so a file resolves identically
 regardless of who consumes it (the §6 invariant). Lookup order for a package's alias: its
-**own** `.vaire/packages/<name>` first, then the **run-root package's** (the package the
-command was invoked from) as a fallback — so linking a whole closure flat at the top
-level works, while a package that manages its own links stays self-contained. A
+**own** `.vaire/packages/<name>` first; then the **run-root package itself** when the
+alias names it (a dependency cycle back into the package the command was invoked from
+needs no link); then the **run-root's** links as a fallback — so linking a whole closure
+flat at the top level works, while a package that manages its own links stays
+self-contained. A
 `superseded_by:` tombstone that points cross-package re-enters resolution *as the
 tombstone owner's reference* (same keying); supersession follows a visited set and, on a
 cycle, stops and returns the node where the cycle closed — same behaviour as local

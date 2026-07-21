@@ -51,6 +51,23 @@ impl Embedder for CountingEmbedder {
     }
 }
 
+/// Point `VAIRE_CONFIG_HOME` at a per-process temp dir, once, before any fixture exists.
+///
+/// Commands that embed (`vaire index`'s ensure pass, `check --working-tree`) build their
+/// embedder from the GLOBAL user config — without this, tests on a machine whose real
+/// config says `provider = "openai"` would silently hit the network (and spend money)
+/// from the test suite. An empty hermetic home means the default local provider, always.
+fn hermetic_config_home() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("vaire-test-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("hermetic config home");
+        // Safe in practice: every fixture constructor funnels through this Once before
+        // any embedder is built, and the value is identical process-wide.
+        unsafe { std::env::set_var("VAIRE_CONFIG_HOME", &dir) };
+    });
+}
+
 pub struct Corpus {
     pub dir: tempfile::TempDir,
 }
@@ -59,6 +76,7 @@ impl Corpus {
     /// A fresh, empty Git repo with a `knowledge.toml` marker (so discovery finds it). The
     /// declared `types` mirror the old default vocabulary so `check` behaves as before.
     pub fn empty() -> Self {
+        hermetic_config_home();
         let dir = tempfile::tempdir().expect("tempdir");
         git(dir.path(), &["init", "-q"]);
         git(dir.path(), &["config", "user.email", "test@vaire.test"]);
@@ -246,6 +264,7 @@ pub struct Ws {
 #[allow(unused)]
 impl Ws {
     pub fn new() -> Self {
+        hermetic_config_home();
         Ws {
             dir: tempfile::tempdir().expect("tempdir"),
         }
@@ -258,7 +277,20 @@ impl Ws {
     /// Create a member package: its own git repo + a manifest declaring `name`, the given
     /// `types`, and `[dependencies]`.
     pub fn add_package(&self, name: &str, types: &[&str], deps: &[(&str, &str)]) -> &Self {
-        let root = self.root(name);
+        self.add_package_named(name, name, types, deps)
+    }
+
+    /// Like [`Ws::add_package`] but the directory name and the **declared** name differ —
+    /// identity is declared, never path-derived, so tests can prove matching goes by the
+    /// manifest.
+    pub fn add_package_named(
+        &self,
+        dir: &str,
+        name: &str,
+        types: &[&str],
+        deps: &[(&str, &str)],
+    ) -> &Self {
+        let root = self.root(dir);
         std::fs::create_dir_all(&root).unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["config", "user.email", "test@vaire.test"]);
@@ -299,8 +331,19 @@ impl Ws {
     /// Link `dep` into `pkg` via the real `vaire add --link` (also normalizes the
     /// manifest constraint to `^1` if absent — idempotent).
     pub fn link(&self, pkg: &str, dep: &str) -> &Self {
-        vaire::commands::add::run(Some(&self.root(pkg)), None, dep, Some(&self.root(dep)))
-            .expect("add --link");
+        self.link_to(pkg, dep, dep)
+    }
+
+    /// Link dependency `dep_name` of `pkg` to a specific member directory (which must
+    /// declare `dep_name` — the real `vaire add --link` validates that).
+    pub fn link_to(&self, pkg: &str, dep_name: &str, target_dir: &str) -> &Self {
+        vaire::commands::add::run(
+            Some(&self.root(pkg)),
+            None,
+            dep_name,
+            Some(&self.root(target_dir)),
+        )
+        .expect("add --link");
         self
     }
 
@@ -330,7 +373,7 @@ impl Ws {
             .add_file(
                 "acme-core",
                 "knowledge/platform.md",
-                "---\nid: platform\ntype: team\nname: Platform Team\nflagship: \"@acme-web/service:checkout\"\n---\n# Platform Team\n\nRuns the platform.\n",
+                "---\nid: platform\ntype: team\nname: Platform Team\nflagship: \"@acme-web/service:checkout\"\n---\n# Platform Team\n\nLed by [[person:jane-doe]]. Ships [[@acme-web/service:checkout]].\n",
             )
             .add_file(
                 "acme-core",

@@ -126,7 +126,7 @@ fn create_link(root: &Path, name: &str, target: &Path) -> Result<String> {
 
     let entry = packages.join(name);
     match std::fs::symlink_metadata(&entry) {
-        Ok(meta) if meta.file_type().is_symlink() => std::fs::remove_file(&entry)?,
+        Ok(meta) if meta.file_type().is_symlink() => remove_symlink(&entry)?,
         Ok(_) => {
             return Err(VaireError::Usage(format!(
                 "{} exists and is a real directory (not a link) — refusing to replace it",
@@ -150,6 +150,17 @@ fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_dir(target, link)
+}
+
+#[cfg(unix)]
+fn remove_symlink(link: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(link)
+}
+
+/// Windows directory symlinks are directory entries — `remove_file` cannot delete them.
+#[cfg(windows)]
+fn remove_symlink(link: &Path) -> std::io::Result<()> {
+    std::fs::remove_dir(link)
 }
 
 /// Parse `<name>[@<constraint>]`; default constraint `^1`. Validates the name slug and the

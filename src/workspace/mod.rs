@@ -234,29 +234,40 @@ impl Workspace {
     }
 
     /// The transitive dependency closure of the run-root package (excluding it), in
-    /// deterministic (BFS, name-sorted) order. Unavailable dependencies are returned as
+    /// deterministic (name-sorted) order. Unavailable dependencies are returned as
     /// `Err` entries rather than failing the walk — callers choose tolerance (`vaire
     /// index` warns and skips; point resolution errors).
+    ///
+    /// A failed locate never *blocks* a name: locate is keyed (source, name), so a name
+    /// one member cannot find may still resolve through a later member's own links —
+    /// only names no encountered source could locate come back as `Err` (first error
+    /// kept, one entry per name).
     pub fn closure(&self) -> Vec<(PackageId, Result<Rc<PackageHandle>>)> {
+        let mut located: std::collections::BTreeSet<PackageId> = [self.run_root_id.clone()].into();
+        let mut failed: BTreeMap<PackageId, VaireError> = BTreeMap::new();
         let mut out = Vec::new();
-        let mut visited: std::collections::BTreeSet<PackageId> = [self.run_root_id.clone()].into();
         let mut frontier: Vec<Rc<PackageHandle>> = vec![self.current()];
         while let Some(pkg) = frontier.pop() {
             // BTreeMap iteration keeps dependency order deterministic.
             for name in pkg.config.dependencies.keys() {
                 let id = PackageId(name.clone());
-                if !visited.insert(id.clone()) {
+                if located.contains(&id) {
                     continue;
                 }
                 match self.locate(&pkg, name) {
                     Ok(handle) => {
+                        located.insert(id.clone());
+                        failed.remove(&id);
                         frontier.push(handle.clone());
                         out.push((id, Ok(handle)));
                     }
-                    Err(e) => out.push((id, Err(e))),
+                    Err(e) => {
+                        failed.entry(id).or_insert(e);
+                    }
                 }
             }
         }
+        out.extend(failed.into_iter().map(|(id, e)| (id, Err(e))));
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
     }

@@ -72,7 +72,7 @@ fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepIndexed>> {
                 note: Some(e.to_string()),
             }),
             Ok(handle) => {
-                let mode = dep_mode(&handle.root, embedder)?;
+                let mode = dep_mode(&handle.root, embedder);
                 let dep_repo = Repo::discover(Some(&handle.root), &handle.root)?;
                 let summary = build::run(&dep_repo, &handle.config, embedder, mode)?;
                 snapshot.push(serde_json::json!({
@@ -107,19 +107,26 @@ fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepIndexed>> {
 /// Pick the build mode for one dependency: incremental normally (a fresh/missing or
 /// schema-stale index full-rebuilds inside `build::run`'s own gate), **full** when its
 /// existing vectors were produced by a different embedding provider — the content-hash
-/// cache keys on section text only, so a provider switch must not mix vector spaces.
-fn dep_mode(root: &std::path::Path, embedder: &dyn Embedder) -> Result<Mode> {
+/// cache keys on section text only, so a provider switch must not mix vector spaces —
+/// or when the file cannot even be opened (the index is a disposable cache: corrupt →
+/// rebuild, never abort the run).
+fn dep_mode(root: &std::path::Path, embedder: &dyn Embedder) -> Mode {
     let db = Repo::index_db_at(root);
     if !db.exists() {
-        return Ok(Mode::Incremental);
+        return Mode::Incremental;
     }
     let provider = {
-        let index = Index::open(&db)?;
-        index.meta("embed_provider")?
+        match Index::open(&db) {
+            Ok(index) => match index.meta("embed_provider") {
+                Ok(p) => p,
+                Err(_) => return Mode::Full, // unreadable meta — recreate
+            },
+            Err(_) => return Mode::Full, // unopenable file — recreate
+        }
         // index dropped here — build::run opens (or recreates) the file itself
     };
     match provider {
-        Some(p) if p != embedder.identity() => Ok(Mode::Full),
-        _ => Ok(Mode::Incremental),
+        Some(p) if p != embedder.identity() => Mode::Full,
+        _ => Mode::Incremental,
     }
 }

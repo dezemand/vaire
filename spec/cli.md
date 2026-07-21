@@ -96,11 +96,17 @@ Resolve a node ID to its location and frontmatter.
 vaire resolve <id> [--json]
 ```
 
-- `<id>` — a composed node ID `type:id`, e.g. `person:jane-doe`, `department:hr`.
-- Follows `superseded_by` redirects (design.md §8) and reports the redirect in the result.
+- `<id>` — a composed node ID `type:id`, e.g. `person:jane-doe`, `department:hr` — or a
+  cross-package target `@pkg/type:id` (§6.5), resolved through the linked package.
+- Follows `superseded_by` redirects (design.md §8) and reports the redirect in the
+  result; a redirect may hop packages (the tombstone owner's dependencies apply).
 - `type` is the node's `type:` field; `frontmatter.name` is the reference's default
   display text — what `[[type:id]]` renders as (design.md §6).
-- Exit `5` if the ID is not a node.
+- Cross-package results carry a `package` field in JSON (absent for local nodes) with
+  `path` staying **package-root-relative**; human output shows the clickable
+  consumer-relative path (`../acme-core/knowledge/….md`) instead.
+- Exit `5` if the ID is not a node; exit `4` if its package is undeclared or unavailable
+  (not linked / broken link — the message names the fix).
 
 Human:
 
@@ -295,6 +301,11 @@ vaire render <id> [--json]
   block, are left verbatim.
 - Follows `superseded_by` redirects when resolving link targets. Exit `5` if `<id>` is not
   a node.
+- Cross-package (§6.5): `<id>` may be `@pkg/type:id` — the file is read from the linked
+  package, and its inline references resolve in **that** package's context (its own
+  `[dependencies]` and links). Same-package hrefs are unchanged; hrefs to another package
+  are filesystem-relative through the links (`../../acme-core/….md`). JSON gains a
+  `package` field for a cross-package node (absent for local ones).
 
 Human output is the rendered Markdown itself. JSON:
 
@@ -349,7 +360,7 @@ corpus files.
 (Re)build the index. The **source** and **mode** are chosen from the corpus's Git state:
 
 ```
-vaire index [--full] [--working-tree] [--re-embed]
+vaire index [--full] [--working-tree] [--re-embed] [--no-deps]
 ```
 
 - **Git repo with commits** → indexes the **committed** tree (commit-as-publish): the
@@ -377,9 +388,19 @@ vaire index [--full] [--working-tree] [--re-embed]
   top of a working-tree index, so it cannot inherit uncommitted rows. (Internally the index
   records whether it is a `committed` or `working-tree` snapshot; incremental requires a
   prior committed one.)
-- Writes only `.vaire/` (creates `index.db` inside the existing `.vaire/`); never the corpus.
-- On completion prints a one-line summary (nodes, edges, sections embedded, elapsed);
-  `--json` emits the same as an object.
+- **Linked dependencies** (§6.5): after the current package builds, each package in the
+  linked closure gets its own index built/refreshed — with *its* manifest, repo, and
+  commit anchor, written into *its* `.vaire/` (the federated model, design.md §9;
+  incremental per dependency; a dependency embedded by a different provider is fully
+  rebuilt so no index mixes vector spaces). One output line per dependency; an unlinked
+  or broken dependency is a warning row, not a failure. `--no-deps` skips the pass
+  (`--re-embed` is always current-package-only). The consumer records what its links
+  resolved to (`deps_snapshot`) at index time.
+- Writes only `.vaire/` dirs (the current package's, and linked dependencies' during the
+  ensure pass — always derived caches, never any corpus).
+- On completion prints a one-line summary (nodes, edges, sections embedded, elapsed) plus
+  the per-dependency lines; `--json` emits the same as an object (with a `dependencies`
+  array when the pass ran).
 - An index whose **schema version** doesn't match this binary is rebuilt from scratch (the
   version is bumped on any schema change); a plain `vaire index` therefore self-migrates.
 - Exit `3` if the index is structurally corrupt and cannot be opened (suggests `--full`).
@@ -460,14 +481,16 @@ caught before the manifest is touched. Needs the package root but not the index.
 `--link <path>` additionally creates (or replaces) the **`.vaire/packages/<name>`**
 symlink pointing at `<path>` (§6.5) — the local answer to "where does this dependency
 live". The target must be a package whose `knowledge.toml` declares that same `name`
-(usage error otherwise — identity is declared, never path-derived). Without `--link` the
-dependency is declared but unlinked; `vaire deps` and `vaire check` surface exactly that,
-with the `--link` command to run. The manifest never carries the path: the committed
+(usage error otherwise — identity is declared, never path-derived; a bad `--link` leaves
+the manifest untouched). Without `--link` the dependency is declared but unlinked — a
+first-class state: resolution errors name the exact `--link` command to run, and `vaire
+index` reports it as a warning row. The manifest never carries the path: the committed
 contract stays machine-independent, the link is per-checkout state under gitignored
-`.vaire/`.
+`.vaire/`. With `--link`, the JSON gains `"linked": "<stored target>"`:
 
 ```json
-{ "name": "acme-core", "constraint": "^1", "config_path": "knowledge.toml", "updated": false }
+{ "name": "acme-core", "constraint": "^1", "config_path": "knowledge.toml", "updated": false,
+  "linked": "../../../acme-core" }
 ```
 
 ### 4.3 `vaire status`
@@ -743,7 +766,9 @@ own dependencies (design.md §9): the alias must be in that package's `[dependen
 (else `undeclared_import`), then the target package is found at
 
 1. the referencing package's own `.vaire/packages/<name>`, else
-2. the **run-root** package's `.vaire/packages/<name>` (the package the command was
+2. the **run-root package itself**, when the name is the run-root's declared name — a
+   dependency cycle back into the package you're standing in needs no link, else
+3. the **run-root** package's `.vaire/packages/<name>` (the package the command was
    invoked from) — the fallback that lets one flat set of links at your top level serve
    the whole transitive closure.
 

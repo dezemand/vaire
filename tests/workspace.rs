@@ -279,12 +279,279 @@ fn index_builds_linked_dependencies_and_snapshots() {
     );
     assert!(ws.root("acme-core").join(".vaire/index.db").exists());
     assert!(ws.root("acme-shared").join(".vaire/index.db").exists());
+    // A dep that never ran `vaire init` still gets the derived-dir gitignore, so the
+    // consumer's ensure pass never litters the dep's repo with untracked noise.
+    assert!(ws.root("acme-core").join(".vaire/.gitignore").exists());
 
-    // The consumer recorded its resolution snapshot (the lockfile precursor).
+    // The consumer recorded its resolution snapshot (the lockfile precursor), including
+    // its own constraint for direct dependencies.
     let index = vaire::index::Index::open(&ws.root("acme-web").join(".vaire/index.db")).unwrap();
     let snapshot = index.meta("deps_snapshot").unwrap().expect("snapshot set");
     assert!(snapshot.contains("\"acme-core\""), "{snapshot}");
     assert!(snapshot.contains("\"acme-shared\""), "{snapshot}");
+    assert!(snapshot.contains("\"constraint\":\"^1\""), "{snapshot}");
+}
+
+// ---- per-consumer link precedence (the reason for the npm model) ------------
+
+/// The diamond: acme-app (run-root) depends on acme-mid and acme-shared; TWO directories
+/// (`shared-v1`, `shared-v2`) both declare `name = "acme-shared"`. acme-mid's `thing:m`
+/// is superseded by `@acme-shared/site:hq`, so resolving `@acme-mid/thing:m` from
+/// acme-app exercises WHOSE link answers "acme-shared" for acme-mid. acme-app always
+/// links acme-mid and links acme-shared → shared-v2.
+fn diamond(mid_links_v1: bool, mid_declares: bool) -> Ws {
+    let ws = Ws::new();
+    let mid_deps: &[(&str, &str)] = if mid_declares {
+        &[("acme-shared", "^1")]
+    } else {
+        &[]
+    };
+    ws.add_package("acme-mid", &["thing"], mid_deps)
+        .add_file(
+            "acme-mid",
+            "knowledge/m.md",
+            "---\nid: m\ntype: thing\nsuperseded_by: \"@acme-shared/site:hq\"\n---\n# M\n",
+        )
+        .commit("acme-mid");
+    for (dir, label) in [("shared-v1", "HQ v1"), ("shared-v2", "HQ v2")] {
+        ws.add_package_named(dir, "acme-shared", &["site"], &[])
+            .add_file(
+                dir,
+                "knowledge/hq.md",
+                &format!("---\nid: hq\ntype: site\nname: {label}\n---\n# {label}\n"),
+            )
+            .commit(dir);
+    }
+    ws.add_package(
+        "acme-app",
+        &["app"],
+        &[("acme-mid", "^1"), ("acme-shared", "^1")],
+    )
+    .add_file(
+        "acme-app",
+        "knowledge/a.md",
+        "---\nid: a\ntype: app\nname: App\n---\n# App\n",
+    )
+    .commit("acme-app");
+
+    ws.link("acme-app", "acme-mid");
+    ws.link_to("acme-app", "acme-shared", "shared-v2");
+    if mid_links_v1 {
+        ws.link_to("acme-mid", "acme-shared", "shared-v1");
+    }
+    ws.build("acme-mid")
+        .build("shared-v1")
+        .build("shared-v2")
+        .build("acme-app");
+    ws
+}
+
+#[test]
+fn own_link_wins_over_run_roots_for_the_same_name() {
+    // acme-mid's own link (→ v1) answers ITS reference; acme-app's link (→ v2) answers
+    // acme-app's own — one name, two targets, per-consumer mapping.
+    let ws = diamond(true, true);
+    let via_mid = commands::resolve::run(&ws.ctx("acme-app"), "@acme-mid/thing:m").unwrap();
+    assert_eq!(via_mid.frontmatter["name"], "HQ v1");
+    let direct = commands::resolve::run(&ws.ctx("acme-app"), "@acme-shared/site:hq").unwrap();
+    assert_eq!(direct.frontmatter["name"], "HQ v2");
+}
+
+#[test]
+fn run_root_links_serve_transitive_deps_as_fallback() {
+    // acme-mid declares acme-shared but links nothing → the run-root's flat link answers.
+    let ws = diamond(false, true);
+    let via_mid = commands::resolve::run(&ws.ctx("acme-app"), "@acme-mid/thing:m").unwrap();
+    assert_eq!(via_mid.frontmatter["name"], "HQ v2");
+}
+
+#[test]
+fn transitive_reference_requires_the_source_packages_declaration() {
+    // acme-mid does NOT declare acme-shared: its reference must fail even though the
+    // run-root has a perfectly good link — resolution is keyed by the SOURCE manifest.
+    let ws = diamond(false, false);
+    let err = commands::resolve::run(&ws.ctx("acme-app"), "@acme-mid/thing:m").unwrap_err();
+    assert!(matches!(err, VaireError::Dependency(_)), "{err}");
+    assert!(
+        err.to_string()
+            .contains("not a declared dependency of 'acme-mid'"),
+        "{err}"
+    );
+}
+
+// ---- link lifecycle ---------------------------------------------------------
+
+#[test]
+fn add_link_replaces_a_symlink_but_never_a_real_directory() {
+    let ws = Ws::new();
+    ws.add_package("acme-core", &["team"], &[])
+        .add_package_named("core-fork", "acme-core", &["team"], &[])
+        .add_package("acme-web", &["service"], &[]);
+
+    // First link → acme-core dir; re-link → replaced by core-fork.
+    ws.link("acme-web", "acme-core");
+    ws.link_to("acme-web", "acme-core", "core-fork");
+    let entry = ws.root("acme-web").join(".vaire/packages/acme-core");
+    assert!(
+        std::fs::canonicalize(&entry)
+            .unwrap()
+            .ends_with("core-fork"),
+        "second --link replaces the symlink"
+    );
+
+    // A REAL directory at the entry is never touched (it may be installed content).
+    std::fs::remove_file(&entry).unwrap();
+    std::fs::create_dir_all(&entry).unwrap();
+    let err = commands::add::run(
+        Some(&ws.root("acme-web")),
+        None,
+        "acme-core",
+        Some(&ws.root("acme-core")),
+    )
+    .unwrap_err();
+    assert!(matches!(err, VaireError::Usage(_)), "{err}");
+    assert!(err.to_string().contains("refusing"), "{err}");
+}
+
+#[test]
+fn broken_link_is_its_own_failure_class() {
+    let ws = Ws::acceptance();
+    std::fs::remove_dir_all(ws.root("acme-shared")).unwrap();
+    let err = commands::resolve::run(&ws.ctx("acme-web"), "@acme-shared/site:hq").unwrap_err();
+    assert!(matches!(err, VaireError::Dependency(_)), "{err}");
+    assert!(err.to_string().contains("broken link"), "{err}");
+}
+
+#[test]
+fn renamed_target_fails_the_declared_identity_check() {
+    // The link resolves, but the target no longer declares the expected name.
+    let ws = Ws::acceptance();
+    std::fs::write(
+        ws.root("acme-shared").join("knowledge.toml"),
+        "name = \"acme-other\"\nversion = \"1.0.0\"\ntypes = [\"site\"]\n",
+    )
+    .unwrap();
+    let err = commands::resolve::run(&ws.ctx("acme-web"), "@acme-shared/site:hq").unwrap_err();
+    assert!(matches!(err, VaireError::Dependency(_)), "{err}");
+    assert!(err.to_string().contains("declares name"), "{err}");
+}
+
+// ---- render: the dep file's own context ------------------------------------
+
+#[test]
+fn rendered_dep_file_keeps_local_links_package_internal() {
+    // Rendering @acme-core/team:platform from acme-web: its LOCAL ref stays a
+    // package-internal relative link (portable markdown), while its ref back to the
+    // run-root crosses the workspace.
+    let ws = Ws::acceptance();
+    let out = commands::render::run(&ws.ctx("acme-web"), "@acme-core/team:platform").unwrap();
+    assert!(
+        out.markdown.contains("[Jane Doe](./jane.md)"),
+        "local ref of the dep file: {}",
+        out.markdown
+    );
+    assert!(
+        out.markdown
+            .contains("[Checkout](../../acme-web/knowledge/checkout.md)"),
+        "ref back into the run-root: {}",
+        out.markdown
+    );
+}
+
+// ---- symmetry: a dep checkout is its own run-root ---------------------------
+
+#[test]
+fn a_dep_checkout_works_standalone_as_its_own_run_root() {
+    let ws = Ws::acceptance();
+    let out = commands::resolve::run(&ws.ctx("acme-core"), "person:jane-doe").unwrap();
+    assert_eq!(out.id, "person:jane-doe");
+    assert!(out.package.is_none(), "bare and local from its own root");
+}
+
+// ---- ensure pass details ----------------------------------------------------
+
+#[test]
+fn provider_switch_rebuilds_dep_vectors_homogeneously() {
+    // Fixture deps were built with the dummy embedder (identity "unknown:8"); the ensure
+    // pass runs the configured provider (local:*) → full rebuild, homogeneous vectors,
+    // recorded identity. A second run leaves it alone (incremental).
+    let ws = Ws::acceptance();
+    commands::index::run(&ws.ctx("acme-web"), false, false, false, false).unwrap();
+
+    let meta = |pkg: &str| {
+        let index = vaire::index::Index::open(&ws.root(pkg).join(".vaire/index.db")).unwrap();
+        index.meta("embed_provider").unwrap().unwrap_or_default()
+    };
+    let after_first = meta("acme-core");
+    assert!(
+        after_first.starts_with("local:"),
+        "dep re-embedded by the configured provider: {after_first}"
+    );
+
+    let out = commands::index::run(&ws.ctx("acme-web"), false, false, false, false).unwrap();
+    assert_eq!(meta("acme-core"), after_first, "second run is a no-op");
+    assert!(
+        out.dependencies.iter().all(|d| d.status == "indexed"),
+        "{:?}",
+        out.dependencies
+    );
+}
+
+#[test]
+fn closure_retries_a_name_through_a_later_members_own_link() {
+    // acme-app declares acme-shared but does NOT link it; acme-mid links it itself.
+    // The ensure pass must still index acme-shared — a failed locate from one source
+    // must not block the name for a later source with its own link.
+    let ws = diamond(true, true);
+    // Break acme-app's own acme-shared link so only acme-mid's remains.
+    std::fs::remove_file(ws.root("acme-app").join(".vaire/packages/acme-shared")).unwrap();
+    let _ = std::fs::remove_file(ws.root("shared-v1").join(".vaire/index.db"));
+
+    let out = commands::index::run(&ws.ctx("acme-app"), false, false, false, false).unwrap();
+    assert!(
+        out.dependencies
+            .iter()
+            .any(|d| d.name == "acme-shared" && d.status == "indexed"),
+        "located via acme-mid's own link: {:?}",
+        out.dependencies
+    );
+    assert!(ws.root("shared-v1").join(".vaire/index.db").exists());
+}
+
+#[test]
+fn corrupt_dep_index_is_rebuilt_not_fatal() {
+    // The index is a disposable cache: garbage in a dep's index.db must trigger a clean
+    // rebuild during the ensure pass, never abort the run.
+    let ws = Ws::acceptance();
+    std::fs::write(
+        ws.root("acme-core").join(".vaire/index.db"),
+        b"not a database",
+    )
+    .unwrap();
+
+    let out = commands::index::run(&ws.ctx("acme-web"), false, false, false, false).unwrap();
+    assert!(
+        out.dependencies
+            .iter()
+            .any(|d| d.name == "acme-core" && d.status == "indexed"),
+        "{:?}",
+        out.dependencies
+    );
+    // And the rebuilt index actually answers.
+    let resolved = commands::resolve::run(&ws.ctx("acme-web"), "@acme-core/team:platform").unwrap();
+    assert_eq!(resolved.frontmatter["name"], "Platform Team");
+}
+
+#[test]
+fn no_deps_skips_the_ensure_pass() {
+    let ws = Ws::acceptance();
+    for pkg in ["acme-core", "acme-shared"] {
+        let _ = std::fs::remove_file(ws.root(pkg).join(".vaire/index.db"));
+    }
+    let out = commands::index::run(&ws.ctx("acme-web"), false, false, false, true).unwrap();
+    assert!(out.dependencies.is_empty());
+    assert!(!ws.root("acme-core").join(".vaire/index.db").exists());
+    assert!(!ws.root("acme-shared").join(".vaire/index.db").exists());
 }
 
 #[test]

@@ -424,7 +424,8 @@ pub struct AddOutput {
     pub config_path: String,
     /// True when the dependency already existed and its constraint was updated in place.
     pub updated: bool,
-    /// The `.vaire/packages/<name>` link target as stored (with `--link`), else null.
+    /// The `.vaire/packages/<name>` link target as stored (with `--link`), else absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub linked: Option<String>,
 }
 
