@@ -1,0 +1,8 @@
+name    = "acme-web"
+version = "1.0.0"
+
+types = ["service"]
+
+[dependencies]
+acme-core   = "^1"
+acme-shared = "^1"
