@@ -36,8 +36,11 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     let json = cli.json;
 
     // `init` scaffolds the corpus, so it runs *before* discovery (which needs `.vaire/`).
+    // Its target is the positional path if given, else the `--repo`/`VAIRE_REPO` override,
+    // else the current directory.
     if let Command::Init { path } = &cli.command {
-        emit(&commands::init::run(path.as_deref())?, json);
+        let target = path.as_deref().or(cli.repo.as_deref());
+        emit(&commands::init::run(target)?, json);
         return Ok(ExitCode::Success);
     }
 

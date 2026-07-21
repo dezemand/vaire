@@ -44,8 +44,8 @@ node body.
 | `vaire unresolved [--type T] [--scope project:id]` | Every `[[?...]]` loose end in the corpus. `--type person` matches `[[?person: …]]`; type-less `[[?: …]]` only appears with no `--type`. |
 
 `<id>` is the node's address. Global nodes are `type:id` (`person:jane-doe`,
-`department:hr`). **Scoped** nodes (when the corpus enables `scoped_types`, commonly
-`record`) are a path — `<container-id>/type:id`, e.g.
+`department:hr`). **Scoped** nodes (any node carrying a `scope:`) are a path —
+`<container-id>/type:id`, e.g.
 `project:atlas-2026-q2/record:2026-06-10-standup`. Pass the full address to
 `resolve`/`render`/`backlinks`/`refs`; don't hand-build it — get it from `search`/`resolve`
 or from `unresolved`. `--scope <container-id>` (e.g. `--scope project:atlas-2026-q2`)
@@ -58,9 +58,9 @@ result IDs are shown **scope-relative** (the prefix is omitted — `record:sync`
 
 | Command | Purpose |
 | --- | --- |
-| `vaire init [path]` | Scaffold `.vaire/config.toml` so the dir is a discoverable corpus. Exit `2` if already one. |
+| `vaire init [path]` | Scaffold `knowledge.toml` so the dir is a discoverable corpus (migrates a legacy `.vaire/config.toml`). Exit `2` if already one. |
 | `vaire index [--full] [--working-tree] [--re-embed]` | Build/rebuild the index. `--full` is a cold rebuild; `--working-tree` indexes uncommitted edits (records no commit); `--re-embed` re-embeds every section with the current provider, bypassing the cache (use after changing the embedding model). Run plain from a `post-commit` hook. |
-| `vaire check [--strict] [--working-tree]` | Integrity: duplicate IDs and dangling references are failures (exit `6`); orphans, drift, frontmatter-`[[ ]]`, and `unknown_type` (a reference whose type isn't in `id_prefixes`, so it was ignored) are warnings (`--strict` promotes them). `--working-tree` reindexes the working tree first. |
+| `vaire check [--strict] [--working-tree]` | Integrity: duplicate IDs and dangling references are failures (exit `6`); orphans, drift, frontmatter-`[[ ]]`, and `unknown_type` (a reference whose type isn't in `types`, so it was ignored) are warnings (`--strict` promotes them). `--working-tree` reindexes the working tree first. |
 | `vaire status` | Index state: last-indexed commit, commits behind HEAD, node/edge/embedding counts. Tolerates a missing index. |
 
 ## Global flags

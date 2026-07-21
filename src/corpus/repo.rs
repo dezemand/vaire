@@ -16,36 +16,47 @@ pub struct Repo {
 }
 
 impl Repo {
-    /// Discover the repo root by the presence of a `.vaire/` directory (cli.md §2.1).
+    /// Discover the package root by the presence of a committed `knowledge.toml` (v0.2).
     ///
     /// Precedence: explicit `--repo` > `VAIRE_REPO` env > walk up from `start` to the
-    /// nearest ancestor containing `.vaire/`. An explicit path (`--repo`/`VAIRE_REPO`)
-    /// that lacks `.vaire/` is an error rather than a silent guess. The committed
-    /// `.vaire/config.toml` is what marks a directory as a corpus.
+    /// nearest ancestor containing `knowledge.toml`. An explicit path (`--repo`/`VAIRE_REPO`)
+    /// that lacks `knowledge.toml` is an error rather than a silent guess. `knowledge.toml`
+    /// is what marks a directory as a package; `.vaire/` holds only the derived index now.
     pub fn discover(explicit: Option<&Path>, start: &Path) -> Result<Repo> {
         if let Some(p) = explicit {
-            return Self::require_vaire(p);
+            return Self::require_manifest(p);
         }
         if let Ok(env) = std::env::var("VAIRE_REPO") {
-            return Self::require_vaire(Path::new(&env));
+            return Self::require_manifest(Path::new(&env));
         }
         let mut cur = Some(start);
+        // Remember the nearest legacy `.vaire/config.toml` seen; if the walk finds no
+        // `knowledge.toml`, that's a not-yet-migrated corpus — point the user at `vaire init`.
+        let mut legacy: Option<PathBuf> = None;
         while let Some(dir) = cur {
-            if dir.join(".vaire").is_dir() {
+            if dir.join("knowledge.toml").is_file() {
                 return Ok(Repo {
                     root: dir.to_path_buf(),
                 });
             }
+            if legacy.is_none() && dir.join(".vaire").join("config.toml").is_file() {
+                legacy = Some(dir.to_path_buf());
+            }
             cur = dir.parent();
         }
-        Err(VaireError::NoRepo)
+        match legacy {
+            Some(dir) => Err(VaireError::LegacyConfig(dir.display().to_string())),
+            None => Err(VaireError::NoRepo),
+        }
     }
 
-    fn require_vaire(p: &Path) -> Result<Repo> {
-        if p.join(".vaire").is_dir() {
+    fn require_manifest(p: &Path) -> Result<Repo> {
+        if p.join("knowledge.toml").is_file() {
             Ok(Repo {
                 root: p.to_path_buf(),
             })
+        } else if p.join(".vaire").join("config.toml").is_file() {
+            Err(VaireError::LegacyConfig(p.display().to_string()))
         } else {
             Err(VaireError::NoRepo)
         }
@@ -71,9 +82,9 @@ impl Repo {
         self.vaire_dir().join("index.db")
     }
 
-    /// `<root>/.vaire/config.toml` — the one committed file under `.vaire/`.
+    /// `<root>/knowledge.toml` — the committed package manifest (v0.2).
     pub fn config_path(&self) -> PathBuf {
-        self.vaire_dir().join("config.toml")
+        self.root.join("knowledge.toml")
     }
 
     /// Make `abs` repo-root-relative and POSIX-slashed, the form returned by every

@@ -1,0 +1,22 @@
+name = "example"
+version = "0.1.0"
+
+exclude = [
+    "**/node_modules/**",
+    "**/drafts/**",
+    "**/archive/**",
+]
+include = [
+    "knowledge/**/*.md",
+    "projects/**/*.md",
+]
+types = [
+    "person",
+    "department",
+    "method",
+    "system",
+    "event",
+    "record",
+    "project",
+]
+vocabulary_strict = false

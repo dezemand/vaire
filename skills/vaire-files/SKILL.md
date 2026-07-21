@@ -30,10 +30,10 @@ The node's address is the composition **`type:id`**.
 Discovery is by frontmatter, **not** by file path — files can move freely; references are
 always IDs, never paths. The directory layout is advisory.
 
-### Project-scoped record IDs (if enabled)
+### Data-driven scoped IDs
 
-If the corpus config lists a type in `scoped_types` (commonly `record`), a node of that
-type with a `project:` is addressed as a **path of typed IDs**:
+Any node carrying a `scope:` (the configured `scope_field`) is addressed as a **path of typed
+IDs**, regardless of type:
 **`<project-id>/<type>:<local-id>`**. You write only a short **local** id; the scope is the
 node's own `project:`:
 
@@ -48,10 +48,12 @@ scope: project:atlas-2026-q2      # the container; its value's type can be anyth
 segment (`record:2026-06-10-standup`); the `project:atlas-2026-q2/` prefix is the scope.
 Reference it fully as `[[project:atlas-2026-q2/record:2026-06-10-standup]]`, or — from
 another node in the same container — relatively as `[[record:2026-06-10-standup]]`.
-Cross-container references must be written in full. The container can be any type
-(`scope: org:some-firm` → `org:some-firm/record:…`); the `scope:` value is also a graph
-edge to that container. (When `scoped_types` is empty, IDs are flat `type:slug` and you give
-records globally unique slugs yourself.) The scope-supplying field is configurable
+A bare `[[type:id]]` inside a scoped node resolves **scope-first then global** (a same-container
+sibling if one exists, else the global node); cross-container links are written in full. The
+container can be any type (`scope: org:some-firm` → `org:some-firm/record:…`); the `scope:`
+value is also a graph edge to that container. (Any type can be scoped; the
+`scoped_types_whitelist`/`blacklist` settings are only a `vaire check` lint policy.) The
+scope-supplying field is configurable
 (`scope_field`, default `scope`). Use `vaire resolve` / `vaire search` for the canonical ID.
 
 ## Frontmatter
@@ -88,7 +90,7 @@ references: [method:event-sourcing, system:ingest-api]
   without extension.
 - **`project:`** on a record is its scope — load-bearing, the only source of scope.
 - **Frontmatter is the structured edge list.** A field whose value is a `type:id` — where
-  `type` is a **configured type** (config `id_prefixes`) — becomes a graph edge keyed by
+  `type` is a **configured type** (config `types`) — becomes a graph edge keyed by
   that field name (`participants`, `references`, `org`, `owner`, `implements`, `scope`, …).
   You may invent field *names*; reference *types* must be in the vocabulary, so a colon in a
   title/note isn't mistaken for a reference. `name`/`aliases` are display fields, never refs.

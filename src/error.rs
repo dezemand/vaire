@@ -53,9 +53,14 @@ pub enum VaireError {
     Usage(String),
 
     #[error(
-        "no corpus found: no .vaire/ directory here or in any parent (point --repo at a corpus root, or create .vaire/config.toml to mark one)"
+        "no corpus found: no knowledge.toml here or in any parent (point --repo at a package root, or run `vaire init` to create one)"
     )]
     NoRepo,
+
+    #[error(
+        "found a legacy .vaire/config.toml at {0} but no knowledge.toml; run `vaire init` to migrate it"
+    )]
+    LegacyConfig(String),
 
     #[error("index not built yet at {0}; run `vaire index`")]
     IndexNotBuilt(String),
@@ -87,6 +92,7 @@ impl VaireError {
         match self {
             VaireError::Usage(_) => ExitCode::Usage,
             VaireError::NoRepo => ExitCode::NoRepoOrIndex,
+            VaireError::LegacyConfig(_) => ExitCode::NoRepoOrIndex,
             VaireError::IndexNotBuilt(_) => ExitCode::NoRepoOrIndex,
             VaireError::IndexCorrupt(_) => ExitCode::IndexCorrupt,
             VaireError::IdNotFound(_) => ExitCode::IdNotFound,
@@ -99,6 +105,7 @@ impl VaireError {
         match self {
             VaireError::Usage(_) => ErrorKind::Usage,
             VaireError::NoRepo => ErrorKind::NoRepo,
+            VaireError::LegacyConfig(_) => ErrorKind::NoRepo,
             VaireError::IndexNotBuilt(_) => ErrorKind::IndexNotBuilt,
             VaireError::IndexCorrupt(_) => ErrorKind::IndexCorrupt,
             VaireError::IdNotFound(_) => ErrorKind::IdNotFound,

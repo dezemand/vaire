@@ -81,6 +81,14 @@ pub enum Warning {
         value: String,
         path: String,
     },
+    /// A node is scoped (carries a `scope`) but its type is not permitted by the scoping
+    /// policy (`scoped_types_whitelist` / `scoped_types_blacklist`, manifest.md). Behaviour is
+    /// unchanged — the node is still scoped — but the policy flags it.
+    ScopedTypeNotPermitted {
+        id: String,
+        node_type: String,
+        path: String,
+    },
 }
 
 impl Warning {
@@ -90,6 +98,7 @@ impl Warning {
             Warning::Drift { .. } => "drift",
             Warning::FrontmatterWikilink { .. } => "frontmatter_wikilink",
             Warning::UnknownType { .. } => "unknown_type",
+            Warning::ScopedTypeNotPermitted { .. } => "scoped_type_not_permitted",
         }
     }
 
@@ -110,6 +119,13 @@ impl Warning {
             } => {
                 format!("{id}  field '{field}': '{value}' — unconfigured type, ignored  {path}")
             }
+            Warning::ScopedTypeNotPermitted {
+                id,
+                node_type,
+                path,
+            } => {
+                format!("{id}  type '{node_type}' is scoped but not permitted by policy  {path}")
+            }
         }
     }
 }
@@ -123,15 +139,15 @@ pub struct CheckReport {
 }
 
 impl Index {
-    /// Run the integrity guards. `configured_types` is the `id_prefixes` vocabulary, used
-    /// to flag reference-shaped frontmatter values whose type isn't configured (and so was
-    /// ignored). Duplicate IDs and dangling refs are violations; orphans, drift,
-    /// frontmatter-wikilink, and unknown-type are warnings (promoted to failures only
-    /// under `--strict`).
-    pub fn check(&self, configured_types: &[String]) -> Result<CheckReport> {
+    /// Run the integrity guards. `config` supplies the type vocabulary (`types`, used to flag
+    /// reference-shaped frontmatter values whose type isn't configured and so was ignored) and
+    /// the scoping policy (`scoped_types_whitelist`/`blacklist`). Duplicate IDs and dangling
+    /// refs are violations; orphans, drift, frontmatter-wikilink, unknown-type, and
+    /// scoped-type-not-permitted are warnings (promoted to failures only under `--strict`).
+    pub fn check(&self, config: &crate::config::Config) -> Result<CheckReport> {
         let conn = self.conn();
         let configured: std::collections::HashSet<&str> =
-            configured_types.iter().map(String::as_str).collect();
+            config.types.iter().map(String::as_str).collect();
         let mut violations = Vec::new();
         let mut warnings = Vec::new();
 
@@ -246,6 +262,28 @@ impl Index {
                         }
                     }
                 }
+            }
+        }
+
+        // Scoped-type policy (warning): a scoped node (id has a `/`) whose type is not
+        // permitted by the whitelist/blacklist. Data-driven scoping is unaffected — this only
+        // flags the policy violation.
+        let mut scoped =
+            conn.prepare("SELECT id, type, path FROM nodes WHERE id LIKE '%/%' ORDER BY id")?;
+        for row in scoped.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (id, node_type, path) = row?;
+            if !config.scoping_permitted(&node_type) {
+                warnings.push(Warning::ScopedTypeNotPermitted {
+                    id,
+                    node_type,
+                    path,
+                });
             }
         }
 

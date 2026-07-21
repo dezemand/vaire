@@ -16,7 +16,7 @@ pub fn run(ctx: &Ctx, strict: bool, working_tree: bool) -> Result<(CheckReport, 
         build::run(&ctx.repo, &ctx.config, embedder.as_ref(), Mode::WorkingTree)?;
     }
     let index = ctx.open_index()?;
-    let report = index.check(&ctx.config.id_prefixes)?;
+    let report = index.check(&ctx.config)?;
     let failed = !report.violations.is_empty() || (strict && !report.warnings.is_empty());
     Ok((report, failed))
 }

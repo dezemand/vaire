@@ -56,13 +56,21 @@ pub struct Corpus {
 }
 
 impl Corpus {
-    /// A fresh, empty Git repo with a `.vaire/` dir (so discovery finds it).
+    /// A fresh, empty Git repo with a `knowledge.toml` marker (so discovery finds it). The
+    /// declared `types` mirror the old default vocabulary so `check` behaves as before.
     pub fn empty() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         git(dir.path(), &["init", "-q"]);
         git(dir.path(), &["config", "user.email", "test@vaire.test"]);
         git(dir.path(), &["config", "user.name", "Vaire Test"]);
-        std::fs::create_dir_all(dir.path().join(".vaire")).unwrap();
+        // Hermetic: never sign test commits, regardless of the developer's global git config.
+        git(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(
+            dir.path().join("knowledge.toml"),
+            "name = \"test-corpus\"\nversion = \"0.1.0\"\n\
+             types = [\"person\", \"department\", \"method\", \"system\", \"event\", \"record\", \"project\"]\n",
+        )
+        .unwrap();
         Corpus { dir }
     }
 

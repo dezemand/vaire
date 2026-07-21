@@ -61,7 +61,7 @@ fn backlinks_report_inbound_edges_with_origin() {
     assert!(
         out.backlinks
             .iter()
-            .any(|b| b.id == "record:2026-06-10-broker-sync")
+            .any(|b| b.id == "project:atlas-2026-q2/record:2026-06-10-broker-sync")
     );
     let ref_types: Vec<&str> = out.backlinks.iter().map(|b| b.ref_type.as_str()).collect();
     assert!(ref_types.contains(&"participants"));
@@ -98,7 +98,13 @@ fn backlinks_type_filter() {
 #[test]
 fn refs_depth_one_returns_outbound_targets() {
     let c = Corpus::fixture();
-    let out = commands::refs::run(&c.ctx(), "record:2026-06-10-broker-sync", 1, None).unwrap();
+    let out = commands::refs::run(
+        &c.ctx(),
+        "project:atlas-2026-q2/record:2026-06-10-broker-sync",
+        1,
+        None,
+    )
+    .unwrap();
     let targets: Vec<&str> = out.refs.iter().map(|r| r.id.as_str()).collect();
 
     for expected in [
@@ -107,7 +113,7 @@ fn refs_depth_one_returns_outbound_targets() {
         "method:event-sourcing",
         "system:ingest-api",
         "project:atlas-2026-q2",
-        "record:2026-06-08-ingest-decision",
+        "project:atlas-2026-q2/record:2026-06-08-ingest-decision",
     ] {
         assert!(
             targets.contains(&expected),
@@ -122,7 +128,13 @@ fn refs_depth_one_returns_outbound_targets() {
 #[test]
 fn refs_excludes_unresolved_references() {
     let c = Corpus::fixture();
-    let out = commands::refs::run(&c.ctx(), "record:2026-06-10-broker-sync", 1, None).unwrap();
+    let out = commands::refs::run(
+        &c.ctx(),
+        "project:atlas-2026-q2/record:2026-06-10-broker-sync",
+        1,
+        None,
+    )
+    .unwrap();
     // Unresolved [[?...]] are never edges (cli.md §3.3) — the descriptors never appear.
     assert!(
         out.refs
@@ -135,10 +147,22 @@ fn refs_excludes_unresolved_references() {
 fn refs_depth_two_reaches_second_hop() {
     let c = Corpus::fixture();
     // broker-sync → person:jane-doe (hop 1) → dept:platform (hop 2, via jane-doe's org).
-    let d1 = commands::refs::run(&c.ctx(), "record:2026-06-10-broker-sync", 1, None).unwrap();
+    let d1 = commands::refs::run(
+        &c.ctx(),
+        "project:atlas-2026-q2/record:2026-06-10-broker-sync",
+        1,
+        None,
+    )
+    .unwrap();
     assert!(!d1.refs.iter().any(|r| r.id == "department:platform"));
 
-    let d2 = commands::refs::run(&c.ctx(), "record:2026-06-10-broker-sync", 2, None).unwrap();
+    let d2 = commands::refs::run(
+        &c.ctx(),
+        "project:atlas-2026-q2/record:2026-06-10-broker-sync",
+        2,
+        None,
+    )
+    .unwrap();
     let platform = d2.refs.iter().find(|r| r.id == "department:platform");
     assert!(platform.is_some(), "depth-2 should reach dept:platform");
     assert_eq!(platform.unwrap().distance, Some(2));
@@ -165,7 +189,10 @@ fn unresolved_lists_loose_ends_with_type_guess() {
         .find(|u| u.descriptor == "someone from logistics")
         .unwrap();
     assert_eq!(person.type_guess.as_deref(), Some("person"));
-    assert_eq!(person.record, "record:2026-06-10-broker-sync");
+    assert_eq!(
+        person.record,
+        "project:atlas-2026-q2/record:2026-06-10-broker-sync"
+    );
 
     // `[[?: ...]]` has no type guess.
     let typeless = out

@@ -25,7 +25,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Path to the config file (default: <root>/.vaire/config.toml).
+    /// Path to the manifest (default: <root>/knowledge.toml).
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
@@ -107,7 +107,8 @@ pub enum Command {
     },
 
     // ---- maintain commands (NOT on the MCP surface) ----
-    /// Scaffold a corpus: write .vaire/config.toml so the directory is discoverable.
+    /// Scaffold a package: write knowledge.toml so the directory is discoverable
+    /// (or migrate a legacy .vaire/config.toml).
     Init {
         /// Directory to initialize (default: current directory).
         path: Option<PathBuf>,
