@@ -783,6 +783,7 @@ fn deps_prints_the_resolved_tree_with_cycle_annotation() {
         .unwrap();
     assert!(back.cycle, "cycle annotated, not descended");
     assert!(back.dependencies.is_empty());
+    assert_eq!(back.resolved.as_deref(), Some("."), "the run-root itself");
 
     let shared = out
         .dependencies

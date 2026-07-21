@@ -52,6 +52,17 @@ fn the_full_acceptance_transcript() {
         ["@acme-shared/wiki:home"],
         "exactly the planted hole"
     );
+    // Cross-package frontmatter values are classified by their OWNER's vocabulary —
+    // never flagged unknown_type against this package's `types` (caught live in the
+    // demo workspace: owner/site/wiki all warned spuriously).
+    assert!(
+        !report.warnings.iter().any(|w| matches!(
+            w,
+            vaire::index::check::Warning::UnknownType { value, .. } if value.starts_with('@')
+        )),
+        "{:?}",
+        report.warnings
+    );
 
     // vaire deps → acme-core ^1, acme-shared ^1 (resolved).
     let deps = commands::deps::run(&ctx).unwrap();

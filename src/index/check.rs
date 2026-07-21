@@ -456,6 +456,12 @@ fn candidate_type(value: &str) -> Option<NodeType> {
         return None;
     }
     let id: NodeId = v.parse().ok()?;
+    // A cross-package candidate is classified by its OWNING package's vocabulary, never
+    // this one's (same rule as the edge gate in build.rs) — the resolution lints judge
+    // it instead.
+    if id.package().is_some() {
+        return None;
+    }
     Some(id.node_type)
 }
 

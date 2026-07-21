@@ -51,9 +51,13 @@ fn children(
                 dependencies: Vec::new(),
             }),
             Ok(handle) => {
-                let resolved = crate::workspace::relative_to(&handle.root, &run_root.root)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| handle.root.display().to_string());
+                let resolved = if handle.root == run_root.root {
+                    ".".to_string() // a cycle back into the package we're standing in
+                } else {
+                    crate::workspace::relative_to(&handle.root, &run_root.root)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| handle.root.display().to_string())
+                };
                 let satisfied = constraint
                     .strip_prefix('^')
                     .map(|major| handle.config.version.split('.').next() == Some(major));
