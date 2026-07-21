@@ -292,6 +292,104 @@ fn index_builds_linked_dependencies_and_snapshots() {
     assert!(snapshot.contains("\"constraint\":\"^1\""), "{snapshot}");
 }
 
+// ---- backlinks / refs across packages (M5b) ---------------------------------
+
+#[test]
+fn backlinks_of_a_dep_node_finds_referencing_services_here() {
+    // Acceptance: from acme-web, `backlinks @acme-core/team:platform` → the acme-web
+    // services that reference it (frontmatter owner edge + the inline mention).
+    let ws = Ws::acceptance();
+    let out = commands::backlinks::run(&ws.ctx("acme-web"), "@acme-core/team:platform", None, None)
+        .unwrap();
+    let ids: Vec<&str> = out.backlinks.iter().map(|b| b.id.as_str()).collect();
+    assert!(ids.contains(&"service:checkout"), "{ids:?}");
+    assert!(
+        out.backlinks
+            .iter()
+            .all(|b| b.package.is_none() && b.path.starts_with("knowledge/")),
+        "local referencers, package-relative paths: {ids:?}"
+    );
+    assert!(out.skipped.is_empty());
+}
+
+#[test]
+fn backlinks_of_a_local_node_includes_cross_package_referencers() {
+    // The other direction: who references MY service:checkout? acme-core's platform
+    // team does, via its flagship edge — a cross-package inbound row.
+    let ws = Ws::acceptance();
+    let out =
+        commands::backlinks::run(&ws.ctx("acme-web"), "service:checkout", None, None).unwrap();
+    let row = out
+        .backlinks
+        .iter()
+        .find(|b| b.id == "@acme-core/team:platform")
+        .unwrap_or_else(|| panic!("cross-package inbound expected: {:?}", out.backlinks));
+    assert_eq!(row.package.as_deref(), Some("acme-core"));
+    assert_eq!(row.path, "knowledge/platform.md");
+}
+
+#[test]
+fn refs_shows_cross_package_edges_and_depth_two_comes_back() {
+    // Acceptance: `refs service:checkout` → its @acme-core / @acme-shared edges.
+    let ws = Ws::acceptance();
+    let out = commands::refs::run(&ws.ctx("acme-web"), "service:checkout", 1, None).unwrap();
+    let ids: Vec<&str> = out.refs.iter().map(|r| r.id.as_str()).collect();
+    assert!(ids.contains(&"@acme-core/team:platform"), "{ids:?}");
+    assert!(ids.contains(&"@acme-shared/site:hq"), "{ids:?}");
+
+    // Depth 2: platform's edges (jane locally, checkout back HERE) — the cycle
+    // terminates and the start node never reappears.
+    let out = commands::refs::run(&ws.ctx("acme-web"), "service:checkout", 2, None).unwrap();
+    let ids: Vec<&str> = out.refs.iter().map(|r| r.id.as_str()).collect();
+    assert!(ids.contains(&"@acme-core/person:jane-doe"), "{ids:?}");
+    assert!(
+        !ids.contains(&"service:checkout"),
+        "start node deduped: {ids:?}"
+    );
+    let jane = out
+        .refs
+        .iter()
+        .find(|r| r.id == "@acme-core/person:jane-doe")
+        .unwrap();
+    assert_eq!(jane.distance, Some(2));
+}
+
+#[test]
+fn refs_skips_and_surfaces_an_unavailable_dependency() {
+    // Break acme-shared's link: its edges drop like dangling refs, but the package is
+    // named in `skipped` rather than silently vanishing.
+    let ws = Ws::acceptance();
+    std::fs::remove_dir_all(ws.root("acme-shared")).unwrap();
+    let out = commands::refs::run(&ws.ctx("acme-web"), "service:checkout", 1, None).unwrap();
+    let ids: Vec<&str> = out.refs.iter().map(|r| r.id.as_str()).collect();
+    assert!(ids.contains(&"@acme-core/team:platform"), "{ids:?}");
+    assert!(!ids.iter().any(|i| i.contains("acme-shared")), "{ids:?}");
+    assert!(
+        out.skipped.contains(&"acme-shared".to_string()),
+        "{:?}",
+        out.skipped
+    );
+}
+
+#[test]
+fn backlinks_limit_applies_after_the_merge() {
+    // LIMIT push-down: per-member caps, then a global re-limit — the final count is
+    // exact even when hits span members.
+    let ws = Ws::acceptance();
+    let all =
+        commands::backlinks::run(&ws.ctx("acme-web"), "service:checkout", None, None).unwrap();
+    assert!(
+        all.count >= 2,
+        "fixture has local+cross inbound: {}",
+        all.count
+    );
+    let one =
+        commands::backlinks::run(&ws.ctx("acme-web"), "service:checkout", None, Some(1)).unwrap();
+    assert_eq!(one.count, 1);
+    // Deterministic: the first row of the unlimited result.
+    assert_eq!(one.backlinks[0].id, all.backlinks[0].id);
+}
+
 // ---- per-consumer link precedence (the reason for the npm model) ------------
 
 /// The diamond: acme-app (run-root) depends on acme-mid and acme-shared; TWO directories

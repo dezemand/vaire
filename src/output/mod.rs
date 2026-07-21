@@ -112,7 +112,11 @@ impl Output for ResolveOutput {
 impl Output for BacklinksOutput {
     fn render_human(&self) -> String {
         if self.backlinks.is_empty() {
-            return dim(&format!("no nodes reference {}", self.id));
+            return format!(
+                "{}{}",
+                dim(&format!("no nodes reference {}", self.id)),
+                skipped_note(&self.skipped)
+            );
         }
         let mut out = format!(
             "{} reference {}\n",
@@ -125,17 +129,23 @@ impl Output for BacklinksOutput {
                 "  {}  {}  {}\n",
                 cyan(&format!("{:<w$}", b.id)),
                 dim(&format!("{:<12}", b.ref_type)),
-                loc(&b.path, b.line),
+                loc(b.human_path(), b.line),
             ));
         }
-        out.trim_end().to_string()
+        let mut out = out.trim_end().to_string();
+        out.push_str(&skipped_note(&self.skipped));
+        out
     }
 }
 
 impl Output for RefsOutput {
     fn render_human(&self) -> String {
         if self.refs.is_empty() {
-            return dim(&format!("{} references nothing", self.id));
+            return format!(
+                "{}{}",
+                dim(&format!("{} references nothing", self.id)),
+                skipped_note(&self.skipped)
+            );
         }
         let mut out = format!(
             "{} → {} (depth {})\n",
@@ -156,10 +166,12 @@ impl Output for RefsOutput {
                 prefix,
                 cyan(&format!("{:<w$}", r.id)),
                 dim(&format!("{:<12}", r.ref_type)),
-                loc(&r.path, r.line),
+                loc(r.human_path(), r.line),
             ));
         }
-        out.trim_end().to_string()
+        let mut out = out.trim_end().to_string();
+        out.push_str(&skipped_note(&self.skipped));
+        out
     }
 }
 
@@ -535,6 +547,10 @@ pub struct BacklinksOutput {
     pub id: String,
     pub backlinks: Vec<EdgeRef>,
     pub count: usize,
+    /// Dependencies that could not be consulted (unlinked / broken / no index) —
+    /// surfaced, never silently dropped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -542,12 +558,41 @@ pub struct EdgeRef {
     pub id: String,
     #[serde(rename = "type")]
     pub node_type: String,
+    /// Package-root-relative — stable across workspace and future cache layouts.
     pub path: String,
+    /// The owning package for a cross-package row; absent/null = the current package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     pub ref_type: String,
     pub line: u32,
     /// Present on `refs` output (distance from the query node); omitted on backlinks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distance: Option<u32>,
+    /// Human display only: clickable consumer-relative path for a cross-package row.
+    #[serde(skip)]
+    pub display_path: Option<String>,
+}
+
+impl EdgeRef {
+    /// The path as shown to a human: clickable consumer-relative when cross-package.
+    fn human_path(&self) -> &str {
+        self.display_path.as_deref().unwrap_or(&self.path)
+    }
+}
+
+/// The shared "skipped dependencies" trailer for fan-out reads.
+fn skipped_note(skipped: &[String]) -> String {
+    if skipped.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n{}",
+            yellow(&format!(
+                "  note: skipped unavailable dependencies: {} (run `vaire index`)",
+                skipped.join(", ")
+            ))
+        )
+    }
 }
 
 // ---- refs (cli.md §3.3) ----------------------------------------------------
@@ -558,6 +603,9 @@ pub struct RefsOutput {
     pub depth: u32,
     pub refs: Vec<EdgeRef>,
     pub count: usize,
+    /// Dependencies that could not be consulted — surfaced, never silently dropped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 // ---- search (cli.md §3.4) --------------------------------------------------

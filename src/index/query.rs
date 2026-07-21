@@ -142,54 +142,50 @@ impl Index {
         })
     }
 
-    /// `refs <id> --depth N`: outbound edges as a BFS. The result is a de-duplicated node
-    /// set, each at its shortest distance, sorted by `(distance, id)`. Targets that are
-    /// not nodes (dangling refs) are not traversable and are omitted (cli.md §3.3).
-    pub fn refs(
+    /// Inbound edges in THIS index that point at another package's node: rows whose
+    /// `to_package` is `alias` and whose bare `to_id` matches. The cross-package
+    /// composition (`workspace::resolver::backlinks`) merges these per member.
+    pub(crate) fn backlinks_via(
         &self,
-        id: &NodeId,
-        depth: u32,
+        alias: &str,
+        bare_id: &str,
         type_filter: Option<&NodeType>,
+        limit: Option<usize>,
     ) -> Result<Vec<EdgeRow>> {
-        let mut seen: HashSet<String> = HashSet::from([id.to_string()]);
-        let mut found: Vec<EdgeRow> = Vec::new();
-        let mut frontier = vec![id.clone()];
-
-        for dist in 1..=depth {
-            let mut next = Vec::new();
-            for node in &frontier {
-                for (to_id, ref_type, line) in self.outbound(node)? {
-                    if !seen.insert(to_id.to_string()) {
-                        continue;
-                    }
-                    // Only real nodes are traversable / returned.
-                    if let Some(stored) = self.stored(&to_id)? {
-                        found.push(EdgeRow {
-                            node_type: NodeType::new(stored.node_type),
-                            path: stored.path,
-                            ref_type,
-                            line,
-                            distance: dist,
-                            id: to_id.clone(),
-                        });
-                        next.push(to_id);
-                    }
-                }
-            }
-            frontier = next;
-        }
-
+        let mut sql = String::from(
+            "SELECT e.from_id, n.type, n.path, e.ref_type, e.line
+             FROM edges e JOIN nodes n ON n.id = e.from_id
+             WHERE e.to_package = ?1 AND e.to_id = ?2",
+        );
+        let mut params: Vec<Value> = vec![
+            Value::from(alias.to_string()),
+            Value::from(bare_id.to_string()),
+        ];
         if let Some(t) = type_filter {
-            found.retain(|r| &r.node_type == t);
+            params.push(Value::from(t.as_str().to_string()));
+            sql.push_str(" AND n.type = ?3");
         }
-        found.sort_by(|a, b| a.distance.cmp(&b.distance).then(a.id.cmp(&b.id)));
-        Ok(found)
+        sql.push_str(" ORDER BY e.from_id ASC, e.line ASC");
+        if let Some(n) = limit {
+            sql.push_str(&format!(" LIMIT {n}"));
+        }
+
+        self.query_rows(&sql, params, |r| {
+            Ok(EdgeRow {
+                id: parse_id(col_text(r, 0)?),
+                node_type: NodeType::new(col_text(r, 1)?),
+                path: col_text(r, 2)?,
+                ref_type: col_text(r, 3)?,
+                line: col_u32(r, 4)?,
+                distance: 1,
+            })
+        })
     }
 
     /// Outbound edges of one node, in stable order, as `(to, ref_type, line)`. A
-    /// cross-package target regains its `@pkg/` qualifier so it renders (and de-dupes)
-    /// correctly; it is not a node in this index, so traversal simply won't follow it (M5).
-    fn outbound(&self, from: &NodeId) -> Result<Vec<(NodeId, String, u32)>> {
+    /// cross-package target regains its `@pkg/` qualifier; following it across the
+    /// package boundary is the workspace resolver's job (`workspace::resolver::refs`).
+    pub(crate) fn outbound(&self, from: &NodeId) -> Result<Vec<(NodeId, String, u32)>> {
         self.query_rows(
             "SELECT to_id, to_package, ref_type, line FROM edges
              WHERE from_id = ?1 ORDER BY line, to_id",

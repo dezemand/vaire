@@ -148,7 +148,15 @@ vaire backlinks <id> [--type <T>] [--limit <N>] [--json]
 
 - `--type <T>` — restrict to referencing nodes of a given type (e.g. `record`).
 - `--limit <N>` — cap results (default: unbounded).
-- Sorted by referencing node `id` ascending.
+- Sorted by referencing node `id` ascending (qualified ids sort by their full `@pkg/…`
+  form).
+- **Cross-package** (§6.5): `<id>` may be `@pkg/type:id`, and referencing nodes are
+  gathered from the whole dependency closure — each member consulted through *its own*
+  aliases for the target's package. Cross-package rows carry a `package` field in JSON
+  (`path` stays package-root-relative); human output shows consumer-relative paths.
+  Dependencies that could not be consulted are listed in `skipped`, never silently
+  dropped. Inbound visibility is scoped to the closure — "you see what you depend on";
+  a workspace-/registry-wide reverse query is future work (design.md §9).
 
 JSON:
 
@@ -185,6 +193,12 @@ vaire refs <id> [--depth <N>] [--type <T>] [--json]
 - Unresolved (`[[?...]]`) references are **not** edges and never appear here; use
   `vaire unresolved`.
 - Sorted by `(distance, id)`.
+- **Cross-package** (§6.5): the BFS follows `@pkg/` edges through each edge's *owning*
+  package (source-package keying), so traversal crosses boundaries and comes back;
+  dedup is per `(package, id)`. A dangling cross-package target is dropped exactly like
+  a local dangling ref (`check` surfaces them); unavailable dependencies are listed in
+  `skipped`. Cross-package rows carry `package` in JSON; human paths are
+  consumer-relative.
 
 JSON:
 
