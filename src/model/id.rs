@@ -233,3 +233,63 @@ pub enum IdParseError {
     #[error("scope segment is not a type:id entity")]
     BadScopeSegment,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_grammar_accepts_conforming_targets() {
+        for ok in [
+            "department:platform",
+            "person:jane-doe",
+            "record:2026-06-10-broker-sync",
+            "project:atlas-2026-q2/record:standup",
+        ] {
+            assert!(ok.parse::<NodeId>().is_ok(), "{ok} should parse");
+        }
+    }
+
+    #[test]
+    fn identification_is_by_shape_alone() {
+        // design.md §6: URLs, emails, paths, times, versions, and dates are structurally
+        // not references — the charset decides, no config consulted.
+        for not_a_ref in [
+            "https://somewhere",
+            "mailto:a@b.com",
+            "C:\\Users",
+            "12:30",
+            "1.2.3",
+            "2026-06-15",
+            "person:Jane",     // uppercase
+            "person:jane_doe", // underscore
+            "some_type:x",     // underscore in type
+            "note:a.b",        // dot
+        ] {
+            assert!(
+                not_a_ref.parse::<NodeId>().is_err(),
+                "{not_a_ref} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn scope_segments_must_be_entities() {
+        assert!("project:atlas/record:kickoff".parse::<NodeId>().is_ok());
+        // Cross-package `@pkg/` targets are recorded by the package groundwork — the
+        // local grammar structurally rejects them for now.
+        assert!("@acme-core/department:x".parse::<NodeId>().is_err());
+        assert!("notanentity/record:kickoff".parse::<NodeId>().is_err());
+    }
+
+    #[test]
+    fn parse_stored_round_trips_nonconforming_declared_ids() {
+        // Files are truth: a declared id outside the grammar still round-trips through
+        // the index unchanged (check flags it as unreferenceable_id).
+        let id = NodeId::parse_stored("person:Jane_Doe");
+        assert_eq!(id.to_string(), "person:Jane_Doe");
+        let scoped = NodeId::parse_stored("project:atlas/record:Kick.Off");
+        assert_eq!(scoped.scope(), Some("project:atlas"));
+        assert_eq!(scoped.to_string(), "project:atlas/record:Kick.Off");
+    }
+}

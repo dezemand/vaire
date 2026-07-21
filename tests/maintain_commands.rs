@@ -131,6 +131,35 @@ fn orphan_is_a_warning_not_a_failure_unless_strict() {
 }
 
 #[test]
+fn check_warns_on_unreferenceable_declared_id() {
+    // The file indexes (files are truth), but its declared id falls outside the strict
+    // reference grammar (design.md §6), so no reference can ever address it — the trap
+    // is surfaced as a warning, never silent, never a block.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/jane.md",
+        "---\nid: Jane_Doe\ntype: person\nname: Jane\n---\n# Jane\n",
+    )
+    .commit()
+    .build();
+
+    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, Warning::UnreferenceableId { id, .. } if id == "person:Jane_Doe")),
+        "expected unreferenceable_id: {:?}",
+        report.warnings
+    );
+    assert!(!failed, "a warning, not a violation");
+
+    // The node itself still indexed — files are truth.
+    let status = commands::status::run(&c.ctx()).unwrap();
+    assert_eq!(status.nodes.total, 1);
+}
+
+#[test]
 fn drift_is_an_advisory_warning_for_inline_only_refs() {
     let c = Corpus::empty();
     c.add("knowledge/x.md", "---\nid: x\ntype: system\nname: X\n---\n# X\n")
