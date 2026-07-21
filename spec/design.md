@@ -342,10 +342,13 @@ of its own — the deeds live in the files — it weaves them into a tapestry th
 queried across. CLI binary: `vaire`. The CLI surface is specified in [cli.md](cli.md);
 this section specifies what the index *is*.
 
-A **Rust + SQLite** engine. It is a derived cache — disposable, rebuildable from the files
+A **Rust + Turso** engine — Turso Database, the ground-up rewrite of SQLite in Rust, run as
+a local embedded file engine (never a server, never the network) for its native full-text
+search and native vectors. It is a derived cache — disposable, rebuildable from the files
 in seconds — and it **never writes the corpus.** This is the safe asymmetry: a derived
 index cannot corrupt the truth, whereas an authoritative DB would be a liability to back
-up and protect.
+up and protect. Because the index is disposable, adopting a pre-1.0 engine is low-risk: any
+regression is one `vaire index --full` away from a clean rebuild off the Markdown.
 
 **Discovery (layout-agnostic).** A file is a Vairë node if its frontmatter carries an
 `id:` (a local slug) **and** a `type:`; its address is the composition `type:id`
@@ -359,9 +362,10 @@ be **unique** (the duplicate-entity guard), and every non-`?` reference must **r
 (dangling refs surface). An optional committed config carries include/exclude globs (skip
 `node_modules`, drafts, archives) — that is *where to look*; the `id:`+`type:` pair is *what it is*.
 
-**Storage:** an edges table (`from_id, to_id, ref_type, source_file, line`), an FTS5 index
-over prose, and per-section embeddings. SQLite as a graph is plenty at this scale — no
-dedicated graph database.
+**Storage:** an edges table (`from_id, to_id, ref_type, source_file, line`), a `sections`
+table with a native **FTS index** over prose (heading weighted above body, BM25 ranking via
+`fts_score`), and per-section embeddings in a native **vector** column. Turso as a graph is
+plenty at this scale — no dedicated graph database.
 
 **Schema version.** A one-row `schema_version` table stamps the index with a version
 number — the one table whose shape never changes, so any future build can read it to learn
@@ -380,10 +384,10 @@ the recall layer behind FTS-and-aliases, primary only for open search — not th
 mechanism.
 
 **Embeddings — per section, local, cached.** Sections split on headings (`##`); each chunk
-is embedded; the **file is the returned unit**. Vectors live in the *same*
-`.vaire/index.db` — either via `sqlite-vec`, or (simpler at this scale) an embedding blob
-column with brute-force cosine in Rust; a few thousand sections is sub-millisecond, so ANN
-may be unnecessary. Same reasoning as SQLite-as-graph: no separate vector store. Embedding
+is embedded; the **file is the returned unit**. Vectors live in the *same* `.vaire/index.db`
+as a native vector column, scored with Turso's **exact** `vector_distance_cos`; a few
+thousand sections is sub-millisecond, so ANN indexing is unnecessary (and arrives for free
+if Turso ships it). Same reasoning as Turso-as-graph: no separate vector store. Embedding
 is a **pluggable `embed(texts) → vectors` step, local by default** — three concrete
 reasons over an API: the corpus may hold confidential content (an API means data egress on
 every section), a rebuild-in-seconds/offline tool cannot depend on the network, and
@@ -491,9 +495,9 @@ Kept with their reasons, because decisions without reasons get undone.
   entity-vs-record. Forces two integrity checks at index time: ID uniqueness and reference
   resolvability. Trade-off accepted: `project:` and the `type:` field become the
   authoritative sources of scope and type (no longer inferable from path).
-- **Hybrid search; embeddings local + cached.** FTS5 + the `aliases:` list carry precision
-  (and most of resolution); vectors are the recall layer, primary only for open retrieval.
-  Vectors live in the same SQLite db (no separate store). Embedding is pluggable and local
+- **Hybrid search; embeddings local + cached.** Native FTS + the `aliases:` list carry
+  precision (and most of resolution); vectors are the recall layer, primary only for open
+  retrieval. Vectors live in the same Turso db (no separate store). Embedding is pluggable and local
   by default (data egress, offline, re-embed-on-reindex), with a content-hash cache so
   rebuilds stay cheap.
 - **Typed IDs — `type:id`** (`person:`, `department:`, `method:`, `system:`, `event:`,

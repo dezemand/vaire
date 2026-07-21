@@ -3,7 +3,7 @@
 > A derived reference-graph index over a Markdown knowledge corpus — with a CLI and an MCP server.
 
 Vairë turns a folder of Markdown into a queryable graph. You author plain `.md` files;
-Vairë weaves their frontmatter and `[[wikilinks]]` into a derived SQLite index you can query
+Vairë weaves their frontmatter and `[[wikilinks]]` into a derived index you can query
 for backlinks, references, and search — from a shell or from an agent over MCP.
 
 The core idea: **references are stable typed IDs, not display names.** Names change and

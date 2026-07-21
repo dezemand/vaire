@@ -13,8 +13,6 @@
 use std::path::Path;
 use std::time::Instant;
 
-use rusqlite::{Transaction, params};
-
 use crate::config::Config;
 use crate::corpus::frontmatter;
 use crate::corpus::repo::Repo;
@@ -22,9 +20,10 @@ use crate::corpus::scan::Scanner;
 use crate::corpus::section::Section;
 use crate::embed::{Embedder, cache};
 use crate::error::Result;
-use crate::index::db::Index;
+use crate::index::db::{Index, col_blob, col_i64, col_text, col_u32};
 use crate::model::node::Node;
 use crate::model::reference::Reference;
+use crate::search::vector::{decode_vector, encode_vector};
 
 /// Summary printed on completion (cli.md §4.1); also the `--json` object.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -100,7 +99,7 @@ pub fn run(
     let incremental =
         schema_ok && last_commit.is_some() && prior_source.as_deref() == Some("committed");
 
-    let mut index = if incremental {
+    let index = if incremental {
         Index::open(&db_path)?
     } else {
         recreate(&db_path)?
@@ -121,36 +120,37 @@ pub fn run(
     let configured: std::collections::HashSet<&str> =
         config.types.iter().map(String::as_str).collect();
 
-    let tx = index.conn_mut().transaction()?;
-    for rel in &to_delete {
-        delete_file(&tx, rel)?;
-    }
-    for rel in &to_index {
-        delete_file(&tx, rel)?; // idempotent: clear any prior rows for this path
-        let content = if committed {
-            crate::git::show_at_head(root, rel)?
-        } else {
-            std::fs::read_to_string(root.join(rel)).ok()
-        };
-        if let Some(content) = content
-            && let Some(doc) = frontmatter::split(&content)
-        {
-            let prose_start = doc.prose_start_line;
-            if let Some(mut node) = frontmatter::to_node(rel, doc) {
-                node.edges.retain(|e| match &e.origin {
-                    crate::model::edge::RefOrigin::Inline => true,
-                    crate::model::edge::RefOrigin::Frontmatter(_) => {
-                        configured.contains(e.to.node_type.as_str())
-                    }
-                });
-                apply_scoping(&mut node, &config.scope_field);
-                index_node(&tx, &node, prose_start, embedder)?;
+    index.with_tx(|index| {
+        for rel in &to_delete {
+            delete_file(index, rel)?;
+        }
+        for rel in &to_index {
+            delete_file(index, rel)?; // idempotent: clear any prior rows for this path
+            let content = if committed {
+                crate::git::show_at_head(root, rel)?
+            } else {
+                std::fs::read_to_string(root.join(rel)).ok()
+            };
+            if let Some(content) = content
+                && let Some(doc) = frontmatter::split(&content)
+            {
+                let prose_start = doc.prose_start_line;
+                if let Some(mut node) = frontmatter::to_node(rel, doc) {
+                    node.edges.retain(|e| match &e.origin {
+                        crate::model::edge::RefOrigin::Inline => true,
+                        crate::model::edge::RefOrigin::Frontmatter(_) => {
+                            configured.contains(e.to.node_type.as_str())
+                        }
+                    });
+                    apply_scoping(&mut node, &config.scope_field);
+                    index_node(index, &node, prose_start, embedder)?;
+                }
             }
         }
-    }
-    // Now that every node is present, resolve relative scoped references scope-first.
-    resolve_scoped_edges(&tx)?;
-    tx.commit()?;
+        // Now that every node is present, resolve relative scoped references scope-first.
+        resolve_scoped_edges(index)?;
+        Ok(())
+    })?;
 
     // A working-tree index does not correspond to a commit, so record null. The
     // `index_source` marker makes "plain index restores the last commit" an explicit
@@ -189,47 +189,45 @@ const REEMBED_BATCH: usize = 128;
 /// re-parse, no Git read — leaving nodes/edges and the commit anchor untouched.
 pub fn reembed(repo: &Repo, embedder: &dyn Embedder) -> Result<IndexSummary> {
     let started = Instant::now();
-    let mut index = Index::open(&repo.index_db())?; // exit 4 if not built yet
+    let index = Index::open(&repo.index_db())?; // exit 4 if not built yet
 
-    // Snapshot the sections to re-embed (release the read borrow before the transaction).
-    let sections: Vec<(String, u32, String)> = {
-        let mut stmt = index
-            .conn()
-            .prepare("SELECT node_id, line, body FROM sections_fts ORDER BY node_id, line")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, u32>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        rows.collect::<std::result::Result<_, _>>()?
-    };
+    // Snapshot the sections to re-embed.
+    let sections: Vec<(String, u32, String)> = index.query_rows(
+        "SELECT node_id, line, body FROM sections ORDER BY node_id, line",
+        (),
+        |r| Ok((col_text(r, 0)?, col_u32(r, 1)?, col_text(r, 2)?)),
+    )?;
 
-    let tx = index.conn_mut().transaction()?;
-    // Drop stale vectors and the cache so every section is re-embedded fresh.
-    tx.execute("DELETE FROM embeddings", [])?;
-    tx.execute("DELETE FROM embed_cache", [])?;
+    let embedded = index.with_tx(|index| {
+        // Drop stale vectors and the cache so every section is re-embedded fresh.
+        index.execute("DELETE FROM embeddings", ())?;
+        index.execute("DELETE FROM embed_cache", ())?;
 
-    let mut embedded = 0usize;
-    for chunk in sections.chunks(REEMBED_BATCH) {
-        let bodies: Vec<String> = chunk.iter().map(|(_, _, body)| body.clone()).collect();
-        let vectors = embedder.embed(&bodies)?;
-        for ((node_id, line, body), vector) in chunk.iter().zip(vectors) {
-            let hash = cache::hash_text(body);
-            tx.execute(
-                "INSERT OR IGNORE INTO embed_cache(content_hash, vector) VALUES(?1, ?2)",
-                params![hash.as_slice(), encode_vector(&vector)],
-            )?;
-            tx.execute(
-                "INSERT INTO embeddings(node_id, section_line, content_hash, vector)
-                 VALUES(?1, ?2, ?3, ?4)",
-                params![node_id, line, hash.as_slice(), encode_vector(&vector)],
-            )?;
-            embedded += 1;
+        let mut embedded = 0usize;
+        for chunk in sections.chunks(REEMBED_BATCH) {
+            let bodies: Vec<String> = chunk.iter().map(|(_, _, body)| body.clone()).collect();
+            let vectors = embedder.embed(&bodies)?;
+            for ((node_id, line, body), vector) in chunk.iter().zip(vectors) {
+                let hash = cache::hash_text(body);
+                index.execute(
+                    "INSERT OR IGNORE INTO embed_cache(content_hash, vector) VALUES(?1, ?2)",
+                    turso::params![hash.as_slice(), encode_vector(&vector)],
+                )?;
+                index.execute(
+                    "INSERT INTO embeddings(node_id, section_line, content_hash, vector)
+                     VALUES(?1, ?2, ?3, ?4)",
+                    turso::params![
+                        node_id.as_str(),
+                        i64::from(*line),
+                        hash.as_slice(),
+                        encode_vector(&vector)
+                    ],
+                )?;
+                embedded += 1;
+            }
         }
-    }
-    tx.commit()?;
+        Ok(embedded)
+    })?;
 
     Ok(IndexSummary {
         nodes: count(&index, "SELECT count(*) FROM nodes")?,
@@ -278,37 +276,35 @@ fn apply_scoping(node: &mut Node, scope_field: &str) {
 /// `<referrer-scope>/<target>` exists it is the sibling being referenced, so the edge is
 /// rewritten to that composed id; otherwise the bare (global) target stands. Existence-based,
 /// so it needs no type list and never scopes a reference that lacks a scoped sibling.
-fn resolve_scoped_edges(tx: &Transaction) -> Result<()> {
+fn resolve_scoped_edges(index: &Index) -> Result<()> {
+    let candidates: Vec<(i64, String, String)> = index.query_rows(
+        "SELECT rowid, from_id, to_id FROM edges
+         WHERE from_id LIKE '%/%' AND to_id NOT LIKE '%/%'",
+        (),
+        |r| Ok((col_i64(r, 0)?, col_text(r, 1)?, col_text(r, 2)?)),
+    )?;
+
     let mut rewrites: Vec<(i64, String)> = Vec::new();
-    {
-        let mut stmt = tx.prepare(
-            "SELECT rowid, from_id, to_id FROM edges
-             WHERE from_id LIKE '%/%' AND to_id NOT LIKE '%/%'",
-        )?;
-        // Prepared once and reused per row (this scans the whole edges table each build).
-        let mut exists_stmt = tx.prepare("SELECT 1 FROM nodes WHERE id = ?1")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (rowid, from_id, to_id) = row?;
-            // The referrer's scope is everything before the last '/'.
-            if let Some((scope, _)) = from_id.rsplit_once('/') {
-                let candidate = format!("{scope}/{to_id}");
-                if exists_stmt.exists([&candidate])? {
-                    rewrites.push((rowid, candidate));
-                }
+    for (rowid, from_id, to_id) in candidates {
+        // The referrer's scope is everything before the last '/'.
+        if let Some((scope, _)) = from_id.rsplit_once('/') {
+            let candidate = format!("{scope}/{to_id}");
+            let exists = index
+                .query_opt(
+                    "SELECT 1 FROM nodes WHERE id = ?1",
+                    [candidate.as_str()],
+                    |_| Ok(()),
+                )?
+                .is_some();
+            if exists {
+                rewrites.push((rowid, candidate));
             }
         }
     }
     for (rowid, to_id) in rewrites {
-        tx.execute(
+        index.execute(
             "UPDATE edges SET to_id = ?1 WHERE rowid = ?2",
-            params![to_id, rowid],
+            turso::params![to_id.as_str(), rowid],
         )?;
     }
     Ok(())
@@ -348,12 +344,7 @@ fn partition_changed(
 }
 
 /// Insert one node and all its derived rows.
-fn index_node(
-    tx: &Transaction,
-    node: &Node,
-    prose_start: u32,
-    embedder: &dyn Embedder,
-) -> Result<()> {
+fn index_node(index: &Index, node: &Node, prose_start: u32, embedder: &dyn Embedder) -> Result<()> {
     let id = node.id.to_string();
 
     // Frontmatter is stored as JSON (the YAML map serializes cleanly for our scalars).
@@ -370,32 +361,32 @@ fn index_node(
     }
     let fm_json = fm_value.to_string();
 
-    tx.execute(
+    index.execute(
         "INSERT OR IGNORE INTO nodes(id, type, path, frontmatter, superseded_by)
          VALUES(?1, ?2, ?3, ?4, ?5)",
-        params![
-            id,
+        turso::params![
+            id.as_str(),
             node.node_type().to_string(),
-            node.path,
-            fm_json,
+            node.path.as_str(),
+            fm_json.as_str(),
             node.superseded_by().map(|s| s.to_string()),
         ],
     )?;
-    tx.execute(
+    index.execute(
         "INSERT INTO node_files(id, path) VALUES(?1, ?2)",
-        params![id, node.path],
+        turso::params![id.as_str(), node.path.as_str()],
     )?;
 
     for e in &node.edges {
-        tx.execute(
+        index.execute(
             "INSERT INTO edges(from_id, to_id, ref_type, source_file, line)
              VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![
-                id,
+            turso::params![
+                id.as_str(),
                 e.to.to_string(),
                 e.origin.as_ref_type(),
-                e.source_file,
-                e.line
+                e.source_file.as_str(),
+                i64::from(e.line),
             ],
         )?;
     }
@@ -406,15 +397,15 @@ fn index_node(
             descriptor,
         } = reference
         {
-            tx.execute(
+            index.execute(
                 "INSERT INTO unresolved(record_id, type_guess, descriptor, source_file, line)
                  VALUES(?1, ?2, ?3, ?4, ?5)",
-                params![
-                    id,
+                turso::params![
+                    id.as_str(),
                     type_guess.as_ref().map(|t| t.to_string()),
-                    descriptor,
-                    node.path,
-                    line,
+                    descriptor.as_str(),
+                    node.path.as_str(),
+                    i64::from(*line),
                 ],
             )?;
         }
@@ -430,7 +421,7 @@ fn index_node(
     let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(sections.len());
     let mut misses: Vec<usize> = Vec::new();
     for (i, hash) in hashes.iter().enumerate() {
-        match cache_get(tx, hash)? {
+        match cache_get(index, hash)? {
             Some(v) => vectors.push(Some(v)),
             None => {
                 vectors.push(None);
@@ -442,30 +433,30 @@ fn index_node(
         let bodies: Vec<String> = misses.iter().map(|&i| sections[i].body.clone()).collect();
         let embedded = embedder.embed(&bodies)?;
         for (&i, vector) in misses.iter().zip(embedded) {
-            cache_put(tx, &hashes[i], &vector)?;
+            cache_put(index, &hashes[i], &vector)?;
             vectors[i] = Some(vector);
         }
     }
 
     for (i, section) in sections.iter().enumerate() {
         let vector = vectors[i].as_ref().expect("every section has a vector");
-        tx.execute(
-            "INSERT INTO sections_fts(node_id, heading, line, body) VALUES(?1, ?2, ?3, ?4)",
-            params![
-                id,
+        index.execute(
+            "INSERT INTO sections(node_id, heading, line, body) VALUES(?1, ?2, ?3, ?4)",
+            turso::params![
+                id.as_str(),
                 section.heading.clone().unwrap_or_default(),
-                section.line,
-                section.body
+                i64::from(section.line),
+                section.body.as_str(),
             ],
         )?;
-        tx.execute(
+        index.execute(
             "INSERT INTO embeddings(node_id, section_line, content_hash, vector)
              VALUES(?1, ?2, ?3, ?4)",
-            params![
-                id,
-                section.line,
+            turso::params![
+                id.as_str(),
+                i64::from(section.line),
                 hashes[i].as_slice(),
-                encode_vector(vector)
+                encode_vector(vector),
             ],
         )?;
     }
@@ -474,55 +465,41 @@ fn index_node(
 }
 
 /// Look up a cached embedding by content hash.
-fn cache_get(tx: &Transaction, hash: &[u8; 32]) -> Result<Option<Vec<f32>>> {
-    use rusqlite::OptionalExtension;
-    let blob: Option<Vec<u8>> = tx
-        .query_row(
-            "SELECT vector FROM embed_cache WHERE content_hash = ?1",
-            [hash.as_slice()],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(blob.map(|b| crate::search::vector::decode_vector(&b)))
+fn cache_get(index: &Index, hash: &[u8; 32]) -> Result<Option<Vec<f32>>> {
+    let blob = index.query_opt(
+        "SELECT vector FROM embed_cache WHERE content_hash = ?1",
+        [hash.as_slice()],
+        |r| col_blob(r, 0),
+    )?;
+    Ok(blob.map(|b| decode_vector(&b)))
 }
 
 /// Store an embedding in the cache (no-op on hash collision — same text, same vector).
-fn cache_put(tx: &Transaction, hash: &[u8; 32], vector: &[f32]) -> Result<()> {
-    tx.execute(
+fn cache_put(index: &Index, hash: &[u8; 32], vector: &[f32]) -> Result<()> {
+    index.execute(
         "INSERT OR IGNORE INTO embed_cache(content_hash, vector) VALUES(?1, ?2)",
-        params![hash.as_slice(), encode_vector(vector)],
+        turso::params![hash.as_slice(), encode_vector(vector)],
     )?;
     Ok(())
 }
 
 /// Remove every row derived from `rel` (idempotent).
-fn delete_file(tx: &Transaction, rel: &str) -> Result<()> {
-    let ids: Vec<String> = {
-        let mut stmt = tx.prepare("SELECT id FROM nodes WHERE path = ?1")?;
-        let rows = stmt.query_map([rel], |r| r.get::<_, String>(0))?;
-        rows.collect::<std::result::Result<_, _>>()?
-    };
+fn delete_file(index: &Index, rel: &str) -> Result<()> {
+    let ids: Vec<String> =
+        index.query_rows("SELECT id FROM nodes WHERE path = ?1", [rel], |r| {
+            col_text(r, 0)
+        })?;
     for id in &ids {
-        tx.execute("DELETE FROM sections_fts WHERE node_id = ?1", [id])?;
-        tx.execute("DELETE FROM embeddings WHERE node_id = ?1", [id])?;
+        index.execute("DELETE FROM sections WHERE node_id = ?1", [id.as_str()])?;
+        index.execute("DELETE FROM embeddings WHERE node_id = ?1", [id.as_str()])?;
     }
-    tx.execute("DELETE FROM nodes WHERE path = ?1", [rel])?;
-    tx.execute("DELETE FROM node_files WHERE path = ?1", [rel])?;
-    tx.execute("DELETE FROM edges WHERE source_file = ?1", [rel])?;
-    tx.execute("DELETE FROM unresolved WHERE source_file = ?1", [rel])?;
+    index.execute("DELETE FROM nodes WHERE path = ?1", [rel])?;
+    index.execute("DELETE FROM node_files WHERE path = ?1", [rel])?;
+    index.execute("DELETE FROM edges WHERE source_file = ?1", [rel])?;
+    index.execute("DELETE FROM unresolved WHERE source_file = ?1", [rel])?;
     Ok(())
 }
 
-/// Encode a vector as little-endian f32 bytes (brute-force cosine decodes it — §search).
-fn encode_vector(v: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(v.len() * 4);
-    for f in v {
-        bytes.extend_from_slice(&f.to_le_bytes());
-    }
-    bytes
-}
-
 fn count(index: &Index, sql: &str) -> Result<usize> {
-    let n: i64 = index.conn().query_row(sql, [], |r| r.get(0))?;
-    Ok(n as usize)
+    Ok(index.scalar_i64(sql, ())? as usize)
 }

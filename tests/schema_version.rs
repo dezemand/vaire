@@ -24,9 +24,8 @@ fn incompatible_schema_version_blocks_reads_until_rebuilt() {
 
     // Simulate an index written by a different vaire version.
     {
-        let conn = rusqlite::Connection::open(c.repo().index_db()).unwrap();
-        conn.execute("UPDATE schema_version SET version = 999", [])
-            .unwrap();
+        let index = vaire::index::db::Index::open(&c.repo().index_db()).unwrap();
+        index.set_schema_version(999).unwrap();
     }
 
     // Read commands refuse the mismatched index (exit 3 — "rebuild with --full").

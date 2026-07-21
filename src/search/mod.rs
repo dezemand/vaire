@@ -12,7 +12,7 @@ pub mod vector;
 
 use crate::embed::Embedder;
 use crate::error::Result;
-use crate::index::db::Index;
+use crate::index::db::{Index, col_f64, col_text, col_u32};
 use crate::model::id::{NodeId, NodeType};
 
 /// One search hit: a file plus the section anchors that matched (cli.md §3.4).
@@ -77,19 +77,18 @@ pub fn search(
     if tokens.is_empty() {
         return Ok(Vec::new());
     }
-    let conn = index.conn();
     let mut acc: std::collections::BTreeMap<String, Acc> = std::collections::BTreeMap::new();
 
-    fts_pass(conn, &tokens, &mut acc)?;
-    alias_pass(conn, &tokens, &mut acc)?;
-    vector_pass(conn, embedder, query, &tokens, &mut acc)?;
+    fts_pass(index, &tokens, &mut acc)?;
+    alias_pass(index, &tokens, &mut acc)?;
+    vector_pass(index, embedder, query, &tokens, &mut acc)?;
 
     // Filters.
     if let Some(t) = &opts.type_filter {
         acc.retain(|_, a| a.node_type == t.as_str());
     }
     if let Some(scope) = &opts.scope {
-        let in_scope = scope_set(conn, scope, &opts.scope_field)?;
+        let in_scope = scope_set(index, scope, &opts.scope_field)?;
         acc.retain(|id, _| in_scope.contains(id));
     }
 
@@ -118,37 +117,33 @@ pub fn search(
     Ok(hits)
 }
 
-/// FTS5 over section bodies + headings. Candidate sections are found via `MATCH`, then
-/// scored by query-term frequency in Rust (transparent and bm25-sign-agnostic).
+/// Native FTS over section headings + bodies. Candidate sections are found via `fts_match`
+/// (Turso's Tantivy index; space-separated tokens are OR-combined), then scored by
+/// query-term frequency in Rust — kept from the FTS5 era so ranking is transparent and
+/// unchanged across the engine swap.
 fn fts_pass(
-    conn: &rusqlite::Connection,
+    index: &Index,
     tokens: &[String],
     acc: &mut std::collections::BTreeMap<String, Acc>,
 ) -> Result<()> {
-    let match_expr = tokens
-        .iter()
-        .map(|t| format!("\"{t}\""))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-
-    let mut stmt = conn.prepare(
-        "SELECT sections_fts.node_id, sections_fts.heading, sections_fts.line, sections_fts.body,
-                nodes.type, nodes.path
-         FROM sections_fts JOIN nodes ON nodes.id = sections_fts.node_id
-         WHERE sections_fts MATCH ?1",
+    let match_query = tokens.join(" ");
+    let rows = index.query_rows(
+        "SELECT s.node_id, s.heading, s.line, s.body, n.type, n.path
+         FROM sections s JOIN nodes n ON n.id = s.node_id
+         WHERE fts_match(s.heading, s.body, ?1)",
+        [match_query.as_str()],
+        |r| {
+            Ok((
+                col_text(r, 0)?,
+                col_text(r, 1)?,
+                col_u32(r, 2)?,
+                col_text(r, 3)?,
+                col_text(r, 4)?,
+                col_text(r, 5)?,
+            ))
+        },
     )?;
-    let rows = stmt.query_map([&match_expr], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, u32>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, String>(4)?,
-            r.get::<_, String>(5)?,
-        ))
-    })?;
-    for row in rows {
-        let (id, heading, line, body, node_type, path) = row?;
+    for (id, heading, line, body, node_type, path) in rows {
         let tf = term_frequency(&body, tokens);
         if tf == 0 {
             continue;
@@ -172,21 +167,23 @@ fn fts_pass(
 /// Alias + name matching (high precision): a node matches when every query token is a
 /// substring of its `name:` or one of its `aliases:` (design.md §8/§9).
 fn alias_pass(
-    conn: &rusqlite::Connection,
+    index: &Index,
     tokens: &[String],
     acc: &mut std::collections::BTreeMap<String, Acc>,
 ) -> Result<()> {
-    let mut stmt = conn.prepare("SELECT id, type, path, frontmatter FROM nodes")?;
-    let rows = stmt.query_map([], |r| {
+    let rows = index.query_rows("SELECT id, type, path, frontmatter FROM nodes", (), |r| {
         Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
+            col_text(r, 0)?,
+            col_text(r, 1)?,
+            col_text(r, 2)?,
+            col_text(r, 3)?,
         ))
     })?;
-    for row in rows {
-        let (id, node_type, path, fm) = row?;
+    // Nodes that alias-match but have no anchor yet need a fallback first-section anchor.
+    // Collect them, then fetch all their first sections in one query (avoids an N+1 of
+    // per-node round-trips through the block_on facade).
+    let mut needs_anchor: Vec<String> = Vec::new();
+    for (id, node_type, path, fm) in rows {
         let json: serde_json::Value = serde_json::from_str(&fm).unwrap_or(serde_json::Value::Null);
         let mut candidates: Vec<String> = Vec::new();
         if let Some(name) = json.get("name").and_then(|v| v.as_str()) {
@@ -212,8 +209,16 @@ fn alias_pass(
             anchors: Default::default(),
         });
         entry.score += ALIAS_WEIGHT;
-        if entry.anchors.is_empty()
-            && let Some((heading, line, body)) = first_section(conn, &id)?
+        // An earlier FTS pass may already have anchored this node; only alias-only matches
+        // (no lexical prose hit) fall back to the first section.
+        if entry.anchors.is_empty() {
+            needs_anchor.push(id);
+        }
+    }
+
+    for (id, heading, line, body) in first_sections(index, &needs_anchor)? {
+        if let Some(entry) = acc.get_mut(&id)
+            && entry.anchors.is_empty()
         {
             entry.anchors.insert(
                 line,
@@ -229,9 +234,11 @@ fn alias_pass(
 }
 
 /// Vector recall: embed the query and add nodes whose best section exceeds the cosine
-/// threshold. The recall layer behind FTS + aliases (design.md §9).
+/// threshold. The recall layer behind FTS + aliases (design.md §9). Cosine is now computed
+/// in the engine via Turso's native `vector_distance_cos` (which returns a *distance*, so
+/// `similarity = 1 - distance`); the hand-rolled brute-force loop is retired.
 fn vector_pass(
-    conn: &rusqlite::Connection,
+    index: &Index,
     embedder: &dyn Embedder,
     query: &str,
     tokens: &[String],
@@ -241,28 +248,49 @@ fn vector_pass(
         Some(v) => v,
         None => return Ok(()),
     };
+    // A zero query vector has an undefined cosine; skip the pass rather than error in SQL.
+    if qvec.iter().all(|x| *x == 0.0) {
+        return Ok(());
+    }
+    // The query vector as a little-endian f32 blob — Turso reads it as a Float32-dense
+    // vector directly (same layout the stored `vector` column uses).
+    let qblob = vector::encode_vector(&qvec);
+    // `vector_distance_cos` hard-errors on a dimension mismatch, so only compare against
+    // stored vectors of the same width (byte length ⇒ f32 count ⇒ dims). This makes a
+    // stale-dimension index — one built before an embedding-dimensions change and not yet
+    // `--re-embed`ed — degrade to "no vector recall" instead of failing the query, matching
+    // the old brute-force cosine, which returned 0 similarity for mismatched lengths.
+    let qlen = qblob.len() as i64;
 
-    let mut stmt = conn.prepare(
-        "SELECT e.node_id, e.section_line, e.vector, nodes.type, nodes.path,
-                sections_fts.heading, sections_fts.body
+    let rows = index.query_rows(
+        "SELECT e.node_id, e.section_line,
+                vector_distance_cos(e.vector, ?1) AS dist,
+                n.type, n.path, s.heading, s.body
          FROM embeddings e
-         JOIN nodes ON nodes.id = e.node_id
-         JOIN sections_fts ON sections_fts.node_id = e.node_id AND sections_fts.line = e.section_line",
+         JOIN nodes n ON n.id = e.node_id
+         JOIN sections s ON s.node_id = e.node_id AND s.line = e.section_line
+         WHERE length(e.vector) = ?2",
+        turso::params![qblob, qlen],
+        |r| {
+            Ok((
+                col_text(r, 0)?,
+                col_u32(r, 1)?,
+                col_f64(r, 2)?,
+                col_text(r, 3)?,
+                col_text(r, 4)?,
+                col_text(r, 5)?,
+                col_text(r, 6)?,
+            ))
+        },
     )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, u32>(1)?,
-            r.get::<_, Vec<u8>>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, String>(4)?,
-            r.get::<_, String>(5)?,
-            r.get::<_, String>(6)?,
-        ))
-    })?;
-    for row in rows {
-        let (id, line, blob, node_type, path, heading, body) = row?;
-        let sim = vector::cosine(&qvec, &vector::decode_vector(&blob));
+    for (id, line, dist, node_type, path, heading, body) in rows {
+        // A zero-magnitude stored vector (e.g. an empty section) gives an undefined cosine,
+        // which Turso returns as NaN. Skip it rather than let NaN poison the score — matching
+        // the old brute-force cosine, which returned 0 similarity for a zero vector.
+        if !dist.is_finite() {
+            continue;
+        }
+        let sim = 1.0 - dist as f32;
         if sim < VECTOR_THRESHOLD {
             continue;
         }
@@ -308,7 +336,6 @@ pub fn suggest(
     type_filter: Option<&NodeType>,
     limit: usize,
 ) -> Result<Vec<Suggestion>> {
-    let conn = index.conn();
     let needle = descriptor.trim().to_lowercase();
     if needle.is_empty() {
         return Ok(Vec::new());
@@ -320,17 +347,15 @@ pub fn suggest(
         std::collections::HashMap::new();
     let mut scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
 
-    let mut stmt = conn.prepare("SELECT id, type, path, frontmatter FROM nodes")?;
-    let rows = stmt.query_map([], |r| {
+    let rows = index.query_rows("SELECT id, type, path, frontmatter FROM nodes", (), |r| {
         Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
+            col_text(r, 0)?,
+            col_text(r, 1)?,
+            col_text(r, 2)?,
+            col_text(r, 3)?,
         ))
     })?;
-    for row in rows {
-        let (id, node_type, path, fm) = row?;
+    for (id, node_type, path, fm) in rows {
         let json: serde_json::Value = serde_json::from_str(&fm).unwrap_or(serde_json::Value::Null);
         let name = json
             .get("name")
@@ -365,16 +390,13 @@ pub fn suggest(
 
     // FTS backup: nodes whose prose matches the descriptor.
     if !tokens.is_empty() {
-        let match_expr = tokens
-            .iter()
-            .map(|t| format!("\"{t}\""))
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        let mut stmt =
-            conn.prepare("SELECT DISTINCT node_id FROM sections_fts WHERE sections_fts MATCH ?1")?;
-        let rows = stmt.query_map([&match_expr], |r| r.get::<_, String>(0))?;
-        for row in rows {
-            let id = row?;
+        let match_query = tokens.join(" ");
+        let ids = index.query_rows(
+            "SELECT DISTINCT node_id FROM sections WHERE fts_match(heading, body, ?1)",
+            [match_query.as_str()],
+            |r| col_text(r, 0),
+        )?;
+        for id in ids {
             if info.contains_key(&id) {
                 *scores.entry(id).or_insert(0.0) += SUGGEST_FTS_BONUS;
             }
@@ -413,30 +435,57 @@ pub fn suggest(
 
 /// Node IDs scoped to `project` via a `project` edge (cli.md §3.4 `--scope`).
 fn scope_set(
-    conn: &rusqlite::Connection,
+    index: &Index,
     container: &NodeId,
     scope_field: &str,
 ) -> Result<std::collections::HashSet<String>> {
-    let mut stmt = conn.prepare("SELECT from_id FROM edges WHERE ref_type = ?1 AND to_id = ?2")?;
-    let rows = stmt.query_map(rusqlite::params![scope_field, container.to_string()], |r| {
-        r.get::<_, String>(0)
-    })?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
+    let rows = index.query_rows(
+        "SELECT from_id FROM edges WHERE ref_type = ?1 AND to_id = ?2",
+        turso::params![scope_field, container.to_string()],
+        |r| col_text(r, 0),
+    )?;
+    Ok(rows.into_iter().collect())
 }
 
-/// The first section of a node (lowest line), for an anchor when nothing else matched.
-fn first_section(
-    conn: &rusqlite::Connection,
-    node_id: &str,
-) -> Result<Option<(String, u32, String)>> {
-    use rusqlite::OptionalExtension;
-    Ok(conn
-        .query_row(
-            "SELECT heading, line, body FROM sections_fts WHERE node_id = ?1 ORDER BY line LIMIT 1",
-            [node_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?)
+/// The first section (lowest line) of each of `node_ids`, for a fallback anchor when
+/// nothing else matched — fetched in a single query. Returns one `(node_id, heading, line,
+/// body)` per node that has any section.
+fn first_sections(
+    index: &Index,
+    node_ids: &[String],
+) -> Result<Vec<(String, String, u32, String)>> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = (1..=node_ids.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let params: Vec<turso::Value> = node_ids
+        .iter()
+        .map(|id| turso::Value::from(id.clone()))
+        .collect();
+    let sql = format!(
+        "SELECT node_id, heading, line, body FROM sections
+         WHERE node_id IN ({placeholders}) ORDER BY node_id, line"
+    );
+    let rows = index.query_rows(&sql, params, |r| {
+        Ok((
+            col_text(r, 0)?,
+            col_text(r, 1)?,
+            col_u32(r, 2)?,
+            col_text(r, 3)?,
+        ))
+    })?;
+    // The sections are ordered by (node_id, line), so keep the first seen for each node_id.
+    let mut out: Vec<(String, String, u32, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (id, heading, line, body) in rows {
+        if seen.insert(id.clone()) {
+            out.push((id, heading, line, body));
+        }
+    }
+    Ok(out)
 }
 
 /// Lowercase alphanumeric tokens, de-duplicated, order-preserving.

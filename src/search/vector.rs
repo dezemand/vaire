@@ -1,10 +1,22 @@
-//! Brute-force vector recall (design.md §9).
+//! Vector blob encode/decode + a reference cosine (design.md §9).
 //!
-//! Vectors live in the *same* `index.db` as an embedding blob column; at a few
-//! thousand sections, brute-force cosine in Rust is sub-millisecond, so ANN/`sqlite-vec`
-//! is unnecessary. Same reasoning as SQLite-as-graph: no separate vector store.
+//! Vectors live in the same `index.db` as a blob column. As of M3, similarity is computed
+//! by Turso's native `vector_distance_cos` (see [`crate::search`]); this module keeps the
+//! **little-endian f32 encoding** — which is byte-identical to Turso's Float32-dense layout,
+//! so the same blob serves both the engine and the content-hash embedding cache — and a
+//! hand-rolled [`cosine`] retained as a reference oracle for tests.
 
-/// Decode a little-endian `f32` blob (as written by `index::build`) back to a vector.
+/// Encode a vector as little-endian `f32` bytes. Byte-identical to Turso's Float32-dense
+/// vector layout, so the stored blob is read directly by `vector_distance_cos`.
+pub fn encode_vector(v: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(v.len() * 4);
+    for f in v {
+        bytes.extend_from_slice(&f.to_le_bytes());
+    }
+    bytes
+}
+
+/// Decode a little-endian `f32` blob (as written by [`encode_vector`]) back to a vector.
 pub fn decode_vector(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -45,11 +57,10 @@ mod tests {
     }
 
     #[test]
-    fn decode_roundtrips_le_f32() {
-        let mut blob = Vec::new();
-        for f in [0.5f32, -1.25, 3.0] {
-            blob.extend_from_slice(&f.to_le_bytes());
-        }
-        assert_eq!(decode_vector(&blob), vec![0.5, -1.25, 3.0]);
+    fn encode_decode_roundtrips_le_f32() {
+        let v = vec![0.5f32, -1.25, 3.0];
+        let blob = encode_vector(&v);
+        assert_eq!(blob.len(), v.len() * 4);
+        assert_eq!(decode_vector(&blob), v);
     }
 }
