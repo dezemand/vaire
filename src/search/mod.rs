@@ -584,16 +584,7 @@ fn members_for(
     if local {
         return Ok((vec![current], Vec::new()));
     }
-    let mut members = vec![current];
-    let mut skipped = Vec::new();
-    for (id, entry) in ws.closure() {
-        match entry {
-            Ok(handle) => members.push(handle),
-            Err(_) => skipped.push(id.to_string()),
-        }
-    }
-    members.sort_by(|a, b| a.root.cmp(&b.root));
-    members.dedup_by(|a, b| a.root == b.root);
+    let (members, skipped) = ws.consult_closure();
     Ok((members, skipped))
 }
 

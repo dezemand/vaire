@@ -155,6 +155,24 @@ impl Workspace {
         self.handles.borrow().get(root).cloned()
     }
 
+    /// The member set a fan-out read consults: the run-root plus every locatable closure
+    /// member (sorted + deduped by canonical root), and the names of dependencies that
+    /// could not be located — one shared definition so the skip/dedup semantics stay
+    /// identical across backlinks, search, suggest, and unresolved.
+    pub fn consult_closure(&self) -> (Vec<Rc<PackageHandle>>, Vec<String>) {
+        let mut members = vec![self.current()];
+        let mut skipped = Vec::new();
+        for (id, entry) in self.closure() {
+            match entry {
+                Ok(handle) => members.push(handle),
+                Err(_) => skipped.push(id.to_string()),
+            }
+        }
+        members.sort_by(|a, b| a.root.cmp(&b.root));
+        members.dedup_by(|a, b| a.root == b.root);
+        (members, skipped)
+    }
+
     /// Locate dependency `name` **for** `source`: the source package's own
     /// `.vaire/packages/<name>` first; then the run-root package **itself** (a dependency
     /// cycle back into the package you're standing in needs no link — you're already

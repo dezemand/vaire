@@ -602,6 +602,28 @@ fn status_reports_each_dependency_state() {
     );
 }
 
+#[test]
+fn empty_results_still_surface_skipped_dependencies() {
+    // "Surfaced, never silently dropped" holds even when a fan-out read finds nothing.
+    let ws = Ws::acceptance();
+    std::fs::remove_file(ws.root("acme-shared").join(".vaire/index.db")).unwrap();
+    let out = commands::search::run(
+        &ws.ctx("acme-web"),
+        "zzqxnomatchqq",
+        None,
+        None,
+        Some(10),
+        false,
+    )
+    .unwrap();
+    assert!(out.results.is_empty());
+    assert!(out.skipped.contains(&"acme-shared".to_string()));
+    assert!(
+        vaire::output::Output::render_human(&out).contains("acme-shared"),
+        "human empty output keeps the skipped note"
+    );
+}
+
 // ---- per-consumer link precedence (the reason for the npm model) ------------
 
 /// The diamond: acme-app (run-root) depends on acme-mid and acme-shared; TWO directories

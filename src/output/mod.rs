@@ -178,7 +178,11 @@ impl Output for RefsOutput {
 impl Output for SearchOutput {
     fn render_human(&self) -> String {
         if self.results.is_empty() {
-            return dim(&format!("no results for \"{}\"", self.query));
+            return format!(
+                "{}{}",
+                dim(&format!("no results for \"{}\"", self.query)),
+                skipped_note(&self.skipped)
+            );
         }
         let mut out = format!(
             "{} for {}\n",
@@ -209,7 +213,11 @@ impl Output for SearchOutput {
 impl Output for UnresolvedOutput {
     fn render_human(&self) -> String {
         if self.unresolved.is_empty() {
-            return dim("no unresolved references");
+            return format!(
+                "{}{}",
+                dim("no unresolved references"),
+                skipped_note(&self.skipped)
+            );
         }
         let mut out = format!("{}\n", pluralize(self.count, "unresolved reference"));
         let tags: Vec<String> = self
@@ -732,7 +740,11 @@ pub struct SuggestionItem {
 impl Output for SuggestOutput {
     fn render_human(&self) -> String {
         if self.suggestions.is_empty() {
-            return dim(&format!("no suggestions for \"{}\"", self.descriptor));
+            return format!(
+                "{}{}",
+                dim(&format!("no suggestions for \"{}\"", self.descriptor)),
+                skipped_note(&self.skipped)
+            );
         }
         let mut out = format!(
             "{} for {}\n",
