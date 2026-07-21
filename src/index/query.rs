@@ -233,9 +233,11 @@ impl Index {
     }
 }
 
-/// Parse a stored ID string back into a [`NodeId`]; stored IDs are always well-formed.
+/// Parse a stored ID string back into a [`NodeId`]. Lenient by design: a declared id
+/// that falls outside the strict reference grammar still indexes (files are truth) and
+/// must round-trip unchanged — see [`NodeId::parse_stored`].
 fn parse_id(s: String) -> NodeId {
-    s.parse().expect("stored ids are well-formed type:id")
+    NodeId::parse_stored(&s)
 }
 
 /// The frontmatter view returned by `resolve`: the stored JSON minus `id`/`type`, which

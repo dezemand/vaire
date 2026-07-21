@@ -5,6 +5,12 @@
 //! readable echo Vairë validates against). The vocabulary is *growable*, so the type
 //! is an open string newtype, not a closed enum — a prefix Vairë has never seen is
 //! still a valid node type (design.md §10, "Vocabulary will grow").
+//!
+//! Parsing has two deliberately different entry points:
+//! - [`FromStr`] is the strict reference-**target** grammar (design.md §6): charset-
+//!   validated so a target is identifiable by shape alone, without consulting config.
+//! - [`NodeId::parse_stored`] is the lenient structural parse for IDs the index itself
+//!   stored — a declared id is data (files are truth) and must round-trip unchanged.
 
 use std::fmt;
 use std::str::FromStr;
@@ -77,6 +83,31 @@ impl NodeId {
         self.scope = Some(scope.into());
         self
     }
+
+    /// Parse an ID string the index itself stored (`nodes.id`, `edges.from_id`, …).
+    ///
+    /// Deliberately **lenient** (structure only: last `/` splits the scope, first `:`
+    /// splits `type:slug`) where [`FromStr`] is strict. A *declared* id is data — a file
+    /// with `id: Jane_Doe` still indexes (files are truth) and must round-trip through
+    /// the index unchanged. The strict grammar governs what a *reference* can say, not
+    /// what the corpus may declare; `vaire check` surfaces the gap (`unreferenceable_id`).
+    ///
+    /// Panics on a string without a `:` — the index only ever stores composed
+    /// `type:slug` ids, so that would be an internal invariant violation, not bad input.
+    pub fn parse_stored(s: &str) -> NodeId {
+        let (scope, node_part) = match s.rsplit_once('/') {
+            Some((prefix, last)) if !prefix.is_empty() => (Some(prefix.to_string()), last),
+            _ => (None, s),
+        };
+        let (ty, slug) = node_part
+            .split_once(':')
+            .expect("stored ids are composed type:slug");
+        NodeId {
+            node_type: NodeType::new(ty),
+            slug: slug.to_string(),
+            scope,
+        }
+    }
 }
 
 impl fmt::Display for NodeId {
@@ -88,16 +119,28 @@ impl fmt::Display for NodeId {
     }
 }
 
-/// Parse a node ID. A trailing `/` segment is the node's own `type:slug`; anything
-/// before the last `/` is the scope prefix. With no `/`, the whole string is `type:slug`.
+/// Parse a reference **target** against the strict grammar (design.md §6):
+///
+/// ```text
+/// target := entity ( "/" entity )*      # >1 entity = scoped; last segment is the node
+/// entity := type ":" id
+/// type   := [a-z][a-z0-9-]*             # lowercase, starts with a letter
+/// id     := [a-z0-9][a-z0-9-]*          # lowercase; no '.', no '/', no '@'
+/// ```
+///
+/// The charset is strict **on purpose**: identification is by shape alone, so a URL, an
+/// email, a time, or a date is structurally not an ID and a colon in ordinary prose is
+/// never mistaken for a reference (§6, identification vs classification). The `@pkg/`
+/// cross-package qualifier is recorded by the package groundwork (not parsed yet).
 impl FromStr for NodeId {
     type Err = IdParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (scope, node_part) = match s.rsplit_once('/') {
-            Some((prefix, last)) if !prefix.is_empty() => (Some(prefix.to_string()), last),
-            _ => (None, s),
-        };
+        let mut segments: Vec<&str> = s.split('/').collect();
+        let node_part = segments.pop().expect("split yields at least one segment");
+        if !segments.iter().all(|seg| is_entity(seg)) {
+            return Err(IdParseError::BadScopeSegment);
+        }
         let (ty, slug) = node_part
             .split_once(':')
             .ok_or(IdParseError::MissingColon)?;
@@ -107,11 +150,43 @@ impl FromStr for NodeId {
         if slug.is_empty() {
             return Err(IdParseError::EmptySlug);
         }
+        if !is_type(ty) {
+            return Err(IdParseError::BadType);
+        }
+        if !is_slug(slug) {
+            return Err(IdParseError::BadSlug);
+        }
         Ok(NodeId {
             node_type: NodeType::new(ty),
             slug: slug.to_string(),
-            scope,
+            scope: if segments.is_empty() {
+                None
+            } else {
+                Some(segments.join("/"))
+            },
         })
+    }
+}
+
+/// `type := [a-z][a-z0-9-]*` — lowercase, starts with a letter.
+fn is_type(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some('a'..='z'))
+        && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+}
+
+/// `id := [a-z0-9][a-z0-9-]*` — lowercase; no `.`, no `/`, no `@`, no uppercase.
+fn is_slug(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some('a'..='z' | '0'..='9'))
+        && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+}
+
+/// `entity := type ":" id` — one scope-path segment.
+fn is_entity(seg: &str) -> bool {
+    match seg.split_once(':') {
+        Some((ty, id)) => is_type(ty) && is_slug(id),
+        None => false,
     }
 }
 
@@ -151,4 +226,10 @@ pub enum IdParseError {
     EmptyType,
     #[error("id has an empty slug")]
     EmptySlug,
+    #[error("type must match [a-z][a-z0-9-]* (lowercase, starting with a letter)")]
+    BadType,
+    #[error("id must match [a-z0-9][a-z0-9-]* (lowercase; no '.', '/', or '@')")]
+    BadSlug,
+    #[error("scope segment is not a type:id entity")]
+    BadScopeSegment,
 }

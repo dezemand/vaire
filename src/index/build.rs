@@ -113,10 +113,11 @@ pub fn run(
         (working_matching(repo, &scanner)?, Vec::new())
     };
 
-    // The configured type vocabulary: a frontmatter `type:id` is only treated as an edge
-    // when its type is one of these, so a colon in a non-reference value (a title, a note)
-    // isn't mistaken for a reference (cli.md §6, issue: spurious dangling_ref). Inline
-    // `[[...]]` are deliberate, so they're not gated.
+    // Classification (design.md §6): identification already happened syntactically in the
+    // parser — whatever reached `node.edges` matched the strict target grammar. This step
+    // consults the vocabulary: a frontmatter candidate becomes an edge only when its type
+    // is declared (an undeclared one is dropped here and surfaced by `vaire check` as
+    // unknown_type — never silenced). Inline `[[...]]` are deliberate, so they're not gated.
     let configured: std::collections::HashSet<&str> =
         config.types.iter().map(String::as_str).collect();
 

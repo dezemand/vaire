@@ -99,7 +99,7 @@ pub fn search(
             let mut anchors: Vec<Anchor> = a.anchors.into_values().collect();
             anchors.truncate(MAX_ANCHORS);
             SearchHit {
-                id: id.parse().expect("stored id is well-formed"),
+                id: NodeId::parse_stored(&id),
                 node_type: NodeType::new(a.node_type),
                 path: a.path,
                 score: a.score,
@@ -415,7 +415,7 @@ pub fn suggest(
                 return None;
             }
             Some(Suggestion {
-                id: id.parse().ok()?,
+                id: NodeId::parse_stored(&id),
                 node_type,
                 name,
                 path,

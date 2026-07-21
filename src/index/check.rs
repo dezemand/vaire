@@ -6,6 +6,7 @@
 
 use crate::error::Result;
 use crate::index::db::{Index, col_text, col_u32};
+use crate::model::id::{NodeId, NodeType};
 
 /// A hard violation (fails the check).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -72,9 +73,11 @@ pub enum Warning {
         field: String,
         path: String,
     },
-    /// A reference-shaped frontmatter value (`field: team:alpha`) whose **type is not in
-    /// `id_prefixes`**, so it was *ignored* rather than made an edge. Surfaces the silent
-    /// drop — usually a type you forgot to add to the vocabulary (cli.md §6).
+    /// A frontmatter value matching the reference target grammar (`field: team:alpha`)
+    /// whose **type is not in `types`**, so it was *ignored* rather than made an edge
+    /// (classification, design.md §6). Surfaces the silent drop — declare the type, or
+    /// quote the value as a string. Values that fail identification (URLs, times, prose
+    /// with a colon) are plain scalars and never flagged.
     UnknownType {
         id: String,
         field: String,
@@ -245,12 +248,13 @@ impl Index {
                             path: path.clone(),
                         });
                     }
-                    // Reference-shaped value whose type isn't configured → silently
-                    // dropped; surface it (skip the non-reference display/identity fields).
+                    // Classification (design.md §6): a candidate reference whose type
+                    // isn't declared was *ignored* rather than made an edge — never
+                    // silence it (skip the non-reference display/identity fields).
                     if !crate::corpus::frontmatter::NON_EDGE_KEYS.contains(&field.as_str()) {
                         for v in scalar_strings(value) {
-                            if let Some(ty) = referenced_type(v)
-                                && !configured.contains(ty)
+                            if let Some(ty) = candidate_type(v)
+                                && !configured.contains(ty.as_str())
                             {
                                 warnings.push(Warning::UnknownType {
                                     id: id.clone(),
@@ -301,30 +305,25 @@ fn scalar_strings(value: &serde_json::Value) -> Vec<&str> {
     }
 }
 
-/// If `value` is **reference-shaped** — a bare `type:slug` with no whitespace and a clean
-/// type token (so a title/note with a colon is excluded) — return its type. Used to flag
-/// references whose type isn't configured. Unresolved `?type:` forms are skipped.
-fn referenced_type(value: &str) -> Option<&str> {
+/// If `value` is a **candidate reference** — it matches the strict target grammar, i.e.
+/// identification per design.md §6 — return the node's own type (the last segment's, for
+/// a scoped target). This is the *same parser* the edge path uses, so check and build can
+/// never disagree on what counts as a reference: a URL, a time, or a colon in prose fails
+/// the grammar and is structurally not a candidate (the `url:` fix). Stray `[[ ]]`
+/// brackets are stripped first (the frontmatter trap, flagged separately); unresolved
+/// `?type:` forms are skipped.
+fn candidate_type(value: &str) -> Option<NodeType> {
     let v = value.trim();
     let v = v
         .strip_prefix("[[")
         .and_then(|x| x.strip_suffix("]]"))
         .map(str::trim)
         .unwrap_or(v);
-    if v.is_empty() || v.starts_with('?') || v.chars().any(char::is_whitespace) {
+    if v.starts_with('?') {
         return None;
     }
-    let (ty, slug) = v.split_once(':')?;
-    if ty.is_empty() || slug.is_empty() {
-        return None;
-    }
-    if !ty
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return None;
-    }
-    Some(ty)
+    let id: NodeId = v.parse().ok()?;
+    Some(id.node_type)
 }
 
 /// Whether a stored frontmatter value bears the `[[ ]]` trap: a string containing the
