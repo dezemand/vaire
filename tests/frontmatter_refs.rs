@@ -17,7 +17,7 @@ fn colon_in_display_field_is_not_a_reference() {
     )
     .commit()
     .build();
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         !report
             .violations
@@ -38,7 +38,7 @@ fn frontmatter_reference_with_unconfigured_type_is_ignored() {
     )
     .commit()
     .build();
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         !report
             .violations
@@ -67,7 +67,7 @@ fn check_does_not_flag_colon_in_non_reference_value() {
     )
     .commit()
     .build();
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         !report
             .warnings
@@ -88,7 +88,7 @@ fn check_does_not_flag_urls_or_emails() {
     )
     .commit()
     .build();
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         !report
             .warnings
@@ -120,7 +120,7 @@ fn check_does_not_flag_configured_reference_type() {
     )
     .commit()
     .build();
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         !report
             .warnings
@@ -224,7 +224,7 @@ fn check_warns_on_quoted_bracket_frontmatter() {
     .commit()
     .build();
 
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         report
             .warnings
@@ -244,7 +244,7 @@ fn check_warns_on_unquoted_bracket_frontmatter() {
     .commit()
     .build();
 
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         report
             .warnings

@@ -47,6 +47,16 @@ pub struct UnresolvedRow {
     pub line: u32,
 }
 
+/// One cross-package edge row (`to_id` is the bare within-package address; the package
+/// travels in `to_package`).
+pub(crate) struct CrossEdge {
+    pub(crate) to_package: String,
+    pub(crate) to_id: String,
+    pub(crate) from_id: String,
+    pub(crate) source_file: String,
+    pub(crate) line: u32,
+}
+
 /// A node's stored core fields. `pub(crate)` so the workspace resolver can compose
 /// per-package lookups without re-following redirects locally.
 pub(crate) struct Stored {
@@ -140,6 +150,36 @@ impl Index {
                 distance: 1,
             })
         })
+    }
+
+    /// Every cross-package edge in THIS index — the input to `vaire check`'s
+    /// resolution lints.
+    pub(crate) fn cross_edges(&self) -> Result<Vec<CrossEdge>> {
+        self.query_rows(
+            "SELECT to_package, to_id, from_id, source_file, line FROM edges
+             WHERE to_package IS NOT NULL ORDER BY source_file, line",
+            (),
+            |r| {
+                Ok(CrossEdge {
+                    to_package: col_text(r, 0)?,
+                    to_id: col_text(r, 1)?,
+                    from_id: col_text(r, 2)?,
+                    source_file: col_text(r, 3)?,
+                    line: col_u32(r, 4)?,
+                })
+            },
+        )
+    }
+
+    /// Whether any edge references `to_package = name` — the unused-dependency probe.
+    pub(crate) fn references_package(&self, name: &str) -> Result<bool> {
+        Ok(self
+            .query_opt(
+                "SELECT 1 FROM edges WHERE to_package = ?1 LIMIT 1",
+                [name],
+                |_| Ok(()),
+            )?
+            .is_some())
     }
 
     /// Inbound edges in THIS index that point at another package's node: rows whose

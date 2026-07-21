@@ -624,6 +624,140 @@ fn empty_results_still_surface_skipped_dependencies() {
     );
 }
 
+// ---- check: resolution lints (M5c) ------------------------------------------
+
+#[test]
+fn check_flags_dangling_cross_package_and_terminates_the_cycle() {
+    // THE acceptance criterion: wiki:… = dangling cross-package (error); team/site
+    // resolve clean; the acme-core↔acme-web cycle terminates (check completing at all
+    // proves termination — no traversal, only point lookups).
+    let ws = Ws::acceptance();
+    let (report, failed) = commands::check::run(&ws.ctx("acme-web"), false, false, false).unwrap();
+    assert!(failed);
+    assert!(
+        report.violations.iter().any(|v| matches!(
+            v,
+            vaire::index::check::Violation::DanglingRef { to, .. }
+                if to == "@acme-shared/wiki:home"
+        )),
+        "{:?}",
+        report.violations
+    );
+    // The resolvable cross-package refs are NOT flagged.
+    assert!(
+        !report.violations.iter().any(|v| matches!(
+            v,
+            vaire::index::check::Violation::DanglingRef { to, .. }
+                if to.contains("team:platform") || to.contains("site:hq")
+        )),
+        "{:?}",
+        report.violations
+    );
+}
+
+#[test]
+fn check_reports_missing_dependency_once_not_per_edge() {
+    let ws = Ws::new();
+    ws.add_package("solo", &["note"], &[("acme-core", "^1")])
+        .add_file(
+            "solo",
+            "knowledge/a.md",
+            "---\nid: a\ntype: note\nowner: \"@acme-core/team:one\"\nbackup: \"@acme-core/team:two\"\n---\n# A\n",
+        )
+        .commit("solo")
+        .build("solo");
+
+    let (report, failed) = commands::check::run(&ws.ctx("solo"), false, false, false).unwrap();
+    assert!(failed);
+    let missing: Vec<_> = report
+        .violations
+        .iter()
+        .filter(|v| matches!(v, vaire::index::check::Violation::MissingDependency { .. }))
+        .collect();
+    assert_eq!(
+        missing.len(),
+        1,
+        "once per dependency: {:?}",
+        report.violations
+    );
+    assert!(
+        !report
+            .violations
+            .iter()
+            .any(|v| matches!(v, vaire::index::check::Violation::DanglingRef { .. })),
+        "missing-dep edges are skipped by the dangling pass"
+    );
+}
+
+#[test]
+fn check_warns_on_unused_and_version_mismatched_dependencies() {
+    let ws = Ws::new();
+    ws.add_package("acme-extra", &["note"], &[]);
+    // acme-extra declares version 2.0.0 — outside the consumer's ^1.
+    ws.add_file(
+        "acme-extra",
+        "knowledge.toml",
+        "name = \"acme-extra\"\nversion = \"2.0.0\"\ntypes = [\"note\"]\n",
+    )
+    .add_file(
+        "acme-extra",
+        "knowledge/n.md",
+        "---\nid: n\ntype: note\n---\n# N\n",
+    )
+    .commit("acme-extra");
+    ws.add_package("consumer", &["thing"], &[("acme-extra", "^1")])
+        .add_file(
+            "consumer",
+            "knowledge/t.md",
+            "---\nid: t\ntype: thing\n---\n# T\n",
+        )
+        .commit("consumer");
+    ws.link("consumer", "acme-extra");
+    ws.build("acme-extra").build("consumer");
+
+    let (report, failed) = commands::check::run(&ws.ctx("consumer"), false, false, false).unwrap();
+    use vaire::index::check::Warning;
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, Warning::UnusedDependency { package } if package == "acme-extra")),
+        "{:?}",
+        report.warnings
+    );
+    assert!(
+        report.warnings.iter().any(|w| matches!(
+            w,
+            Warning::DependencyVersionMismatch { package, version, .. }
+                if package == "acme-extra" && version == "2.0.0"
+        )),
+        "surfaced, not enforced: {:?}",
+        report.warnings
+    );
+    assert!(!failed, "both are warnings — enforcement is v0.3");
+}
+
+#[test]
+fn check_ensures_dep_indexes_from_a_cold_clone() {
+    // The acceptance transcript works with `vaire check` as the FIRST command: the
+    // ensure pass builds missing dependency indexes before the resolution lints judge.
+    let ws = Ws::acceptance();
+    for pkg in ["acme-core", "acme-shared"] {
+        let _ = std::fs::remove_file(ws.root(pkg).join(".vaire/index.db"));
+    }
+    let (report, _) = commands::check::run(&ws.ctx("acme-web"), false, false, false).unwrap();
+    assert!(
+        report.violations.iter().any(|v| matches!(
+            v,
+            vaire::index::check::Violation::DanglingRef { to, .. }
+                if to == "@acme-shared/wiki:home"
+        )),
+        "lints ran against freshly-built dep indexes: {:?}",
+        report.violations
+    );
+    assert!(ws.root("acme-core").join(".vaire/index.db").exists());
+}
+
 // ---- per-consumer link precedence (the reason for the npm model) ------------
 
 /// The diamond: acme-app (run-root) depends on acme-mid and acme-shared; TWO directories

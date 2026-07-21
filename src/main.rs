@@ -178,8 +178,9 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Check {
             strict,
             working_tree,
+            no_deps,
         } => {
-            let (report, failed) = commands::check::run(&ctx, strict, working_tree)?;
+            let (report, failed) = commands::check::run(&ctx, strict, working_tree, no_deps)?;
             emit(&report, json);
             if failed {
                 return Ok(ExitCode::CheckViolations);

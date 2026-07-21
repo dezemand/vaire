@@ -52,7 +52,7 @@ fn status_behind_head_after_new_commit() {
 #[test]
 fn check_clean_fixture_has_no_violations() {
     let c = Corpus::fixture();
-    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(report.violations.is_empty(), "{:?}", report.violations);
     assert!(!failed);
 }
@@ -75,7 +75,7 @@ fn check_detects_duplicate_id() {
     .commit()
     .build();
 
-    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(failed);
     assert!(
         report
@@ -95,7 +95,7 @@ fn check_detects_dangling_reference() {
     .commit()
     .build();
 
-    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(failed);
     assert!(
         report
@@ -116,7 +116,7 @@ fn orphan_is_a_warning_not_a_failure_unless_strict() {
     .commit()
     .build();
 
-    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         report
             .warnings
@@ -126,7 +126,7 @@ fn orphan_is_a_warning_not_a_failure_unless_strict() {
     assert!(!failed, "orphans are warnings by default");
 
     // --strict promotes the warning to a failure (exit 6).
-    let (_report, failed_strict) = commands::check::run(&c.ctx(), true, false).unwrap();
+    let (_report, failed_strict) = commands::check::run(&c.ctx(), true, false, false).unwrap();
     assert!(failed_strict);
 }
 
@@ -142,7 +142,7 @@ fn check_flags_undeclared_cross_package_import() {
     .commit()
     .build();
 
-    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(failed, "undeclared import is a violation");
     assert!(
         report.violations.iter().any(|v| matches!(
@@ -174,7 +174,7 @@ fn declared_cross_package_import_is_clean() {
     .commit()
     .build();
 
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         !report
             .violations
@@ -198,7 +198,7 @@ fn check_warns_on_unreferenceable_declared_id() {
     .commit()
     .build();
 
-    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         report
             .warnings
@@ -227,7 +227,7 @@ fn drift_is_an_advisory_warning_for_inline_only_refs() {
         .commit()
         .build();
 
-    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     // Inline-only system:x drifts; system:y (also in frontmatter) does not.
     assert!(
         report
@@ -245,7 +245,7 @@ fn drift_is_an_advisory_warning_for_inline_only_refs() {
     assert!(!failed, "drift is advisory");
 
     // --strict promotes it to a failure.
-    let (_r, failed_strict) = commands::check::run(&c.ctx(), true, false).unwrap();
+    let (_r, failed_strict) = commands::check::run(&c.ctx(), true, false, false).unwrap();
     assert!(failed_strict);
 }
 
@@ -420,11 +420,11 @@ fn check_working_tree_validates_uncommitted_edits() {
     );
 
     // Committed check (reads the existing committed index) is still clean.
-    let (committed, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (committed, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(committed.violations.is_empty());
 
     // Working-tree check reindexes from disk and catches the dangling ref.
-    let (wt, failed) = commands::check::run(&c.ctx(), false, true).unwrap();
+    let (wt, failed) = commands::check::run(&c.ctx(), false, true, false).unwrap();
     assert!(failed);
     assert!(
         wt.violations
