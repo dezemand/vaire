@@ -5,7 +5,7 @@
 //! (or any warning under `--strict`).
 
 use crate::error::Result;
-use crate::index::db::{Index, col_text, col_u32};
+use crate::index::db::{Index, col_opt_text, col_text, col_u32};
 use crate::model::id::{NodeId, NodeType};
 
 /// A hard violation (fails the check).
@@ -181,10 +181,12 @@ impl Index {
             });
         }
 
-        // Dangling references: a (resolved) edge whose target is not a node.
+        // Dangling references: a (resolved) *local* edge whose target is not a node. A
+        // cross-package target (to_package set) can't be checked until workspace
+        // resolution (M5), so it is excluded here — undeclared_import guards it instead.
         let dangling: Vec<(String, String, String, u32)> = self.query_rows(
             "SELECT from_id, to_id, source_file, line FROM edges
-             WHERE to_id NOT IN (SELECT id FROM nodes)
+             WHERE to_package IS NULL AND to_id NOT IN (SELECT id FROM nodes)
              ORDER BY source_file, line",
             (),
             |r| {
@@ -205,11 +207,13 @@ impl Index {
             });
         }
 
-        // Orphans (warning): a node with no inbound or outbound edges.
+        // Orphans (warning): a node with no inbound or outbound edges. Inbound counts only
+        // *local* edges — a cross-package edge's bare to_id could coincide with a local id
+        // but points at another package's node, not this one.
         let orphans: Vec<(String, String)> = self.query_rows(
             "SELECT id, path FROM nodes
              WHERE id NOT IN (SELECT from_id FROM edges)
-               AND id NOT IN (SELECT to_id FROM edges)
+               AND id NOT IN (SELECT to_id FROM edges WHERE to_package IS NULL)
              ORDER BY id",
             (),
             |r| Ok((col_text(r, 0)?, col_text(r, 1)?)),
@@ -220,27 +224,30 @@ impl Index {
 
         // Drift (warning): a resolved inline ref whose target is not also a frontmatter
         // edge of the same node. De-duplicated per (from, to); one direction only.
-        let drift: Vec<(String, String, String, u32)> = self.query_rows(
-            "SELECT e.from_id, e.to_id, MIN(e.source_file), MIN(e.line)
+        let drift: Vec<(String, String, Option<String>, String, u32)> = self.query_rows(
+            "SELECT e.from_id, e.to_id, e.to_package, MIN(e.source_file), MIN(e.line)
              FROM edges e
              WHERE e.ref_type = 'inline'
                AND NOT EXISTS (
                    SELECT 1 FROM edges f
-                   WHERE f.from_id = e.from_id AND f.to_id = e.to_id AND f.ref_type <> 'inline'
+                   WHERE f.from_id = e.from_id AND f.to_id = e.to_id
+                     AND f.to_package IS e.to_package AND f.ref_type <> 'inline'
                )
-             GROUP BY e.from_id, e.to_id
+             GROUP BY e.from_id, e.to_id, e.to_package
              ORDER BY MIN(e.source_file), MIN(e.line)",
             (),
             |r| {
                 Ok((
                     col_text(r, 0)?,
                     col_text(r, 1)?,
-                    col_text(r, 2)?,
-                    col_u32(r, 3)?,
+                    col_opt_text(r, 2)?,
+                    col_text(r, 3)?,
+                    col_u32(r, 4)?,
                 ))
             },
         )?;
-        for (id, to, path, line) in drift {
+        for (id, to, to_package, path, line) in drift {
+            let to = display_target(&to, to_package.as_deref());
             warnings.push(Warning::Drift { id, to, path, line });
         }
 
@@ -324,6 +331,16 @@ impl Index {
             violations,
             warnings,
         })
+    }
+}
+
+/// Render a stored edge target for display: a local target is its bare `to_id`, a
+/// cross-package target regains its `@pkg/` qualifier (`to_id` is the within-package
+/// address; the package lives in a separate column).
+fn display_target(to_id: &str, to_package: Option<&str>) -> String {
+    match to_package {
+        Some(pkg) => format!("@{pkg}/{to_id}"),
+        None => to_id.to_string(),
     }
 }
 

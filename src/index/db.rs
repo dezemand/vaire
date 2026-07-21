@@ -5,8 +5,10 @@
 //! native full-text search and native vectors (issue #2 M3).
 //!
 //! Storage shape (design.md §9):
-//! - `nodes(id, type, path, frontmatter_json, superseded_by)` — the node table.
-//! - `edges(from_id, to_id, ref_type, source_file, line)` — the graph.
+//! - `nodes(id, type, path, frontmatter_json, superseded_by, package)` — the node table;
+//!   `package` is the owning package (manifest `name`, issue #2 M4).
+//! - `edges(from_id, to_id, to_package, ref_type, source_file, line)` — the graph; `to_id`
+//!   is the within-package address and `to_package` (nullable) carries an `@pkg/` target.
 //! - `unresolved(record_id, type_guess, descriptor, source_file, line)` — loose ends.
 //! - `sections(node_id, heading, line, body)` — prose, with a native **FTS index**
 //!   (`sections_fts`, weighted heading>body) over `(heading, body)`; the file is the unit.
@@ -38,7 +40,9 @@ use crate::error::{Result, VaireError};
 ///
 /// v2: migrated `rusqlite`/FTS5 → Turso; the `sections_fts` FTS5 *virtual table* became a
 /// regular `sections` table with a native FTS *index* (issue #2 M3).
-pub const SCHEMA_VERSION: u32 = 2;
+/// v3: package-aware index (issue #2 M4) — `nodes.package` (the owning package, from the
+/// manifest `name`) and `edges.to_package` (NULL = local; set for an `@pkg/` target).
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// The schema as individual statements, run in order on a fresh database. Kept inline
 /// (rather than a `.sql` asset) so the binary is self-contained. No `PRAGMA`s: WAL is
@@ -53,7 +57,8 @@ const SCHEMA_STMTS: &[&str] = &[
         type          TEXT NOT NULL,
         path          TEXT NOT NULL,
         frontmatter   TEXT NOT NULL,        -- JSON
-        superseded_by TEXT                  -- nullable redirect target
+        superseded_by TEXT,                 -- nullable redirect target
+        package       TEXT NOT NULL         -- the owning package (manifest `name`)
     )",
     // Every parsed (id, path) pair, WITHOUT a unique constraint, so duplicate composed IDs
     // survive indexing for `vaire check` to report (the duplicate-entity guard). `nodes`
@@ -62,7 +67,8 @@ const SCHEMA_STMTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS node_files_id ON node_files(id)",
     "CREATE TABLE IF NOT EXISTS edges (
         from_id     TEXT NOT NULL,
-        to_id       TEXT NOT NULL,
+        to_id       TEXT NOT NULL,          -- the within-package address (no @pkg/ prefix)
+        to_package  TEXT,                   -- nullable: set for an @pkg/ cross-package target
         ref_type    TEXT NOT NULL,          -- frontmatter key, or 'inline'
         source_file TEXT NOT NULL,
         line        INTEGER NOT NULL
