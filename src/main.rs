@@ -151,9 +151,10 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             full,
             working_tree,
             re_embed,
+            no_deps,
         } => {
             emit(
-                &commands::index::run(&ctx, full, working_tree, re_embed)?,
+                &commands::index::run(&ctx, full, working_tree, re_embed, no_deps)?,
                 json,
             );
         }

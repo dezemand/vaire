@@ -136,6 +136,9 @@ pub enum Command {
         /// after changing the embedding model/provider). Keeps the graph as-is.
         #[arg(long = "re-embed")]
         re_embed: bool,
+        /// Skip the linked-dependency ensure pass (index only this package).
+        #[arg(long = "no-deps")]
+        no_deps: bool,
     },
 
     /// Run the integrity guards ID-based discovery enables.

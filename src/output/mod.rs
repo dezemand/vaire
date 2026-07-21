@@ -297,6 +297,63 @@ impl Output for IndexSummary {
     }
 }
 
+/// One linked dependency's outcome during `vaire index`'s ensure pass (cli.md §6.5).
+#[derive(Debug, Serialize)]
+pub struct DepIndexed {
+    pub name: String,
+    /// `"indexed"` (built or refreshed, possibly a no-op) or `"missing"` (not linked /
+    /// broken link / name mismatch — see `note`; tolerated with a warning, `vaire check`
+    /// escalates).
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// `vaire index`: the current package's summary plus the linked-dependency ensure pass.
+#[derive(Debug, Serialize)]
+pub struct IndexRunOutput {
+    #[serde(flatten)]
+    pub summary: IndexSummary,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<DepIndexed>,
+}
+
+impl Output for IndexRunOutput {
+    fn render_human(&self) -> String {
+        let mut out = self.summary.render_human();
+        for dep in &self.dependencies {
+            out.push('\n');
+            match dep.status.as_str() {
+                "indexed" => {
+                    let commit = match &dep.commit {
+                        Some(c) => format!("commit {}", &c[..c.len().min(7)]),
+                        None => "working tree".to_string(),
+                    };
+                    out.push_str(&format!(
+                        "  dep {}: indexed {}  {}",
+                        dep.name,
+                        pluralize(dep.nodes.unwrap_or(0), "node"),
+                        dim(&format!("({commit})")),
+                    ));
+                }
+                _ => {
+                    out.push_str(&yellow(&format!(
+                        "  dep {}: {} — {}",
+                        dep.name,
+                        dep.status,
+                        dep.note.as_deref().unwrap_or("unavailable"),
+                    )));
+                }
+            }
+        }
+        out
+    }
+}
+
 impl Output for CheckReport {
     fn render_human(&self) -> String {
         if self.violations.is_empty() && self.warnings.is_empty() {
