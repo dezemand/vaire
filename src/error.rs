@@ -77,8 +77,8 @@ pub enum VaireError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("sqlite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    #[error("index engine error: {0}")]
+    Turso(#[from] turso::Error),
 
     #[error("config error: {0}")]
     Config(String),

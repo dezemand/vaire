@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::commands::Ctx;
 use crate::error::Result;
-use crate::index::db::Index;
+use crate::index::db::{Index, col_i64, col_text};
 use crate::output::{EmbeddingCounts, NodeCounts, StatusOutput};
 
 pub fn run(ctx: &Ctx) -> Result<StatusOutput> {
@@ -36,18 +36,19 @@ pub fn run(ctx: &Ctx) -> Result<StatusOutput> {
 
     let index = Index::open(&repo.index_db())?;
     let schema_version = index.schema_version();
-    let conn = index.conn();
     let last_indexed_commit = index.meta("last_indexed_commit")?;
     let source = index.meta("index_source")?;
 
-    let total = scalar(conn, "SELECT count(*) FROM nodes")?;
-    let edges = scalar(conn, "SELECT count(*) FROM edges")?;
-    let sections = scalar(conn, "SELECT count(*) FROM embeddings")?;
+    let total = index.scalar_i64("SELECT count(*) FROM nodes", ())? as usize;
+    let edges = index.scalar_i64("SELECT count(*) FROM edges", ())? as usize;
+    let sections = index.scalar_i64("SELECT count(*) FROM embeddings", ())? as usize;
 
     let mut by_type = BTreeMap::new();
-    let mut stmt = conn.prepare("SELECT type, count(*) FROM nodes GROUP BY type ORDER BY type")?;
-    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
-        let (ty, n) = row?;
+    for (ty, n) in index.query_rows(
+        "SELECT type, count(*) FROM nodes GROUP BY type ORDER BY type",
+        (),
+        |r| Ok((col_text(r, 0)?, col_i64(r, 1)?)),
+    )? {
         by_type.insert(ty, n as usize);
     }
 
@@ -70,9 +71,4 @@ pub fn run(ctx: &Ctx) -> Result<StatusOutput> {
             cached: sections,
         },
     })
-}
-
-fn scalar(conn: &rusqlite::Connection, sql: &str) -> Result<usize> {
-    let n: i64 = conn.query_row(sql, [], |r| r.get(0))?;
-    Ok(n as usize)
 }

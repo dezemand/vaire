@@ -33,8 +33,13 @@ serde_yaml = "0.9"
 # Authored config (cli.md §6)
 toml = "0.8"
 
-# Derived index: SQLite with bundled FTS5 (design.md §9)
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Derived index: Turso Database — the Rust rewrite of SQLite — as a local embedded file
+# engine, for its native full-text search and native vectors (design.md §9, issue #2 M3).
+# `fts` gates the experimental FTS index method (also enabled per-connection at runtime).
+turso = { version = "0.7", features = ["fts"] }
+# Turso's embedded API is async (io_uring); we own one current-thread runtime inside the
+# `Index` and `block_on` at that boundary, keeping the rest of the CLI synchronous.
+tokio = { version = "1", features = ["rt"] }
 
 # Corpus discovery: include/exclude globs over the working tree (cli.md §6)
 globset = "0.4"
@@ -53,5 +58,3 @@ inquire = "0.7"
 [dev-dependencies]
 # Throwaway git-repo corpora for integration tests
 tempfile = "3"
-# Direct index inspection/tampering in tests (dedups with the normal dependency)
-rusqlite = { version = "0.32", features = ["bundled"] }

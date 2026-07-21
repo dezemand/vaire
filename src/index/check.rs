@@ -5,7 +5,7 @@
 //! (or any warning under `--strict`).
 
 use crate::error::Result;
-use crate::index::db::Index;
+use crate::index::db::{Index, col_text, col_u32};
 
 /// A hard violation (fails the check).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -145,19 +145,19 @@ impl Index {
     /// refs are violations; orphans, drift, frontmatter-wikilink, unknown-type, and
     /// scoped-type-not-permitted are warnings (promoted to failures only under `--strict`).
     pub fn check(&self, config: &crate::config::Config) -> Result<CheckReport> {
-        let conn = self.conn();
         let configured: std::collections::HashSet<&str> =
             config.types.iter().map(String::as_str).collect();
         let mut violations = Vec::new();
         let mut warnings = Vec::new();
 
         // Duplicate IDs: the same composed `type:id` parsed from more than one file.
-        let mut dup = conn.prepare(
+        let dups: Vec<(String, String)> = self.query_rows(
             "SELECT id, group_concat(path, '\n') FROM node_files
              GROUP BY id HAVING COUNT(*) > 1 ORDER BY id",
+            (),
+            |r| Ok((col_text(r, 0)?, col_text(r, 1)?)),
         )?;
-        for row in dup.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-            let (id, paths) = row?;
+        for (id, paths) in dups {
             violations.push(Violation::DuplicateId {
                 id,
                 paths: paths.split('\n').map(str::to_string).collect(),
@@ -165,20 +165,21 @@ impl Index {
         }
 
         // Dangling references: a (resolved) edge whose target is not a node.
-        let mut dangling = conn.prepare(
+        let dangling: Vec<(String, String, String, u32)> = self.query_rows(
             "SELECT from_id, to_id, source_file, line FROM edges
              WHERE to_id NOT IN (SELECT id FROM nodes)
              ORDER BY source_file, line",
+            (),
+            |r| {
+                Ok((
+                    col_text(r, 0)?,
+                    col_text(r, 1)?,
+                    col_text(r, 2)?,
+                    col_u32(r, 3)?,
+                ))
+            },
         )?;
-        for row in dangling.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, u32>(3)?,
-            ))
-        })? {
-            let (from, to, path, line) = row?;
+        for (from, to, path, line) in dangling {
             violations.push(Violation::DanglingRef {
                 from,
                 to,
@@ -188,20 +189,21 @@ impl Index {
         }
 
         // Orphans (warning): a node with no inbound or outbound edges.
-        let mut orphan = conn.prepare(
+        let orphans: Vec<(String, String)> = self.query_rows(
             "SELECT id, path FROM nodes
              WHERE id NOT IN (SELECT from_id FROM edges)
                AND id NOT IN (SELECT to_id FROM edges)
              ORDER BY id",
+            (),
+            |r| Ok((col_text(r, 0)?, col_text(r, 1)?)),
         )?;
-        for row in orphan.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-            let (id, path) = row?;
+        for (id, path) in orphans {
             warnings.push(Warning::Orphan { id, path });
         }
 
         // Drift (warning): a resolved inline ref whose target is not also a frontmatter
         // edge of the same node. De-duplicated per (from, to); one direction only.
-        let mut drift = conn.prepare(
+        let drift: Vec<(String, String, String, u32)> = self.query_rows(
             "SELECT e.from_id, e.to_id, MIN(e.source_file), MIN(e.line)
              FROM edges e
              WHERE e.ref_type = 'inline'
@@ -211,31 +213,29 @@ impl Index {
                )
              GROUP BY e.from_id, e.to_id
              ORDER BY MIN(e.source_file), MIN(e.line)",
+            (),
+            |r| {
+                Ok((
+                    col_text(r, 0)?,
+                    col_text(r, 1)?,
+                    col_text(r, 2)?,
+                    col_u32(r, 3)?,
+                ))
+            },
         )?;
-        for row in drift.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, u32>(3)?,
-            ))
-        })? {
-            let (id, to, path, line) = row?;
+        for (id, to, path, line) in drift {
             warnings.push(Warning::Drift { id, to, path, line });
         }
 
         // Frontmatter wikilink trap (warning): a frontmatter value written with `[[ ]]`
         // brackets — detectable from the stored JSON as either a string containing `[[`
         // or a nested array (the unquoted `[[...]]` parses to one). cli.md §6.3.
-        let mut fm = conn.prepare("SELECT id, path, frontmatter FROM nodes ORDER BY id")?;
-        for row in fm.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })? {
-            let (id, path, fm_json) = row?;
+        let fm_rows: Vec<(String, String, String)> = self.query_rows(
+            "SELECT id, path, frontmatter FROM nodes ORDER BY id",
+            (),
+            |r| Ok((col_text(r, 0)?, col_text(r, 1)?, col_text(r, 2)?)),
+        )?;
+        for (id, path, fm_json) in fm_rows {
             if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str(&fm_json) {
                 for (field, value) in &obj {
                     if looks_like_frontmatter_wikilink(value) {
@@ -268,16 +268,12 @@ impl Index {
         // Scoped-type policy (warning): a scoped node (id has a `/`) whose type is not
         // permitted by the whitelist/blacklist. Data-driven scoping is unaffected — this only
         // flags the policy violation.
-        let mut scoped =
-            conn.prepare("SELECT id, type, path FROM nodes WHERE id LIKE '%/%' ORDER BY id")?;
-        for row in scoped.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })? {
-            let (id, node_type, path) = row?;
+        let scoped: Vec<(String, String, String)> = self.query_rows(
+            "SELECT id, type, path FROM nodes WHERE id LIKE '%/%' ORDER BY id",
+            (),
+            |r| Ok((col_text(r, 0)?, col_text(r, 1)?, col_text(r, 2)?)),
+        )?;
+        for (id, node_type, path) in scoped {
             if !config.scoping_permitted(&node_type) {
                 warnings.push(Warning::ScopedTypeNotPermitted {
                     id,

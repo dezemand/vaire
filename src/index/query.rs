@@ -6,10 +6,10 @@
 
 use std::collections::HashSet;
 
-use rusqlite::OptionalExtension;
+use turso::Value;
 
 use crate::error::{Result, VaireError};
-use crate::index::db::Index;
+use crate::index::db::{Index, col_opt_text, col_text, col_u32};
 use crate::model::id::{NodeId, NodeType};
 
 /// A resolved node location + frontmatter (cli.md §3.1).
@@ -57,21 +57,18 @@ struct Stored {
 
 impl Index {
     fn stored(&self, id: &NodeId) -> Result<Option<Stored>> {
-        Ok(self
-            .conn()
-            .query_row(
-                "SELECT type, path, frontmatter, superseded_by FROM nodes WHERE id = ?1",
-                [id.to_string()],
-                |r| {
-                    Ok(Stored {
-                        node_type: r.get(0)?,
-                        path: r.get(1)?,
-                        frontmatter: r.get(2)?,
-                        superseded_by: r.get(3)?,
-                    })
-                },
-            )
-            .optional()?)
+        self.query_opt(
+            "SELECT type, path, frontmatter, superseded_by FROM nodes WHERE id = ?1",
+            [id.to_string()],
+            |r| {
+                Ok(Stored {
+                    node_type: col_text(r, 0)?,
+                    path: col_text(r, 1)?,
+                    frontmatter: col_text(r, 2)?,
+                    superseded_by: col_opt_text(r, 3)?,
+                })
+            },
+        )
     }
 
     /// `resolve <id>`: locate a node, following `superseded_by` redirects. Errors with
@@ -120,7 +117,9 @@ impl Index {
              FROM edges e JOIN nodes n ON n.id = e.from_id
              WHERE e.to_id = ?1",
         );
-        if type_filter.is_some() {
+        let mut params: Vec<Value> = vec![Value::from(id.to_string())];
+        if let Some(t) = type_filter {
+            params.push(Value::from(t.as_str().to_string()));
             sql.push_str(" AND n.type = ?2");
         }
         sql.push_str(" ORDER BY e.from_id ASC, e.line ASC");
@@ -128,25 +127,16 @@ impl Index {
             sql.push_str(&format!(" LIMIT {n}"));
         }
 
-        let mut stmt = self.conn().prepare(&sql)?;
-        let map = |r: &rusqlite::Row| -> rusqlite::Result<EdgeRow> {
+        self.query_rows(&sql, params, |r| {
             Ok(EdgeRow {
-                id: parse_id(r.get::<_, String>(0)?),
-                node_type: NodeType::new(r.get::<_, String>(1)?),
-                path: r.get(2)?,
-                ref_type: r.get(3)?,
-                line: r.get(4)?,
+                id: parse_id(col_text(r, 0)?),
+                node_type: NodeType::new(col_text(r, 1)?),
+                path: col_text(r, 2)?,
+                ref_type: col_text(r, 3)?,
+                line: col_u32(r, 4)?,
                 distance: 1,
             })
-        };
-        let rows = if let Some(t) = type_filter {
-            stmt.query_map(rusqlite::params![id.to_string(), t.as_str()], map)?
-                .collect::<std::result::Result<_, _>>()?
-        } else {
-            stmt.query_map([id.to_string()], map)?
-                .collect::<std::result::Result<_, _>>()?
-        };
-        Ok(rows)
+        })
     }
 
     /// `refs <id> --depth N`: outbound edges as a BFS. The result is a de-duplicated node
@@ -195,19 +185,11 @@ impl Index {
 
     /// Outbound edges of one node, in stable order, as `(to_id, ref_type, line)`.
     fn outbound(&self, from: &NodeId) -> Result<Vec<(NodeId, String, u32)>> {
-        let mut stmt = self.conn().prepare(
+        self.query_rows(
             "SELECT to_id, ref_type, line FROM edges WHERE from_id = ?1 ORDER BY line, to_id",
-        )?;
-        let rows = stmt
-            .query_map([from.to_string()], |r| {
-                Ok((
-                    parse_id(r.get::<_, String>(0)?),
-                    r.get::<_, String>(1)?,
-                    r.get::<_, u32>(2)?,
-                ))
-            })?
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
+            [from.to_string()],
+            |r| Ok((parse_id(col_text(r, 0)?), col_text(r, 1)?, col_u32(r, 2)?)),
+        )
     }
 
     /// `unresolved`: every `[[?...]]` currently in the corpus, derived fresh from the
@@ -223,44 +205,31 @@ impl Index {
         let mut sql = String::from(
             "SELECT record_id, type_guess, descriptor, source_file, line FROM unresolved WHERE 1=1",
         );
-        if type_filter.is_some() {
-            sql.push_str(" AND type_guess = ?type");
+        let mut params: Vec<Value> = Vec::new();
+        if let Some(t) = type_filter {
+            params.push(Value::from(t.as_str().to_string()));
+            sql.push_str(&format!(" AND type_guess = ?{}", params.len()));
         }
-        if scope.is_some() {
-            sql.push_str(
-                " AND record_id IN (SELECT from_id FROM edges WHERE ref_type = ?scopefield AND to_id = ?scope)",
-            );
+        if let Some(s) = scope {
+            params.push(Value::from(scope_field.to_string()));
+            let field_idx = params.len();
+            params.push(Value::from(s.to_string()));
+            let scope_idx = params.len();
+            sql.push_str(&format!(
+                " AND record_id IN (SELECT from_id FROM edges WHERE ref_type = ?{field_idx} AND to_id = ?{scope_idx})"
+            ));
         }
         sql.push_str(" ORDER BY source_file ASC, line ASC");
 
-        let mut params: Vec<(&str, String)> = Vec::new();
-        if let Some(t) = type_filter {
-            params.push((":type", t.as_str().to_string()));
-        }
-        if let Some(s) = scope {
-            params.push((":scope", s.to_string()));
-            params.push((":scopefield", scope_field.to_string()));
-        }
-        // Named placeholders above are spelled ?name; normalize to :name for rusqlite.
-        let sql = sql.replace("?type", ":type").replace("?scope", ":scope");
-
-        let mut stmt = self.conn().prepare(&sql)?;
-        let bound: Vec<(&str, &dyn rusqlite::ToSql)> = params
-            .iter()
-            .map(|(k, v)| (*k, v as &dyn rusqlite::ToSql))
-            .collect();
-        let rows = stmt
-            .query_map(bound.as_slice(), |r| {
-                Ok(UnresolvedRow {
-                    record: parse_id(r.get::<_, String>(0)?),
-                    type_guess: r.get::<_, Option<String>>(1)?.map(NodeType::new),
-                    descriptor: r.get(2)?,
-                    path: r.get(3)?,
-                    line: r.get(4)?,
-                })
-            })?
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
+        self.query_rows(&sql, params, |r| {
+            Ok(UnresolvedRow {
+                record: parse_id(col_text(r, 0)?),
+                type_guess: col_opt_text(r, 1)?.map(NodeType::new),
+                descriptor: col_text(r, 2)?,
+                path: col_text(r, 3)?,
+                line: col_u32(r, 4)?,
+            })
+        })
     }
 }
 
