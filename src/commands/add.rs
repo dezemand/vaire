@@ -37,19 +37,31 @@ pub fn run(
     let (name, constraint) = parse_spec(spec)?;
 
     let manifest = resolve_manifest(repo_override, config_override)?;
-
-    // Validate the link target *before* touching the manifest, so a bad --link leaves
-    // everything unchanged.
-    let link_target = match link {
-        Some(path) => Some(validate_link_target(&name, path)?),
-        None => None,
-    };
+    let root = manifest
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
 
     let text = std::fs::read_to_string(&manifest)
         .map_err(|e| VaireError::Config(format!("{}: {e}", manifest.display())))?;
     let mut doc: DocumentMut = text
         .parse()
         .map_err(|e| VaireError::Config(format!("{}: {e}", manifest.display())))?;
+
+    // A package cannot depend on itself — bare references are already local. Caught
+    // here so the manifest is never touched (resolution would reject it anyway).
+    if doc.get("name").and_then(|i| i.as_str()) == Some(name.as_str()) {
+        return Err(VaireError::Usage(format!(
+            "package '{name}' cannot depend on itself; bare references are already local"
+        )));
+    }
+
+    // Plan the link fully *before* touching the manifest — target validation AND the
+    // replaceability check — so any --link failure leaves everything unchanged.
+    let link_plan = match link {
+        Some(path) => Some(plan_link(&root, &name, path)?),
+        None => None,
+    };
 
     // Ensure a `[dependencies]` table exists, then set the constraint (creating or updating).
     let deps = doc["dependencies"].or_insert(toml_edit::table());
@@ -61,14 +73,7 @@ pub fn run(
 
     std::fs::write(&manifest, doc.to_string())?;
 
-    let root = manifest
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let linked = match link_target {
-        Some(target) => Some(create_link(&root, &name, &target)?),
-        None => None,
-    };
+    let linked = link_plan.map(commit_link).transpose()?;
 
     Ok(AddOutput {
         name,
@@ -79,20 +84,30 @@ pub fn run(
     })
 }
 
-/// Canonicalize and verify a `--link` target: it must exist and be a package whose
-/// manifest declares `name`. All failures are usage errors (exit 2) — bad argument, and
-/// nothing has been written yet.
-fn validate_link_target(name: &str, path: &Path) -> Result<PathBuf> {
+/// A fully-validated link, ready to commit: everything that can be *rejected* has been.
+struct LinkPlan {
+    entry: PathBuf,
+    /// The symlink target as it will be stored (relative to the packages dir when the
+    /// paths share a prefix — portable if the checkout and target move together).
+    stored: PathBuf,
+}
+
+/// Validate and stage a `--link`: canonicalize the target, require a package declaring
+/// `name` (identity is declared, never path-derived), prepare `.vaire/packages/` (with
+/// the derived-dir gitignore), and refuse a **real directory** at the entry (it may be
+/// installed content). All failures are usage errors (exit 2) — nothing written yet
+/// except derived dirs.
+fn plan_link(root: &Path, name: &str, path: &Path) -> Result<LinkPlan> {
     let target = std::fs::canonicalize(path)
         .map_err(|e| VaireError::Usage(format!("--link {}: {e}", path.display())))?;
-    let manifest = target.join("knowledge.toml");
-    if !manifest.is_file() {
+    let target_manifest = target.join("knowledge.toml");
+    if !target_manifest.is_file() {
         return Err(VaireError::Usage(format!(
             "--link {}: not a package (no knowledge.toml)",
             path.display()
         )));
     }
-    let config = Config::load(&manifest)
+    let config = Config::load(&target_manifest)
         .map_err(|e| VaireError::Usage(format!("--link {}: {e}", path.display())))?;
     if config.name != name {
         return Err(VaireError::Usage(format!(
@@ -101,45 +116,48 @@ fn validate_link_target(name: &str, path: &Path) -> Result<PathBuf> {
             config.name
         )));
     }
-    Ok(target)
-}
 
-/// Create (or replace) the `.vaire/packages/<name>` symlink. The stored link target is
-/// relative to the packages dir when possible (portable if the checkout and the target
-/// move together), else absolute. An existing symlink is replaced; a **real** directory
-/// at that entry is never touched (it may be v0.3-installed content — refuse).
-fn create_link(root: &Path, name: &str, target: &Path) -> Result<String> {
     let packages = Repo::packages_dir_at(root);
     std::fs::create_dir_all(&packages)?;
+    Repo::ensure_derived_gitignore(&root.join(".vaire"))?;
     // Canonicalize so the relative computation sees the same prefix shape as the
     // (already canonical) target — e.g. macOS's /var → /private/var.
     let packages = std::fs::canonicalize(&packages)?;
-    // `.vaire/` may predate this command or be freshly created here; either way the
-    // derived dir must carry its self-contained gitignore (design.md §9).
-    let gitignore = root.join(".vaire").join(".gitignore");
-    if !gitignore.exists() {
-        std::fs::write(
-            &gitignore,
-            "# Vairë — derived index, rebuildable from the corpus files.\n*\n!.gitignore\n",
-        )?;
-    }
 
     let entry = packages.join(name);
-    match std::fs::symlink_metadata(&entry) {
-        Ok(meta) if meta.file_type().is_symlink() => remove_symlink(&entry)?,
-        Ok(_) => {
-            return Err(VaireError::Usage(format!(
-                "{} exists and is a real directory (not a link) — refusing to replace it",
-                entry.display()
-            )));
-        }
-        Err(_) => {}
+    if let Ok(meta) = std::fs::symlink_metadata(&entry)
+        && !meta.file_type().is_symlink()
+    {
+        return Err(VaireError::Usage(format!(
+            "{} exists and is a real directory (not a link) — refusing to replace it",
+            entry.display()
+        )));
     }
 
     let stored =
-        crate::workspace::relative_to(target, &packages).unwrap_or_else(|| target.to_path_buf());
-    symlink_dir(&stored, &entry)?;
-    Ok(stored.display().to_string())
+        crate::workspace::relative_to(&target, &packages).unwrap_or_else(|| target.clone());
+    Ok(LinkPlan { entry, stored })
+}
+
+/// Commit a staged link: create the symlink at a temporary name, then rename over the
+/// entry — atomically replacing an existing symlink, so a reader never observes the
+/// entry missing.
+fn commit_link(plan: LinkPlan) -> Result<String> {
+    let tmp = plan.entry.with_file_name(format!(
+        ".{}.tmp-{}",
+        plan.entry.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    let _ = remove_symlink(&tmp);
+    symlink_dir(&plan.stored, &tmp)?;
+    // Windows cannot rename over an existing directory symlink; clear it first there.
+    #[cfg(windows)]
+    let _ = remove_symlink(&plan.entry);
+    if let Err(e) = std::fs::rename(&tmp, &plan.entry) {
+        let _ = remove_symlink(&tmp);
+        return Err(e.into());
+    }
+    Ok(plan.stored.display().to_string())
 }
 
 #[cfg(unix)]

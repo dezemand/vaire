@@ -94,6 +94,22 @@ impl Repo {
         root.join(".vaire").join("packages")
     }
 
+    /// Write the derived dir's self-contained `.gitignore` if absent (design.md §9). A
+    /// `.vaire/` can come into existence outside `vaire init` — an index build in a
+    /// never-initialized package (notably a linked dependency during a consumer's ensure
+    /// pass) or a first `vaire add --link` — and derived files must never show up as
+    /// untracked noise in that package's repo.
+    pub fn ensure_derived_gitignore(vaire_dir: &Path) -> std::io::Result<()> {
+        let gitignore = vaire_dir.join(".gitignore");
+        if !gitignore.exists() {
+            std::fs::write(
+                &gitignore,
+                "# Vairë — derived index, rebuildable from the corpus files.\n*\n!.gitignore\n",
+            )?;
+        }
+        Ok(())
+    }
+
     /// `<root>/knowledge.toml` — the committed package manifest (v0.2).
     pub fn config_path(&self) -> PathBuf {
         self.root.join("knowledge.toml")

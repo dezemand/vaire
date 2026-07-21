@@ -188,8 +188,27 @@ impl Embedder for CommandEmbedder {
         self.dims
     }
     fn identity(&self) -> String {
-        format!("command:{}", self.dims)
+        // The command string IS the model choice here — hash it (stable FNV-1a, not the
+        // std hasher, since identities persist in index meta across binary versions), so
+        // swapping the script behind `embeddings.command` changes the identity even when
+        // the dimensionality happens to match.
+        format!(
+            "command:{:016x}:{}",
+            fnv1a(self.command.as_bytes()),
+            self.dims
+        )
     }
+}
+
+/// Stable 64-bit FNV-1a — identity strings are persisted and compared across builds, so
+/// the hash must never change between Rust/std versions.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// Embeds via the OpenAI embeddings API (network). Opt-in (`provider = "openai"`) — it
@@ -395,5 +414,27 @@ mod tests {
         let vectors = parse_embedding_response(body, 2).unwrap();
         assert_eq!(vectors, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
         assert!(parse_embedding_response(body, 3).is_err());
+    }
+
+    #[test]
+    fn command_identity_tracks_the_command_not_just_dims() {
+        // Two different scripts with the same dims must NOT share an identity — the
+        // identity is what stops an index mixing vectors across a command swap.
+        let a = CommandEmbedder {
+            command: "model-a.sh".into(),
+            dims: 384,
+        };
+        let b = CommandEmbedder {
+            command: "model-b.sh".into(),
+            dims: 384,
+        };
+        assert_ne!(a.identity(), b.identity());
+
+        // Stable across instances (persisted in index meta, compared across runs).
+        let a2 = CommandEmbedder {
+            command: "model-a.sh".into(),
+            dims: 384,
+        };
+        assert_eq!(a.identity(), a2.identity());
     }
 }

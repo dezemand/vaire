@@ -261,13 +261,7 @@ fn recreate(db_path: &Path) -> Result<Index> {
     }
     if let Some(vaire_dir) = db_path.parent() {
         std::fs::create_dir_all(vaire_dir)?;
-        let gitignore = vaire_dir.join(".gitignore");
-        if !gitignore.exists() {
-            std::fs::write(
-                &gitignore,
-                "# Vairë — derived index, rebuildable from the corpus files.\n*\n!.gitignore\n",
-            )?;
-        }
+        Repo::ensure_derived_gitignore(vaire_dir)?;
     }
     Index::create(db_path)
 }

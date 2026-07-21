@@ -399,18 +399,39 @@ fn add_link_replaces_a_symlink_but_never_a_real_directory() {
         "second --link replaces the symlink"
     );
 
-    // A REAL directory at the entry is never touched (it may be installed content).
+    // A REAL directory at the entry is never touched (it may be installed content) —
+    // and the refusal happens BEFORE the manifest is written (§4.2a: a bad --link
+    // leaves everything unchanged).
     std::fs::remove_file(&entry).unwrap();
     std::fs::create_dir_all(&entry).unwrap();
+    let manifest_before =
+        std::fs::read_to_string(ws.root("acme-web").join("knowledge.toml")).unwrap();
     let err = commands::add::run(
         Some(&ws.root("acme-web")),
         None,
-        "acme-core",
+        "acme-core@^9",
         Some(&ws.root("acme-core")),
     )
     .unwrap_err();
     assert!(matches!(err, VaireError::Usage(_)), "{err}");
     assert!(err.to_string().contains("refusing"), "{err}");
+    let manifest_after =
+        std::fs::read_to_string(ws.root("acme-web").join("knowledge.toml")).unwrap();
+    assert_eq!(manifest_before, manifest_after, "manifest untouched");
+}
+
+#[test]
+fn add_rejects_a_self_dependency_before_writing() {
+    let ws = Ws::new();
+    ws.add_package("acme-web", &["service"], &[]);
+    let manifest_before =
+        std::fs::read_to_string(ws.root("acme-web").join("knowledge.toml")).unwrap();
+    let err = commands::add::run(Some(&ws.root("acme-web")), None, "acme-web", None).unwrap_err();
+    assert!(matches!(err, VaireError::Usage(_)), "{err}");
+    assert!(err.to_string().contains("cannot depend on itself"), "{err}");
+    let manifest_after =
+        std::fs::read_to_string(ws.root("acme-web").join("knowledge.toml")).unwrap();
+    assert_eq!(manifest_before, manifest_after, "manifest untouched");
 }
 
 #[test]
