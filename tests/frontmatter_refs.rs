@@ -77,6 +77,37 @@ fn check_does_not_flag_colon_in_non_reference_value() {
 }
 
 #[test]
+fn check_does_not_flag_urls_or_emails() {
+    // Identification is by shape (design.md §6): a URL or an email is structurally not a
+    // reference — neither an edge nor an unknown_type warning. Pins the url: fix (the old
+    // reference-shape heuristic flagged `url: https://…` as an unconfigured `https` type).
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/r.md",
+        "---\nid: r\ntype: record\nurl: https://example.com\ncontact: mailto:a@b.com\n---\n# R\n",
+    )
+    .commit()
+    .build();
+    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, Warning::UnknownType { .. })),
+        "URLs/emails must not be flagged: {:?}",
+        report.warnings
+    );
+    assert!(
+        !report
+            .violations
+            .iter()
+            .any(|v| matches!(v, Violation::DanglingRef { .. }))
+    );
+    let refs = commands::refs::run(&c.ctx(), "record:r", 1, None).unwrap();
+    assert!(refs.refs.is_empty(), "no edges expected: {:?}", refs.refs);
+}
+
+#[test]
 fn check_does_not_flag_configured_reference_type() {
     let c = Corpus::empty();
     c.add(

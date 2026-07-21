@@ -225,6 +225,61 @@ colon is a *descriptor*, not an ID — the index must **not** follow it as a gra
 `?` and it is a real reference to a real entity. The type after `?` is a hint: optional,
 and overridable by the entity-creation pass.
 
+**The target grammar — strict on purpose.** One *reference target* grammar is shared by
+both syntactic contexts (inline `[[ ]]` and bare frontmatter values, §5). The charset is
+deliberately narrow so a target is identifiable by **shape alone**, without consulting
+config:
+
+```
+target   := [ "@" package "/" ] entity ( "/" entity )*   # >1 entity = scoped (cli.md §6.1)
+entity   := type ":" id
+type     := [a-z][a-z0-9-]*        # lowercase, starts with a letter
+id       := [a-z0-9][a-z0-9-]*     # lowercase; no '.', no '/', no '@', no uppercase
+package  := [a-z][a-z0-9-]*        # never contains ':' or '/'
+```
+
+```
+[[department:platform]]                        local entity
+[[@acme-core/department:platform]]             cross-package entity
+[[project:atlas-2026-q2/record:standup]]       local scoped record
+[[@acme-core/department:platform|Platform]]    display override
+```
+
+The `@package/` qualifier marks a **cross-package** reference. Cross-package references are
+*always* explicitly qualified — a bare reference never searches the dependency set, so the
+same file resolves identically regardless of the consumer's dependencies. The `@` is a
+declaration, not an inference: a cross-package reference is version-constrained and must
+name a declared dependency (manifest.md §5), and `grep '@'` enumerates every cross-package
+edge. In frontmatter, `@` is a YAML reserved indicator, so cross-package values must be
+quoted: `owner: "@acme-core/department:platform"`. (Recording of `@pkg` references lands
+with package groundwork; *resolving* them across a local workspace is the release gate.)
+Loose ends (`?`) stay package-agnostic — a descriptor's package is unknown by definition,
+and Vairë never guesses a package any more than it guesses an ID.
+
+**Identification vs classification — two separate steps.** Conflating them was the
+original `url:` bug:
+
+1. **Identification is syntactic and config-free.** A value is a *candidate reference* iff
+   it matches `target` exactly. The strict charset structurally excludes URLs, emails,
+   paths, times, versions, dates:
+
+   | value | candidate? | why not |
+   |---|---|---|
+   | `department:platform` | yes | |
+   | `@acme-core/department:platform` | yes | |
+   | `https://somewhere` | no | id can't begin `/` |
+   | `mailto:a@b.com` | no | `@`, `.` |
+   | `C:\Users` | no | uppercase, `\` |
+   | `12:30` | no | type must start with a letter |
+   | `1.2.3`, `2026-06-15` | no | dots / no colon |
+
+2. **Classification consults config, and never silences.** A candidate whose `type` is in
+   the manifest `types` is an **edge**. A candidate whose type is *not* declared is neither
+   silently an edge nor silently a string — it is a `vaire check` warning (`unknown_type`:
+   quote it as a string, or declare the type). So the only residual ambiguity is
+   *surfaced*, consistent with "never guess." Values that fail identification (URLs) are
+   plain scalars, full stop.
+
 **Display name & rendering.** A resolved reference carries *display text*. With no `|`,
 the display defaults to the target's **`name:`** field; a `|` overrides it. Rendering a
 reference produces a relative Markdown link — the display in the brackets, the target file

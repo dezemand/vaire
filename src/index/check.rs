@@ -6,6 +6,7 @@
 
 use crate::error::Result;
 use crate::index::db::{Index, col_text, col_u32};
+use crate::model::id::{NodeId, NodeType};
 
 /// A hard violation (fails the check).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -72,9 +73,11 @@ pub enum Warning {
         field: String,
         path: String,
     },
-    /// A reference-shaped frontmatter value (`field: team:alpha`) whose **type is not in
-    /// `id_prefixes`**, so it was *ignored* rather than made an edge. Surfaces the silent
-    /// drop — usually a type you forgot to add to the vocabulary (cli.md §6).
+    /// A frontmatter value matching the reference target grammar (`field: team:alpha`)
+    /// whose **type is not in `types`**, so it was *ignored* rather than made an edge
+    /// (classification, design.md §6). Surfaces the silent drop — declare the type, or
+    /// quote the value as a string. Values that fail identification (URLs, times, prose
+    /// with a colon) are plain scalars and never flagged.
     UnknownType {
         id: String,
         field: String,
@@ -89,6 +92,15 @@ pub enum Warning {
         node_type: String,
         path: String,
     },
+    /// A node whose *declared* id (or scope) falls outside the strict reference target
+    /// grammar (design.md §6) — e.g. `id: Jane_Doe`. The file still indexes (files are
+    /// truth), but no reference can ever address it: identification is by shape, so a
+    /// target naming this node fails to parse. Surfaced instead of left as a silent trap.
+    UnreferenceableId {
+        id: String,
+        path: String,
+        reason: String,
+    },
 }
 
 impl Warning {
@@ -99,6 +111,7 @@ impl Warning {
             Warning::FrontmatterWikilink { .. } => "frontmatter_wikilink",
             Warning::UnknownType { .. } => "unknown_type",
             Warning::ScopedTypeNotPermitted { .. } => "scoped_type_not_permitted",
+            Warning::UnreferenceableId { .. } => "unreferenceable_id",
         }
     }
 
@@ -126,6 +139,9 @@ impl Warning {
             } => {
                 format!("{id}  type '{node_type}' is scoped but not permitted by policy  {path}")
             }
+            Warning::UnreferenceableId { id, path, reason } => {
+                format!("{id}  no reference can address this id ({reason})  {path}")
+            }
         }
     }
 }
@@ -140,10 +156,11 @@ pub struct CheckReport {
 
 impl Index {
     /// Run the integrity guards. `config` supplies the type vocabulary (`types`, used to flag
-    /// reference-shaped frontmatter values whose type isn't configured and so was ignored) and
-    /// the scoping policy (`scoped_types_whitelist`/`blacklist`). Duplicate IDs and dangling
-    /// refs are violations; orphans, drift, frontmatter-wikilink, unknown-type, and
-    /// scoped-type-not-permitted are warnings (promoted to failures only under `--strict`).
+    /// candidate references whose type isn't configured and so was ignored) and the scoping
+    /// policy (`scoped_types_whitelist`/`blacklist`). Duplicate IDs and dangling refs are
+    /// violations; orphans, drift, frontmatter-wikilink, unknown-type, scoped-type-not-
+    /// permitted, and unreferenceable-id are warnings (promoted to failures only under
+    /// `--strict`).
     pub fn check(&self, config: &crate::config::Config) -> Result<CheckReport> {
         let configured: std::collections::HashSet<&str> =
             config.types.iter().map(String::as_str).collect();
@@ -245,12 +262,13 @@ impl Index {
                             path: path.clone(),
                         });
                     }
-                    // Reference-shaped value whose type isn't configured → silently
-                    // dropped; surface it (skip the non-reference display/identity fields).
+                    // Classification (design.md §6): a candidate reference whose type
+                    // isn't declared was *ignored* rather than made an edge — never
+                    // silence it (skip the non-reference display/identity fields).
                     if !crate::corpus::frontmatter::NON_EDGE_KEYS.contains(&field.as_str()) {
                         for v in scalar_strings(value) {
-                            if let Some(ty) = referenced_type(v)
-                                && !configured.contains(ty)
+                            if let Some(ty) = candidate_type(v)
+                                && !configured.contains(ty.as_str())
                             {
                                 warnings.push(Warning::UnknownType {
                                     id: id.clone(),
@@ -283,6 +301,24 @@ impl Index {
             }
         }
 
+        // Unreferenceable id (warning): the node indexed — files are truth — but its
+        // declared id (or scope) falls outside the strict target grammar (design.md §6),
+        // so no reference can ever parse to it. Surface the trap instead of leaving it
+        // silent.
+        let all_ids: Vec<(String, String)> =
+            self.query_rows("SELECT id, path FROM nodes ORDER BY id", (), |r| {
+                Ok((col_text(r, 0)?, col_text(r, 1)?))
+            })?;
+        for (id, path) in all_ids {
+            if let Err(e) = id.parse::<NodeId>() {
+                warnings.push(Warning::UnreferenceableId {
+                    id,
+                    path,
+                    reason: e.to_string(),
+                });
+            }
+        }
+
         Ok(CheckReport {
             ok: violations.is_empty(),
             violations,
@@ -301,30 +337,25 @@ fn scalar_strings(value: &serde_json::Value) -> Vec<&str> {
     }
 }
 
-/// If `value` is **reference-shaped** — a bare `type:slug` with no whitespace and a clean
-/// type token (so a title/note with a colon is excluded) — return its type. Used to flag
-/// references whose type isn't configured. Unresolved `?type:` forms are skipped.
-fn referenced_type(value: &str) -> Option<&str> {
+/// If `value` is a **candidate reference** — it matches the strict target grammar, i.e.
+/// identification per design.md §6 — return the node's own type (the last segment's, for
+/// a scoped target). This is the *same parser* the edge path uses, so check and build can
+/// never disagree on what counts as a reference: a URL, a time, or a colon in prose fails
+/// the grammar and is structurally not a candidate (the `url:` fix). Stray `[[ ]]`
+/// brackets are stripped first (the frontmatter trap, flagged separately); unresolved
+/// `?type:` forms are skipped.
+fn candidate_type(value: &str) -> Option<NodeType> {
     let v = value.trim();
     let v = v
         .strip_prefix("[[")
         .and_then(|x| x.strip_suffix("]]"))
         .map(str::trim)
         .unwrap_or(v);
-    if v.is_empty() || v.starts_with('?') || v.chars().any(char::is_whitespace) {
+    if v.starts_with('?') {
         return None;
     }
-    let (ty, slug) = v.split_once(':')?;
-    if ty.is_empty() || slug.is_empty() {
-        return None;
-    }
-    if !ty
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return None;
-    }
-    Some(ty)
+    let id: NodeId = v.parse().ok()?;
+    Some(id.node_type)
 }
 
 /// Whether a stored frontmatter value bears the `[[ ]]` trap: a string containing the
