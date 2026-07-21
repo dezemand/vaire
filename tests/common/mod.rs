@@ -115,9 +115,12 @@ impl Corpus {
         self.build_with(&DummyEmbedder { dims: 8 }, Mode::Full)
     }
 
-    /// Build/reindex with a specific embedder and mode (for cache tests).
+    /// Build/reindex with a specific embedder and mode (for cache tests). Uses the
+    /// corpus's actual manifest (as commands do), so `nodes.package`/`package_name`
+    /// reflect the declared name.
     pub fn build_with(&self, embedder: &dyn Embedder, mode: Mode) -> &Self {
-        self.build_cfg(&Config::default(), embedder, mode)
+        let config = Config::load(&self.dir.path().join("knowledge.toml")).expect("manifest");
+        self.build_cfg(&config, embedder, mode)
     }
 
     /// Build/reindex with an explicit config (for scoped-ID tests).

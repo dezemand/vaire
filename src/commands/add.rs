@@ -133,28 +133,10 @@ fn create_link(root: &Path, name: &str, target: &Path) -> Result<String> {
         Err(_) => {}
     }
 
-    let stored = relative_to(target, &packages).unwrap_or_else(|| target.to_path_buf());
+    let stored =
+        crate::workspace::relative_to(target, &packages).unwrap_or_else(|| target.to_path_buf());
     symlink_dir(&stored, &entry)?;
     Ok(stored.display().to_string())
-}
-
-/// `target` expressed relative to `base` (both absolute), or `None` when they share no
-/// common prefix worth walking (then the absolute path is stored instead).
-fn relative_to(target: &Path, base: &Path) -> Option<PathBuf> {
-    let t: Vec<_> = target.components().collect();
-    let b: Vec<_> = base.components().collect();
-    let common = t.iter().zip(&b).take_while(|(x, y)| x == y).count();
-    if common <= 1 {
-        return None; // only the root in common — an absolute link is clearer
-    }
-    let mut rel = PathBuf::new();
-    for _ in common..b.len() {
-        rel.push("..");
-    }
-    for c in &t[common..] {
-        rel.push(c);
-    }
-    Some(rel)
 }
 
 #[cfg(unix)]

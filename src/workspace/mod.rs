@@ -47,6 +47,11 @@ pub struct PackageHandle {
     /// Canonicalized package root (symlinks resolved) — one real directory, one handle.
     pub root: PathBuf,
     pub config: Config,
+    /// The package the command was invoked from — its index errors keep the exact local
+    /// semantics/messages the read commands have always had (exit 4 not-built, exit 3
+    /// schema mismatch with the `--full` hint); dependencies get dependency-flavoured
+    /// messages instead.
+    is_run_root: bool,
     index: OnceCell<Index>,
 }
 
@@ -57,34 +62,45 @@ impl PackageHandle {
     pub fn index(&self) -> Result<&Index> {
         if self.index.get().is_none() {
             let db = Repo::index_db_at(&self.root);
-            if !db.exists() {
+            if !db.exists() && !self.is_run_root {
                 return Err(VaireError::Dependency(format!(
                     "dependency '{}' has no index at {} — run `vaire index` (it builds linked dependencies too)",
                     self.id,
                     db.display()
                 )));
             }
+            // Missing run-root index → IndexNotBuilt (exit 4), exactly as before M5.
             let index = Index::open(&db)?;
             match index.schema_version() {
                 Some(v) if v == crate::index::db::SCHEMA_VERSION => {}
                 other => {
-                    return Err(VaireError::IndexCorrupt(format!(
-                        "dependency '{}': index schema version {} is incompatible (expects {}); run `vaire index`",
-                        self.id,
-                        other.map_or_else(|| "unknown".to_string(), |v| v.to_string()),
-                        crate::index::db::SCHEMA_VERSION,
-                    )));
+                    let found = other.map_or_else(|| "unknown".to_string(), |v| v.to_string());
+                    let expects = crate::index::db::SCHEMA_VERSION;
+                    let msg = if self.is_run_root {
+                        format!(
+                            "index schema version {found} is incompatible with this vaire (expects {expects}); \
+                             rebuild with `vaire index --full`"
+                        )
+                    } else {
+                        format!(
+                            "dependency '{}': index schema version {found} is incompatible (expects {expects}); run `vaire index`",
+                            self.id
+                        )
+                    };
+                    return Err(VaireError::IndexCorrupt(msg));
                 }
             }
-            // `package_name` meta: written since M5; absent on older v3 indexes (then the
-            // manifest — which we already validated — is the identity authority).
+            // `package_name` meta: written since M5; absent (or empty — a build without
+            // a named manifest) on older indexes, and then the manifest — which we
+            // already validated — is the identity authority.
             if let Some(stored) = index.meta("package_name")?
+                && !stored.is_empty()
                 && stored != self.id.as_str()
             {
                 return Err(VaireError::IndexCorrupt(format!(
-                    "dependency '{}': its index at {} was built for package '{stored}'; run `vaire index`",
-                    self.id,
-                    db.display()
+                    "index at {} was built for package '{stored}', not '{}'; run `vaire index`",
+                    db.display(),
+                    self.id
                 )));
             }
             let _ = self.index.set(index);
@@ -122,6 +138,7 @@ impl Workspace {
                 id: run_root_id,
                 root: run_root,
                 config: config.clone(),
+                is_run_root: true,
                 index: OnceCell::new(),
             }),
         );
@@ -131,6 +148,11 @@ impl Workspace {
     /// The run-root (current) package's handle.
     pub fn current(&self) -> Rc<PackageHandle> {
         self.handles.borrow()[&self.run_root].clone()
+    }
+
+    /// The memoized handle for a canonical package root a prior resolution opened.
+    pub fn handle_at(&self, root: &Path) -> Option<Rc<PackageHandle>> {
+        self.handles.borrow().get(root).cloned()
     }
 
     /// Locate dependency `name` **for** `source`: the source package's own
@@ -200,6 +222,7 @@ impl Workspace {
             id: PackageId(config.name.clone()),
             root: root.clone(),
             config,
+            is_run_root: false,
             index: OnceCell::new(),
         });
         self.handles.borrow_mut().insert(root, handle.clone());
@@ -244,6 +267,37 @@ fn entry_exists(p: &Path) -> bool {
 
 fn canonical(p: &Path) -> Result<PathBuf> {
     Ok(std::fs::canonicalize(p)?)
+}
+
+/// `target` expressed relative to `base` (both absolute), or `None` when they share no
+/// common prefix worth walking (then an absolute path is clearer). Component-wise — no
+/// filesystem access.
+pub(crate) fn relative_to(target: &Path, base: &Path) -> Option<PathBuf> {
+    let t: Vec<_> = target.components().collect();
+    let b: Vec<_> = base.components().collect();
+    let common = t.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    if common <= 1 {
+        return None; // only the root in common
+    }
+    let mut rel = PathBuf::new();
+    for _ in common..b.len() {
+        rel.push("..");
+    }
+    for c in &t[common..] {
+        rel.push(c);
+    }
+    Some(rel)
+}
+
+/// The clickable, consumer-relative display form of a file in another package —
+/// `../acme-core/knowledge/teams/platform.md` — computed live from the canonical roots
+/// (never stored; JSON keeps the stable package-relative `path` + `package` field).
+pub fn display_path(run_root: &Path, pkg_root: &Path, rel: &str) -> String {
+    let target = pkg_root.join(rel);
+    match relative_to(&target, run_root) {
+        Some(p) => p.display().to_string(),
+        None => target.display().to_string(),
+    }
 }
 
 /// A short human form of a package root for error messages.

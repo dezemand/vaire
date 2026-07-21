@@ -84,8 +84,16 @@ impl Output for ResolveOutput {
         if let (Some(req), Some(_target)) = (&self.requested_id, &self.superseded_by) {
             out.push_str(&dim(&format!("  ↳ superseded; requested {req}\n")));
         }
-        kv(&mut out, "path", 8, &self.path);
+        kv(
+            &mut out,
+            "path",
+            8,
+            self.display_path.as_deref().unwrap_or(&self.path),
+        );
         kv(&mut out, "type", 8, &self.node_type);
+        if let Some(package) = &self.package {
+            kv(&mut out, "package", 8, package);
+        }
         if let Some(obj) = self.frontmatter.as_object() {
             // `name` is the display name — show it first; then the rest, alphabetical.
             if let Some(name) = obj.get("name") {
@@ -426,7 +434,11 @@ impl Output for ConfigureOutput {
 #[derive(Debug, Serialize)]
 pub struct RenderOutput {
     pub id: String,
+    /// Package-root-relative (see [`ResolveOutput::path`]).
     pub path: String,
+    /// The owning package for a cross-package node; absent/null = the current package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     pub markdown: String,
 }
 
@@ -443,11 +455,19 @@ pub struct ResolveOutput {
     pub id: String,
     #[serde(rename = "type")]
     pub node_type: String,
+    /// Package-root-relative — stable across workspace and future cache layouts.
     pub path: String,
+    /// The owning package for a cross-package node; absent/null = the current package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     pub frontmatter: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_id: Option<String>,
     pub superseded_by: Option<String>,
+    /// Human display only: the clickable consumer-relative path for a cross-package
+    /// node (`../acme-core/…`), computed live — never serialized.
+    #[serde(skip)]
+    pub display_path: Option<String>,
 }
 
 // ---- backlinks (cli.md §3.2) -----------------------------------------------
