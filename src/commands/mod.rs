@@ -6,6 +6,7 @@
 //! surface. Each `run` returns a typed output; the binary handles rendering (human vs
 //! `--json`) and the exit-code mapping (cli.md §7).
 
+pub mod add;
 pub mod backlinks;
 pub mod check;
 pub mod configure;

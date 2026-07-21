@@ -1,0 +1,88 @@
+//! `vaire add <pkg>[@^N]` — declare a dependency in `knowledge.toml`.
+//!
+//! Edits the `[dependencies]` table of the committed manifest, **preserving formatting and
+//! comments** (via `toml_edit`) — the manifest is user-authored, so a full re-serialize
+//! (as `init`'s legacy migration does) would be wrong here. Like `init`/`configure`, this
+//! mutates a file and needs no index, so it runs before `Ctx` is built; it discovers the
+//! package root by walking up to the nearest `knowledge.toml` (or honours `--config`).
+//!
+//! `^MAJOR` is the only legal constraint (packages.md §6); the default is `^1`. Adding a
+//! package already present **updates** its constraint in place (idempotent).
+
+use std::path::{Path, PathBuf};
+
+use toml_edit::{DocumentMut, value};
+
+use crate::config::{is_caret_major, is_slug};
+use crate::corpus::repo::Repo;
+use crate::error::{Result, VaireError};
+use crate::output::AddOutput;
+
+/// Add (or update) a dependency. `spec` is `<name>` or `<name>@<constraint>` (e.g.
+/// `acme-core`, `acme-core@^2`). `repo_override`/`config_override` come from the global
+/// `--repo`/`--config` flags.
+pub fn run(
+    repo_override: Option<&Path>,
+    config_override: Option<&Path>,
+    spec: &str,
+) -> Result<AddOutput> {
+    let (name, constraint) = parse_spec(spec)?;
+
+    let manifest = resolve_manifest(repo_override, config_override)?;
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|e| VaireError::Config(format!("{}: {e}", manifest.display())))?;
+    let mut doc: DocumentMut = text
+        .parse()
+        .map_err(|e| VaireError::Config(format!("{}: {e}", manifest.display())))?;
+
+    // Ensure a `[dependencies]` table exists, then set the constraint (creating or updating).
+    let deps = doc["dependencies"].or_insert(toml_edit::table());
+    let table = deps
+        .as_table_mut()
+        .ok_or_else(|| VaireError::Config("`dependencies` is not a table".to_string()))?;
+    let updated = table.contains_key(&name);
+    table[&name] = value(&constraint);
+
+    std::fs::write(&manifest, doc.to_string())?;
+
+    Ok(AddOutput {
+        name,
+        constraint,
+        config_path: manifest.display().to_string(),
+        updated,
+    })
+}
+
+/// Parse `<name>[@<constraint>]`; default constraint `^1`. Validates the name slug and the
+/// `^MAJOR` constraint form up front, so a bad argument is a usage error (exit 2), not a
+/// malformed manifest.
+fn parse_spec(spec: &str) -> Result<(String, String)> {
+    let (name, constraint) = match spec.split_once('@') {
+        Some((n, c)) => (n, c),
+        None => (spec, "^1"),
+    };
+    if !is_slug(name) {
+        return Err(VaireError::Usage(format!(
+            "invalid package name '{name}' (must match [a-z][a-z0-9-]*)"
+        )));
+    }
+    if !is_caret_major(constraint) {
+        return Err(VaireError::Usage(format!(
+            "invalid constraint '{constraint}' (only ^MAJOR is allowed, e.g. ^1)"
+        )));
+    }
+    Ok((name.to_string(), constraint.to_string()))
+}
+
+/// The manifest to edit: an explicit `--config` path, else the discovered package's
+/// `knowledge.toml`.
+fn resolve_manifest(
+    repo_override: Option<&Path>,
+    config_override: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Some(p) = config_override {
+        return Ok(p.to_path_buf());
+    }
+    let cwd = std::env::current_dir()?;
+    Ok(Repo::discover(repo_override, &cwd)?.config_path())
+}

@@ -32,6 +32,9 @@ serde_yaml = "0.9"
 
 # Authored config (cli.md §6)
 toml = "0.8"
+# Format- and comment-preserving edits to the user-authored knowledge.toml (`vaire add`);
+# already in the build graph as a transitive dep of `toml`.
+toml_edit = "0.22"
 
 # Derived index: Turso Database — the Rust rewrite of SQLite — as a local embedded file
 # engine, for its native full-text search and native vectors (design.md §9, issue #2 M3).

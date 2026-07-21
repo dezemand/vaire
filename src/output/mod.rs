@@ -351,6 +351,29 @@ impl Output for InitOutput {
     }
 }
 
+/// `vaire add`: the dependency written to `[dependencies]` in the manifest.
+#[derive(Debug, Serialize)]
+pub struct AddOutput {
+    pub name: String,
+    pub constraint: String,
+    pub config_path: String,
+    /// True when the dependency already existed and its constraint was updated in place.
+    pub updated: bool,
+}
+
+impl Output for AddOutput {
+    fn render_human(&self) -> String {
+        let verb = if self.updated { "updated" } else { "added" };
+        format!(
+            "{} {verb} dependency\n  {} = \"{}\"\n  manifest: {}",
+            green("✓"),
+            self.name,
+            self.constraint,
+            self.config_path,
+        )
+    }
+}
+
 /// `vaire configure`: the embedding settings written to the global user config.
 #[derive(Debug, Serialize)]
 pub struct ConfigureOutput {
