@@ -74,6 +74,23 @@ impl Corpus {
         Corpus { dir }
     }
 
+    /// Overwrite `knowledge.toml` with an explicit `[dependencies]` block appended to the
+    /// default marker (for cross-package / `vaire add` tests). Chainable.
+    pub fn with_dependencies(&self, deps: &[(&str, &str)]) -> &Self {
+        let mut toml = String::from(
+            "name = \"test-corpus\"\nversion = \"0.1.0\"\n\
+             types = [\"person\", \"department\", \"method\", \"system\", \"event\", \"record\", \"project\"]\n",
+        );
+        if !deps.is_empty() {
+            toml.push_str("\n[dependencies]\n");
+            for (name, constraint) in deps {
+                toml.push_str(&format!("{name} = \"{constraint}\"\n"));
+            }
+        }
+        std::fs::write(self.dir.path().join("knowledge.toml"), toml).unwrap();
+        self
+    }
+
     pub fn root(&self) -> &Path {
         self.dir.path()
     }

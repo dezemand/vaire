@@ -21,6 +21,16 @@ pub enum Violation {
         path: String,
         line: u32,
     },
+    /// An `@pkg/…` reference whose package is not in the manifest `[dependencies]`
+    /// (packages.md §8: undeclared import). A pure table check — no cross-package
+    /// *resolution* is needed to know the dependency was never declared.
+    UndeclaredImport {
+        package: String,
+        from: String,
+        to: String,
+        path: String,
+        line: u32,
+    },
 }
 
 impl Violation {
@@ -29,6 +39,7 @@ impl Violation {
         match self {
             Violation::DuplicateId { .. } => "duplicate_id",
             Violation::DanglingRef { .. } => "dangling_ref",
+            Violation::UndeclaredImport { .. } => "undeclared_import",
         }
     }
 
@@ -43,6 +54,15 @@ impl Violation {
                 line,
             } => {
                 format!("{from} → {to}  {path}:{line}")
+            }
+            Violation::UndeclaredImport {
+                package,
+                from,
+                to,
+                path,
+                line,
+            } => {
+                format!("{from} → {to}  package '{package}' not in [dependencies]  {path}:{line}")
             }
         }
     }
@@ -156,11 +176,12 @@ pub struct CheckReport {
 
 impl Index {
     /// Run the integrity guards. `config` supplies the type vocabulary (`types`, used to flag
-    /// candidate references whose type isn't configured and so was ignored) and the scoping
-    /// policy (`scoped_types_whitelist`/`blacklist`). Duplicate IDs and dangling refs are
-    /// violations; orphans, drift, frontmatter-wikilink, unknown-type, scoped-type-not-
-    /// permitted, and unreferenceable-id are warnings (promoted to failures only under
-    /// `--strict`).
+    /// candidate references whose type isn't configured and so was ignored), the declared
+    /// `dependencies` (used to flag an `@pkg/` import of an undeclared package), and the
+    /// scoping policy (`scoped_types_whitelist`/`blacklist`). Duplicate IDs, dangling refs,
+    /// and undeclared imports are violations; orphans, drift, frontmatter-wikilink,
+    /// unknown-type, scoped-type-not-permitted, and unreferenceable-id are warnings (promoted
+    /// to failures only under `--strict`).
     pub fn check(&self, config: &crate::config::Config) -> Result<CheckReport> {
         let configured: std::collections::HashSet<&str> =
             config.types.iter().map(String::as_str).collect();
@@ -205,6 +226,35 @@ impl Index {
                 path,
                 line,
             });
+        }
+
+        // Undeclared import (violation): an `@pkg/…` edge whose package is not declared in
+        // the manifest `[dependencies]` (packages.md §8). Pure table check — the package is
+        // recorded on the edge (M4), so this needs no cross-package resolution.
+        let imports: Vec<(String, String, String, String, u32)> = self.query_rows(
+            "SELECT to_package, from_id, to_id, source_file, line FROM edges
+             WHERE to_package IS NOT NULL ORDER BY source_file, line",
+            (),
+            |r| {
+                Ok((
+                    col_text(r, 0)?,
+                    col_text(r, 1)?,
+                    col_text(r, 2)?,
+                    col_text(r, 3)?,
+                    col_u32(r, 4)?,
+                ))
+            },
+        )?;
+        for (package, from, to_id, path, line) in imports {
+            if !config.dependencies.contains_key(&package) {
+                violations.push(Violation::UndeclaredImport {
+                    to: display_target(&to_id, Some(&package)),
+                    package,
+                    from,
+                    path,
+                    line,
+                });
+            }
         }
 
         // Orphans (warning): a node with no inbound or outbound edges. Inbound counts only

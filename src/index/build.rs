@@ -115,9 +115,11 @@ pub fn run(
 
     // Classification (design.md §6): identification already happened syntactically in the
     // parser — whatever reached `node.edges` matched the strict target grammar. This step
-    // consults the vocabulary: a frontmatter candidate becomes an edge only when its type
-    // is declared (an undeclared one is dropped here and surfaced by `vaire check` as
-    // unknown_type — never silenced). Inline `[[...]]` are deliberate, so they're not gated.
+    // consults the *local* vocabulary: a local frontmatter candidate becomes an edge only
+    // when its type is declared (an undeclared one is dropped here and surfaced by
+    // `vaire check` as unknown_type — never silenced). A cross-package `@pkg/` candidate is
+    // classified by its *owning* package, not this one, so local vocabulary never gates it;
+    // inline `[[...]]` are deliberate, so they're not gated either.
     let configured: std::collections::HashSet<&str> =
         config.types.iter().map(String::as_str).collect();
 
@@ -140,7 +142,7 @@ pub fn run(
                     node.edges.retain(|e| match &e.origin {
                         crate::model::edge::RefOrigin::Inline => true,
                         crate::model::edge::RefOrigin::Frontmatter(_) => {
-                            configured.contains(e.to.node_type.as_str())
+                            e.to.package().is_some() || configured.contains(e.to.node_type.as_str())
                         }
                     });
                     apply_scoping(&mut node, &config.scope_field);
