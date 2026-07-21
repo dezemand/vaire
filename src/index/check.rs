@@ -92,6 +92,15 @@ pub enum Warning {
         node_type: String,
         path: String,
     },
+    /// A node whose *declared* id (or scope) falls outside the strict reference target
+    /// grammar (design.md §6) — e.g. `id: Jane_Doe`. The file still indexes (files are
+    /// truth), but no reference can ever address it: identification is by shape, so a
+    /// target naming this node fails to parse. Surfaced instead of left as a silent trap.
+    UnreferenceableId {
+        id: String,
+        path: String,
+        reason: String,
+    },
 }
 
 impl Warning {
@@ -102,6 +111,7 @@ impl Warning {
             Warning::FrontmatterWikilink { .. } => "frontmatter_wikilink",
             Warning::UnknownType { .. } => "unknown_type",
             Warning::ScopedTypeNotPermitted { .. } => "scoped_type_not_permitted",
+            Warning::UnreferenceableId { .. } => "unreferenceable_id",
         }
     }
 
@@ -129,6 +139,9 @@ impl Warning {
             } => {
                 format!("{id}  type '{node_type}' is scoped but not permitted by policy  {path}")
             }
+            Warning::UnreferenceableId { id, path, reason } => {
+                format!("{id}  no reference can address this id ({reason})  {path}")
+            }
         }
     }
 }
@@ -143,10 +156,11 @@ pub struct CheckReport {
 
 impl Index {
     /// Run the integrity guards. `config` supplies the type vocabulary (`types`, used to flag
-    /// reference-shaped frontmatter values whose type isn't configured and so was ignored) and
-    /// the scoping policy (`scoped_types_whitelist`/`blacklist`). Duplicate IDs and dangling
-    /// refs are violations; orphans, drift, frontmatter-wikilink, unknown-type, and
-    /// scoped-type-not-permitted are warnings (promoted to failures only under `--strict`).
+    /// candidate references whose type isn't configured and so was ignored) and the scoping
+    /// policy (`scoped_types_whitelist`/`blacklist`). Duplicate IDs and dangling refs are
+    /// violations; orphans, drift, frontmatter-wikilink, unknown-type, scoped-type-not-
+    /// permitted, and unreferenceable-id are warnings (promoted to failures only under
+    /// `--strict`).
     pub fn check(&self, config: &crate::config::Config) -> Result<CheckReport> {
         let configured: std::collections::HashSet<&str> =
             config.types.iter().map(String::as_str).collect();
@@ -283,6 +297,24 @@ impl Index {
                     id,
                     node_type,
                     path,
+                });
+            }
+        }
+
+        // Unreferenceable id (warning): the node indexed — files are truth — but its
+        // declared id (or scope) falls outside the strict target grammar (design.md §6),
+        // so no reference can ever parse to it. Surface the trap instead of leaving it
+        // silent.
+        let all_ids: Vec<(String, String)> =
+            self.query_rows("SELECT id, path FROM nodes ORDER BY id", (), |r| {
+                Ok((col_text(r, 0)?, col_text(r, 1)?))
+            })?;
+        for (id, path) in all_ids {
+            if let Err(e) = id.parse::<NodeId>() {
+                warnings.push(Warning::UnreferenceableId {
+                    id,
+                    path,
+                    reason: e.to_string(),
                 });
             }
         }
