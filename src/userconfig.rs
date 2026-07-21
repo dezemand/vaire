@@ -83,8 +83,20 @@ pub fn credential_from(key: &str, home: &Path) -> Option<String> {
     {
         return Some(v);
     }
-    let text = std::fs::read_to_string(home.join("credentials.toml")).ok()?;
-    let table: toml::Table = toml::from_str(&text).ok()?;
+    let path = home.join("credentials.toml");
+    // An absent file is the normal "not configured" case → silent `None`. A file that exists
+    // but does not parse is different: warn, so a corrupt file doesn't masquerade as "no key".
+    let text = std::fs::read_to_string(&path).ok()?;
+    let table: toml::Table = match toml::from_str(&text) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "warning: {}: {e} (ignoring credentials file)",
+                path.display()
+            );
+            return None;
+        }
+    };
     table.get(key)?.as_str().map(str::to_string)
 }
 
@@ -108,20 +120,31 @@ pub fn save_credential_to(home: &Path, key: &str, value: &str) -> Result<PathBuf
     table.insert(key.to_string(), toml::Value::String(value.to_string()));
     let text = toml::to_string_pretty(&table)
         .map_err(|e| VaireError::Config(format!("serialize credentials: {e}")))?;
-    std::fs::write(&path, text)?;
-    restrict_permissions(&path)?;
+    write_private(&path, &text)?;
     Ok(path)
 }
 
-/// Restrict a secrets file to owner read/write (`600`) on Unix; a no-op elsewhere.
+/// Write `text` to a secrets file, creating it with `600` (owner read/write only) from the
+/// start on Unix — so it is never briefly group/world-readable under a permissive umask in the
+/// gap between a plain `write` and a follow-up `chmod`. An existing file is truncated,
+/// re-restricted to `600`, then rewritten, so the secret bytes are only ever present at `600`.
 #[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+fn write_private(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600) // honored only when the file is newly created…
+        .open(path)?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?; // …so fix up a pre-existing one
+    f.write_all(text.as_bytes())?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) -> Result<()> {
+fn write_private(path: &Path, text: &str) -> Result<()> {
+    std::fs::write(path, text)?;
     Ok(())
 }

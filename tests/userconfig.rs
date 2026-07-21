@@ -79,6 +79,15 @@ fn credentials_file_is_owner_only() {
 }
 
 #[test]
+fn corrupt_credentials_file_reads_as_none() {
+    // A malformed credentials.toml is treated as "no credential" (with a stderr warning),
+    // never a panic — resolution stays a total function.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("credentials.toml"), "not = = valid toml").unwrap();
+    assert!(vaire::userconfig::credential_from("VAIRE_M2_ABSENT_KEY", dir.path()).is_none());
+}
+
+#[test]
 fn env_var_wins_over_credentials_file() {
     // Unique key so no other test races on it; env is unsafe to set in edition 2024.
     let dir = tempfile::tempdir().unwrap();

@@ -574,46 +574,7 @@ defaults.
 **Embeddings** are a machine/consumer choice, not part of the package contract, so they are
 **not** manifest settings — see `manifest.md` §6. The providers themselves (`local` built-in,
 `command` shelling out via `sh -c`, `openai` via the API) are unchanged; the API key resolves
-as in §6.2.
-
-### 6.2 Secrets — `credentials.toml`
-
-Providers that need credentials (currently `openai`) resolve them with the precedence
-**environment variable first, then `<config-home>/credentials.toml`** (the user config home,
-§6.3):
-
-- `OPENAI_API_KEY` — required for `provider = "openai"`. Set it in the shell environment, or
-  via `vaire configure embeddings --api-key sk-…` (which writes `credentials.toml`).
-- `OPENAI_BASE_URL` — optional; overrides the API endpoint (proxies / Azure-style gateways).
-
-`credentials.toml` is a TOML `KEY = "value"` table written with `600` permissions (owner
-read/write only) on Unix. It lives in the user config home, never in a corpus, so secrets are
-never committed. `vaire` reads it on demand — it does not mutate the process environment.
-
-### 6.3 Global user config — `vaire configure`
-
-Machine/consumer settings are **not** part of any package manifest (a package must not dictate
-how a consumer indexes it). They live in a per-user config, set with `vaire configure`. The
-command has two forms:
-
-```
-vaire configure                       # interactive: pick a section, then guided prompts
-vaire configure embeddings [--provider local|command|openai] [--model <m>]
-                           [--dimensions <n>] [--command <cmd>]
-                           [--api-key <key>] [--api-url <url>]
-```
-
-- Bare `vaire configure` opens an interactive prompt (currently one section, **Embeddings**;
-  the section menu is there so future settings slot in without changing the UX). Cancelling
-  (Esc / Ctrl-C) exits cleanly and writes nothing.
-- `vaire configure embeddings` sets the same settings non-interactively.
-- Non-secret settings (embedding provider, model, dimensions, command) → `config.toml`.
-- Secrets (`--api-key`, `--api-url`) → `credentials.toml` (§6.2).
-- Only the flags you pass are changed; the rest are preserved.
-
-The **config home** is `VAIRE_CONFIG_HOME` if set, else the platform config directory for
-`vaire` (`~/.config/vaire` on Linux, `~/Library/Application Support/vaire` on macOS,
-`%APPDATA%\vaire` on Windows).
+as in §6.3.
 
 ### 6.1 Scoped IDs
 
@@ -661,7 +622,7 @@ scope: project:atlas-2026-q2
 the ID. Nesting is one level (project) today; the grammar (a `/`-separated path of typed
 segments) leaves room for deeper containers later.
 
-### 6.3 Frontmatter references (and the `[[ ]]` trap)
+### 6.2 Frontmatter references (and the `[[ ]]` trap)
 
 Frontmatter references are **bare** — the `[[ ]]` brackets are an inline-prose convention,
 not a frontmatter one. A frontmatter field value is interpreted as:
@@ -681,6 +642,45 @@ quoted, it is a meaningless string. Vairë forgivingly **strips** stray surround
 (so `head: "[[person:jane]]"` still links), but `vaire check` always **warns**
 (`frontmatter_wikilink`) so the mistake surfaces rather than failing silently. The fix is
 to drop the brackets: `head: person:jane` (resolved) or `head: "?person: …"` (unresolved).
+
+### 6.3 Secrets — `credentials.toml`
+
+Providers that need credentials (currently `openai`) resolve them with the precedence
+**environment variable first, then `<config-home>/credentials.toml`** (the user config home,
+§6.4):
+
+- `OPENAI_API_KEY` — required for `provider = "openai"`. Set it in the shell environment, or
+  via `vaire configure embeddings --api-key sk-…` (which writes `credentials.toml`).
+- `OPENAI_BASE_URL` — optional; overrides the API endpoint (proxies / Azure-style gateways).
+
+`credentials.toml` is a TOML `KEY = "value"` table written with `600` permissions (owner
+read/write only) on Unix. It lives in the user config home, never in a corpus, so secrets are
+never committed. `vaire` reads it on demand — it does not mutate the process environment.
+
+### 6.4 Global user config — `vaire configure`
+
+Machine/consumer settings are **not** part of any package manifest (a package must not dictate
+how a consumer indexes it). They live in a per-user config, set with `vaire configure`. The
+command has two forms:
+
+```text
+vaire configure                       # interactive: pick a section, then guided prompts
+vaire configure embeddings [--provider local|command|openai] [--model <m>]
+                           [--dimensions <n>] [--command <cmd>]
+                           [--api-key <key>] [--api-url <url>]
+```
+
+- Bare `vaire configure` opens an interactive prompt (currently one section, **Embeddings**;
+  the section menu is there so future settings slot in without changing the UX). Cancelling
+  (Esc / Ctrl-C) exits cleanly and writes nothing.
+- `vaire configure embeddings` sets the same settings non-interactively.
+- Non-secret settings (embedding provider, model, dimensions, command) → `config.toml`.
+- Secrets (`--api-key`, `--api-url`) → `credentials.toml` (§6.3).
+- Only the flags you pass are changed; the rest are preserved.
+
+The **config home** is `VAIRE_CONFIG_HOME` if set, else the platform config directory for
+`vaire` (`~/.config/vaire` on Linux, `~/Library/Application Support/vaire` on macOS,
+`%APPDATA%\vaire` on Windows).
 
 ## 7. Exit codes
 
