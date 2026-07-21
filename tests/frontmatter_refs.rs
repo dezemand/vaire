@@ -160,7 +160,7 @@ fn frontmatter_unresolved_reference_appears_in_unresolved() {
     .commit()
     .build();
 
-    let out = commands::unresolved::run(&c.ctx(), None, None).unwrap();
+    let out = commands::unresolved::run(&c.ctx(), None, None, false).unwrap();
     assert!(out.unresolved.iter().any(|u| {
         u.descriptor == "someone senior" && u.type_guess.as_deref() == Some("person")
     }));
@@ -176,7 +176,7 @@ fn frontmatter_typeless_unresolved_reference() {
     .commit()
     .build();
 
-    let out = commands::unresolved::run(&c.ctx(), None, None).unwrap();
+    let out = commands::unresolved::run(&c.ctx(), None, None, false).unwrap();
     let item = out
         .unresolved
         .iter()

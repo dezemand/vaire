@@ -504,6 +504,104 @@ fn suggest_returns_pre_qualified_dep_ids() {
     assert!(local.suggestions.iter().all(|s| s.package.is_none()));
 }
 
+// ---- unresolved / status across packages (M5b) ------------------------------
+
+#[test]
+fn unresolved_defaults_to_this_packages_worklist() {
+    // A dependency's loose ends are its owner's worklist (packages.md §7).
+    let ws = Ws::acceptance();
+    let out = commands::unresolved::run(&ws.ctx("acme-web"), None, None, false).unwrap();
+    let descs: Vec<&str> = out
+        .unresolved
+        .iter()
+        .map(|u| u.descriptor.as_str())
+        .collect();
+    assert!(descs.contains(&"the on-call lead"), "{descs:?}");
+    assert!(!descs.contains(&"the incident manager"), "{descs:?}");
+    assert!(out.unresolved.iter().all(|u| u.package.is_none()));
+}
+
+#[test]
+fn unresolved_all_packages_tags_dependency_rows() {
+    let ws = Ws::acceptance();
+    let out = commands::unresolved::run(&ws.ctx("acme-web"), None, None, true).unwrap();
+    let dep_row = out
+        .unresolved
+        .iter()
+        .find(|u| u.descriptor == "the incident manager")
+        .unwrap_or_else(|| panic!("{:?}", out.unresolved));
+    assert_eq!(dep_row.package.as_deref(), Some("acme-core"));
+    assert_eq!(dep_row.record, "@acme-core/team:platform");
+    // The run-root's own row stays untagged.
+    assert!(
+        out.unresolved
+            .iter()
+            .any(|u| u.descriptor == "the on-call lead" && u.package.is_none())
+    );
+}
+
+#[test]
+fn unresolved_scope_and_all_packages_conflict() {
+    let ws = Ws::acceptance();
+    let err =
+        commands::unresolved::run(&ws.ctx("acme-web"), None, Some("project:x"), true).unwrap_err();
+    assert!(matches!(err, VaireError::Usage(_)), "{err}");
+}
+
+#[test]
+fn status_reports_each_dependency_state() {
+    let ws = Ws::acceptance();
+    let out = commands::status::run(&ws.ctx("acme-web")).unwrap();
+    assert_eq!(
+        out.embed_provider.as_deref(),
+        Some("unknown:8"),
+        "dummy identity"
+    );
+
+    let core = out
+        .dependencies
+        .iter()
+        .find(|d| d.name == "acme-core")
+        .unwrap();
+    assert!(core.linked);
+    assert_eq!(core.index, "fresh");
+    assert!(core.nodes > 0);
+    assert_eq!(core.version.as_deref(), Some("1.0.0"));
+    assert_eq!(core.commits_behind_head, 0);
+
+    // Stale schema is reported, not fatal.
+    let shared_db = ws.root("acme-shared").join(".vaire/index.db");
+    let index = vaire::index::Index::open(&shared_db).unwrap();
+    index.set_schema_version(999).unwrap();
+    drop(index);
+    let out = commands::status::run(&ws.ctx("acme-web")).unwrap();
+    let shared = out
+        .dependencies
+        .iter()
+        .find(|d| d.name == "acme-shared")
+        .unwrap();
+    assert_eq!(shared.index, "stale-schema");
+
+    // An unlinked dependency is a reported row with the fix, never a failure.
+    std::fs::remove_file(ws.root("acme-web").join(".vaire/packages/acme-shared")).unwrap();
+    let out = commands::status::run(&ws.ctx("acme-web")).unwrap();
+    let shared = out
+        .dependencies
+        .iter()
+        .find(|d| d.name == "acme-shared")
+        .unwrap();
+    assert!(!shared.linked);
+    assert!(
+        shared
+            .note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("--link"),
+        "{:?}",
+        shared.note
+    );
+}
+
 // ---- per-consumer link precedence (the reason for the npm model) ------------
 
 /// The diamond: acme-app (run-root) depends on acme-mid and acme-shared; TWO directories

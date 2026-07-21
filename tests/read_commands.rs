@@ -180,7 +180,7 @@ fn refs_depth_two_reaches_second_hop() {
 #[test]
 fn unresolved_lists_loose_ends_with_type_guess() {
     let c = Corpus::fixture();
-    let out = commands::unresolved::run(&c.ctx(), None, None).unwrap();
+    let out = commands::unresolved::run(&c.ctx(), None, None, false).unwrap();
 
     assert_eq!(out.count, 2);
     let person = out
@@ -207,7 +207,7 @@ fn unresolved_lists_loose_ends_with_type_guess() {
 fn unresolved_type_filter_matches_guess_only() {
     let c = Corpus::fixture();
     // `--type person` matches the [[?person: ...]] but not the typeless [[?: ...]].
-    let out = commands::unresolved::run(&c.ctx(), Some("person"), None).unwrap();
+    let out = commands::unresolved::run(&c.ctx(), Some("person"), None, false).unwrap();
     assert_eq!(out.count, 1);
     assert_eq!(out.unresolved[0].type_guess.as_deref(), Some("person"));
 }

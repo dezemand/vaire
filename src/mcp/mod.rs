@@ -136,6 +136,7 @@ pub fn call_tool(ctx: &Ctx, name: &str, args: &Value) -> std::result::Result<Val
             ctx,
             opt_str(args, "type").as_deref(),
             opt_str(args, "scope").as_deref(),
+            opt_bool(args, "all_packages"),
         )
         .map(|o| o.to_json()),
         other => return Err(format!("unknown tool: {other}")),
@@ -233,7 +234,8 @@ pub fn tools_list() -> Value {
                 "type": "object",
                 "properties": {
                     "type": { "type": "string", "description": "Restrict to a ?type hint" },
-                    "scope": { "type": "string" }
+                    "scope": { "type": "string" },
+                    "all_packages": { "type": "boolean", "description": "Also list linked dependencies' loose ends (default: this package only)" }
                 }
             }
         }

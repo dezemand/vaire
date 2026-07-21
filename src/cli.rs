@@ -111,6 +111,10 @@ pub enum Command {
         type_filter: Option<String>,
         #[arg(long)]
         scope: Option<String>,
+        /// Also list linked dependencies' loose ends (default: this package only —
+        /// a dependency's worklist belongs to its owner).
+        #[arg(long = "all-packages")]
+        all_packages: bool,
     },
 
     // ---- maintain commands (NOT on the MCP surface) ----

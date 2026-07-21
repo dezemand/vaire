@@ -151,8 +151,17 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             )?;
             emit(&out, json);
         }
-        Command::Unresolved { type_filter, scope } => {
-            let out = commands::unresolved::run(&ctx, type_filter.as_deref(), scope.as_deref())?;
+        Command::Unresolved {
+            type_filter,
+            scope,
+            all_packages,
+        } => {
+            let out = commands::unresolved::run(
+                &ctx,
+                type_filter.as_deref(),
+                scope.as_deref(),
+                all_packages,
+            )?;
             emit(&out, json);
         }
         Command::Index {

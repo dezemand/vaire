@@ -1,33 +1,89 @@
-//! `vaire unresolved [--type T] [--scope project-id]` (cli.md §3.5).
+//! `vaire unresolved [--type T] [--scope container-id] [--all-packages]` (cli.md §3.5).
 //!
 //! The work list for the entity-creation pass (design.md §8), derived fresh from the
-//! files on each call — there is no stored queue.
+//! files on each call — there is no stored queue. Default scope is the CURRENT package:
+//! a descriptor is package-agnostic (packages.md §7) and a dependency's loose ends are
+//! its owner's worklist. `--all-packages` widens to the linked closure, each row tagged
+//! with its package.
 
 use crate::commands::Ctx;
 use crate::error::{Result, VaireError};
 use crate::model::id::{NodeId, NodeType};
 use crate::output::{UnresolvedItem, UnresolvedOutput};
 
-pub fn run(ctx: &Ctx, type_filter: Option<&str>, scope: Option<&str>) -> Result<UnresolvedOutput> {
+pub fn run(
+    ctx: &Ctx,
+    type_filter: Option<&str>,
+    scope: Option<&str>,
+    all_packages: bool,
+) -> Result<UnresolvedOutput> {
     let ty = type_filter.map(NodeType::new);
     let scope = scope
         .map(|s| s.parse::<NodeId>())
         .transpose()
         .map_err(|e| VaireError::Usage(format!("bad --scope: {e}")))?;
-    let index = ctx.open_index()?;
-    let rows = index.unresolved(ty.as_ref(), scope.as_ref(), &ctx.config.scope_field)?;
-    let unresolved: Vec<UnresolvedItem> = rows
-        .into_iter()
-        .map(|r| UnresolvedItem {
-            record: r.record.to_string(),
-            path: r.path,
-            type_guess: r.type_guess.map(|t| t.to_string()),
-            descriptor: r.descriptor,
-            line: r.line,
-        })
-        .collect();
+    if all_packages && scope.is_some() {
+        return Err(VaireError::Usage(
+            "--scope cannot be combined with --all-packages (a scope is one package's container)"
+                .into(),
+        ));
+    }
+
+    let ws = ctx.workspace()?;
+    let run_root = ws.current();
+    let mut skipped: Vec<String> = Vec::new();
+
+    let mut members = vec![run_root.clone()];
+    if all_packages {
+        for (id, entry) in ws.closure() {
+            match entry {
+                Ok(handle) => members.push(handle),
+                Err(_) => skipped.push(id.to_string()),
+            }
+        }
+        members.sort_by(|a, b| a.root.cmp(&b.root));
+        members.dedup_by(|a, b| a.root == b.root);
+    }
+
+    let mut unresolved: Vec<UnresolvedItem> = Vec::new();
+    for member in members {
+        let is_run_root = member.root == run_root.root;
+        let index = match member.index() {
+            Ok(index) => index,
+            Err(e) if is_run_root => return Err(e),
+            Err(_) => {
+                skipped.push(member.id.to_string());
+                continue;
+            }
+        };
+        let rows = index.unresolved(ty.as_ref(), scope.as_ref(), &member.config.scope_field)?;
+        for r in rows {
+            let record = if is_run_root {
+                r.record.to_string()
+            } else {
+                r.record
+                    .clone()
+                    .with_package(member.id.0.clone())
+                    .to_string()
+            };
+            unresolved.push(UnresolvedItem {
+                record,
+                display_path: (!is_run_root)
+                    .then(|| crate::workspace::display_path(&run_root.root, &member.root, &r.path)),
+                path: r.path,
+                package: (!is_run_root).then(|| member.id.to_string()),
+                type_guess: r.type_guess.map(|t| t.to_string()),
+                descriptor: r.descriptor,
+                line: r.line,
+            });
+        }
+    }
+
+    skipped.sort();
+    skipped.dedup();
     Ok(UnresolvedOutput {
         count: unresolved.len(),
         unresolved,
+        skipped,
     })
 }

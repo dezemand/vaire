@@ -231,11 +231,13 @@ impl Output for UnresolvedOutput {
             out.push_str(&format!(
                 "  {}  {desc:<dw$}  {}  {}\n",
                 yellow(&format!("{:<w$}", tag)),
-                loc(&u.path, u.line),
+                loc(u.display_path.as_deref().unwrap_or(&u.path), u.line),
                 dim(&format!("({})", u.record)),
             ));
         }
-        out.trim_end().to_string()
+        let mut out = out.trim_end().to_string();
+        out.push_str(&skipped_note(&self.skipped));
+        out
     }
 }
 
@@ -290,6 +292,57 @@ impl Output for StatusOutput {
                 self.embeddings.cached, self.embeddings.sections
             ),
         );
+        if !self.dependencies.is_empty() {
+            out.push_str("dependencies:\n");
+            let w = col_width(self.dependencies.iter().map(|d| d.name.as_str()));
+            for d in &self.dependencies {
+                if !d.linked || d.index == "missing" || d.index == "unreadable" {
+                    // Unavailable in some way: name + state + the note/fix.
+                    let detail = d.note.as_deref().unwrap_or("no index — run `vaire index`");
+                    out.push_str(&format!(
+                        "  {}  {}\n",
+                        cyan(&format!("{:<w$}", d.name)),
+                        yellow(&format!("{} — {detail}", d.index)),
+                    ));
+                    continue;
+                }
+                let commit = match &d.last_indexed_commit {
+                    Some(c) => {
+                        let short = &c[..c.len().min(7)];
+                        if d.commits_behind_head == 0 {
+                            format!("{short} {}", dim("(up to date)"))
+                        } else {
+                            format!(
+                                "{short} {}",
+                                yellow(&format!("({} behind)", d.commits_behind_head))
+                            )
+                        }
+                    }
+                    None => dim("working tree").to_string(),
+                };
+                let mut line = format!(
+                    "  {}  {}  {}  {}",
+                    cyan(&format!("{:<w$}", d.name)),
+                    d.index,
+                    pluralize(d.nodes, "node"),
+                    commit,
+                );
+                // The observability point for silent vector-recall gaps: a dep embedded
+                // by a different provider contributes FTS/alias hits only.
+                if let (Some(theirs), Some(ours)) = (&d.embed_provider, &self.embed_provider)
+                    && theirs != ours
+                {
+                    line.push_str(&format!(
+                        "  {}",
+                        yellow(&format!(
+                            "vectors {theirs} vs yours {ours} — vector search skipped"
+                        ))
+                    ));
+                }
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
         out.trim_end().to_string()
     }
 }
@@ -708,15 +761,26 @@ impl Output for SuggestOutput {
 pub struct UnresolvedOutput {
     pub unresolved: Vec<UnresolvedItem>,
     pub count: usize,
+    /// Dependencies that could not be consulted (`--all-packages` only) — surfaced,
+    /// never silently dropped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct UnresolvedItem {
     pub record: String,
+    /// Package-root-relative — stable across workspace and future cache layouts.
     pub path: String,
+    /// The owning package (`--all-packages` rows); absent/null = the current package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     pub type_guess: Option<String>,
     pub descriptor: String,
     pub line: u32,
+    /// Human display only: clickable consumer-relative path for a cross-package row.
+    #[serde(skip)]
+    pub display_path: Option<String>,
 }
 
 // ---- status (cli.md §4.3) --------------------------------------------------
@@ -734,6 +798,34 @@ pub struct StatusOutput {
     pub nodes: NodeCounts,
     pub edges: usize,
     pub embeddings: EmbeddingCounts,
+    /// Which embedder produced this index's vectors (`provider[:model]:dims`), or null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embed_provider: Option<String>,
+    /// One row per linked dependency (transitive closure); empty for a standalone package.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<DepStatus>,
+}
+
+/// One linked dependency's state as reported by `vaire status` (cli.md §4.3).
+#[derive(Debug, Serialize)]
+pub struct DepStatus {
+    pub name: String,
+    pub linked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_indexed_commit: Option<String>,
+    pub commits_behind_head: u32,
+    pub nodes: usize,
+    /// `"fresh"`, `"stale-schema"`, `"missing"`, or `"unreadable"`.
+    pub index: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embed_provider: Option<String>,
+    /// Why the dependency is unavailable, when it is (with the fix).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

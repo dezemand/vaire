@@ -271,13 +271,17 @@ the entity-creation pass (design.md §8) and is derived fresh from the files on 
 there is no stored queue.
 
 ```
-vaire unresolved [--type <T>] [--scope <project-id>] [--json]
+vaire unresolved [--type <T>] [--scope <container-id>] [--all-packages] [--json]
 ```
 
 - `--type <T>` — restrict to a `?type` hint (e.g. `--type person` matches `[[?person: …]]`;
   references written as `[[?: …]]` have type `null` and match only when `--type` is omitted).
-- `--scope <project-id>` — restrict to records in a project.
+- `--scope <container-id>` — restrict to records in a container.
 - Sorted by `(source path, line)`.
+- **Default scope: this package only.** A descriptor is package-agnostic and a
+  dependency's loose ends are its owner's worklist (design.md §6 loose ends).
+  `--all-packages` widens to the linked closure, rows tagged with their `package`
+  (unavailable dependencies listed in `skipped`); it cannot combine with `--scope`.
 
 JSON:
 
@@ -536,7 +540,17 @@ last-indexed:    a1b2c3d  (3 commits behind HEAD)
 nodes:           412   (people 38, departments 9, records 351, …)
 edges:           1.9k
 embeddings:      cached 1180 / 1190 sections
+dependencies:
+  acme-core    fresh  142 nodes  def5678 (up to date)
+  acme-shared  missing — dependency 'acme-shared' is not linked — run `vaire add …`
 ```
+
+With linked dependencies (§6.5), one row per closure member reports its state: `fresh`,
+`stale-schema`, `missing`, or `unreadable`; its own last-indexed commit and lag; and its
+embedding provider — when a dependency's provider differs from this package's, the row
+warns that vector search silently skips it (FTS/alias hits still work). Status stays
+tolerant: an unlinked or broken dependency is a reported row, never a failure. JSON gains
+`embed_provider` and a `dependencies` array.
 
 JSON:
 
