@@ -114,11 +114,9 @@ constraints. A dependency that is declared but unresolved, or referenced but und
 `knowledge.toml` is the package's *published contract*. Anything a consumer or a machine
 decides for itself — notably **embeddings** (provider, model, dimensions) — is not part of it,
 because how a corpus is indexed is a consumer choice, not a property of the package. Those
-settings live in per-user configuration, not the manifest.
-
-> **Transition note (v0.2).** The loader still tolerates a legacy `[embeddings]` table in
-> `knowledge.toml` for now, but it is deprecated and moves to user-level configuration; `vaire
-> init` drops `[embeddings]` when migrating (§8). Do not add it to new manifests.
+settings live in the **global user config**, set with `vaire configure` (cli.md §6.3); secrets
+go in a `600` `credentials.toml` (cli.md §6.2). A legacy `[embeddings]` table in a manifest is
+ignored (and `vaire init` drops it when migrating, §8) — do not add it to new manifests.
 
 ## 7. Resolution order
 

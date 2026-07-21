@@ -351,6 +351,41 @@ impl Output for InitOutput {
     }
 }
 
+/// `vaire configure`: the embedding settings written to the global user config.
+#[derive(Debug, Serialize)]
+pub struct ConfigureOutput {
+    pub config_path: String,
+    pub provider: String,
+    pub dimensions: usize,
+    /// Secret keys written to `credentials.toml` this run (values never shown).
+    pub credentials_set: Vec<String>,
+    /// The interactive flow was cancelled (Esc/Ctrl-C); nothing was written.
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
+impl Output for ConfigureOutput {
+    fn render_human(&self) -> String {
+        if self.cancelled {
+            return "Cancelled — no changes written.".to_string();
+        }
+        let mut s = format!(
+            "{} configured embeddings\n  provider:   {}\n  dimensions: {}\n  config:     {}",
+            green("✓"),
+            self.provider,
+            self.dimensions,
+            self.config_path,
+        );
+        if !self.credentials_set.is_empty() {
+            s.push_str(&format!(
+                "\n  secrets:    {} (credentials.toml)",
+                self.credentials_set.join(", ")
+            ));
+        }
+        s
+    }
+}
+
 // ---- render (rendered Markdown) --------------------------------------------
 
 /// `vaire render <id>`: the node's Markdown with frontmatter kept and wikilinks

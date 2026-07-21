@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, VaireError};
 
@@ -51,11 +51,9 @@ pub struct Config {
     /// (`scope: project:atlas`, `scope: org:some-firm`). Set to e.g. `"project"` to tie
     /// scoping to a specific relationship field.
     pub scope_field: String,
-
-    pub embeddings: EmbeddingConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct EmbeddingConfig {
     /// `"local"` (built-in), `"command"` (shell out), or `"openai"` (OpenAI API).
@@ -68,7 +66,7 @@ pub struct EmbeddingConfig {
     pub dimensions: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EmbeddingProvider {
     Local,
@@ -108,7 +106,6 @@ impl Default for Config {
             scoped_types_whitelist: vec!["*".to_string()],
             scoped_types_blacklist: Vec::new(),
             scope_field: "scope".to_string(),
-            embeddings: EmbeddingConfig::default(),
         }
     }
 }

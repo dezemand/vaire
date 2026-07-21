@@ -6,7 +6,7 @@
 
 use std::process::ExitCode as ProcExitCode;
 
-use vaire::cli::{Cli, Command};
+use vaire::cli::{Cli, Command, ConfigureSection};
 use vaire::commands::{self, Ctx};
 use vaire::error::{ExitCode, VaireError};
 use vaire::output::Output;
@@ -41,6 +41,35 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     if let Command::Init { path } = &cli.command {
         let target = path.as_deref().or(cli.repo.as_deref());
         emit(&commands::init::run(target)?, json);
+        return Ok(ExitCode::Success);
+    }
+
+    // `configure` writes the global user config; corpus-independent, so no discovery.
+    // A section runs non-interactively; bare `configure` opens the guided prompt.
+    if let Command::Configure { section } = &cli.command {
+        let home = vaire::userconfig::config_home();
+        let out = match section {
+            Some(ConfigureSection::Embeddings {
+                provider,
+                model,
+                dimensions,
+                command,
+                api_key,
+                api_url,
+            }) => {
+                let opts = commands::configure::ConfigureOpts {
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    dimensions: *dimensions,
+                    command: command.clone(),
+                    api_key: api_key.clone(),
+                    api_url: api_url.clone(),
+                };
+                commands::configure::run(&home, opts)?
+            }
+            None => commands::configure::run_interactive(&home)?,
+        };
+        emit(&out, json);
         return Ok(ExitCode::Success);
     }
 
@@ -127,7 +156,9 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Status => {
             emit(&commands::status::run(&ctx)?, json);
         }
-        Command::Init { .. } | Command::Mcp => unreachable!("handled above"),
+        Command::Init { .. } | Command::Mcp | Command::Configure { .. } => {
+            unreachable!("handled above")
+        }
     }
 
     Ok(ExitCode::Success)

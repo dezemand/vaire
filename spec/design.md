@@ -393,7 +393,8 @@ sections); a cold rebuild re-embeds once. Without the cache, "rebuildable in sec
 breaks the moment embeddings exist. Providers are opt-in beyond the local default: a
 `command` provider (shell out to any local model) and an `openai` provider (the OpenAI API,
 accepting the egress) — the latter reads `OPENAI_API_KEY` from the environment or the
-gitignored `.vaire/.env` (cli.md §6.2).
+user-level `credentials.toml`, set with `vaire configure` (cli.md §6.2–6.3). Embedding
+settings are user config, not part of a package manifest.
 
 **On disk.** The one **committed** authored file is `knowledge.toml` at the repo root — the
 package manifest (type vocabulary, include globs, dependencies, …; full spec in manifest.md).

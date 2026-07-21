@@ -141,6 +141,12 @@ pub enum Command {
     /// Report index state.
     Status,
 
+    /// Configure global user settings. With no subcommand, opens an interactive prompt.
+    Configure {
+        #[command(subcommand)]
+        section: Option<ConfigureSection>,
+    },
+
     // ---- agent surface ----
     /// Start a STDIO MCP server exposing the read commands as tools.
     Mcp,
@@ -152,4 +158,31 @@ impl Command {
     pub fn supports_json(&self) -> bool {
         !matches!(self, Command::Mcp)
     }
+}
+
+/// The sections `vaire configure <section>` can set non-interactively. Bare `vaire
+/// configure` (no section) walks the same settings through an interactive prompt.
+#[derive(Debug, Subcommand)]
+pub enum ConfigureSection {
+    /// Configure the embedding provider and its credentials.
+    Embeddings {
+        /// Embedding provider: local | command | openai.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Embedding model (for the openai provider).
+        #[arg(long)]
+        model: Option<String>,
+        /// Embedding vector dimensions.
+        #[arg(long)]
+        dimensions: Option<usize>,
+        /// Command to run for the `command` provider.
+        #[arg(long)]
+        command: Option<String>,
+        /// API key for the provider. Stored in credentials.toml (owner-only), never the config file.
+        #[arg(long = "api-key")]
+        api_key: Option<String>,
+        /// API base URL override. Stored in credentials.toml.
+        #[arg(long = "api-url")]
+        api_url: Option<String>,
+    },
 }
