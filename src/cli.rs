@@ -114,6 +114,12 @@ pub enum Command {
         path: Option<PathBuf>,
     },
 
+    /// Declare a dependency on another package in knowledge.toml.
+    Add {
+        /// The package to depend on: `<name>` or `<name>@^MAJOR` (default `^1`).
+        spec: String,
+    },
+
     /// (Re)build the index from the committed files.
     Index {
         /// Cold rebuild: drop and recreate the index, re-embed everything.

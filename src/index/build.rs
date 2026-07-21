@@ -115,9 +115,11 @@ pub fn run(
 
     // Classification (design.md §6): identification already happened syntactically in the
     // parser — whatever reached `node.edges` matched the strict target grammar. This step
-    // consults the vocabulary: a frontmatter candidate becomes an edge only when its type
-    // is declared (an undeclared one is dropped here and surfaced by `vaire check` as
-    // unknown_type — never silenced). Inline `[[...]]` are deliberate, so they're not gated.
+    // consults the *local* vocabulary: a local frontmatter candidate becomes an edge only
+    // when its type is declared (an undeclared one is dropped here and surfaced by
+    // `vaire check` as unknown_type — never silenced). A cross-package `@pkg/` candidate is
+    // classified by its *owning* package, not this one, so local vocabulary never gates it;
+    // inline `[[...]]` are deliberate, so they're not gated either.
     let configured: std::collections::HashSet<&str> =
         config.types.iter().map(String::as_str).collect();
 
@@ -140,11 +142,11 @@ pub fn run(
                     node.edges.retain(|e| match &e.origin {
                         crate::model::edge::RefOrigin::Inline => true,
                         crate::model::edge::RefOrigin::Frontmatter(_) => {
-                            configured.contains(e.to.node_type.as_str())
+                            e.to.package().is_some() || configured.contains(e.to.node_type.as_str())
                         }
                     });
                     apply_scoping(&mut node, &config.scope_field);
-                    index_node(index, &node, prose_start, embedder)?;
+                    index_node(index, &node, &config.name, prose_start, embedder)?;
                 }
             }
         }
@@ -279,8 +281,10 @@ fn apply_scoping(node: &mut Node, scope_field: &str) {
 /// so it needs no type list and never scopes a reference that lacks a scoped sibling.
 fn resolve_scoped_edges(index: &Index) -> Result<()> {
     let candidates: Vec<(i64, String, String)> = index.query_rows(
+        // Local edges only: scope-first resolution finds a sibling in *this* package;
+        // a cross-package target (to_package set) is resolved across the workspace in M5.
         "SELECT rowid, from_id, to_id FROM edges
-         WHERE from_id LIKE '%/%' AND to_id NOT LIKE '%/%'",
+         WHERE from_id LIKE '%/%' AND to_id NOT LIKE '%/%' AND to_package IS NULL",
         (),
         |r| Ok((col_i64(r, 0)?, col_text(r, 1)?, col_text(r, 2)?)),
     )?;
@@ -344,8 +348,16 @@ fn partition_changed(
     Ok((to_index, to_delete))
 }
 
-/// Insert one node and all its derived rows.
-fn index_node(index: &Index, node: &Node, prose_start: u32, embedder: &dyn Embedder) -> Result<()> {
+/// Insert one node and all its derived rows. `package` is the owning package (the manifest
+/// `name`) — every node this build produces belongs to it (M4); cross-package *targets*
+/// carry their own package on the edge.
+fn index_node(
+    index: &Index,
+    node: &Node,
+    package: &str,
+    prose_start: u32,
+    embedder: &dyn Embedder,
+) -> Result<()> {
     let id = node.id.to_string();
 
     // Frontmatter is stored as JSON (the YAML map serializes cleanly for our scalars).
@@ -363,14 +375,15 @@ fn index_node(index: &Index, node: &Node, prose_start: u32, embedder: &dyn Embed
     let fm_json = fm_value.to_string();
 
     index.execute(
-        "INSERT OR IGNORE INTO nodes(id, type, path, frontmatter, superseded_by)
-         VALUES(?1, ?2, ?3, ?4, ?5)",
+        "INSERT OR IGNORE INTO nodes(id, type, path, frontmatter, superseded_by, package)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
         turso::params![
             id.as_str(),
             node.node_type().to_string(),
             node.path.as_str(),
             fm_json.as_str(),
             node.superseded_by().map(|s| s.to_string()),
+            package,
         ],
     )?;
     index.execute(
@@ -379,12 +392,16 @@ fn index_node(index: &Index, node: &Node, prose_start: u32, embedder: &dyn Embed
     )?;
 
     for e in &node.edges {
+        // The package travels in its own column; `to_id` is always the bare within-package
+        // address, so a local edge and a cross-package edge to the same address share a
+        // `to_id` and M5 resolution can match on it directly.
         index.execute(
-            "INSERT INTO edges(from_id, to_id, ref_type, source_file, line)
-             VALUES(?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO edges(from_id, to_id, to_package, ref_type, source_file, line)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
             turso::params![
                 id.as_str(),
-                e.to.to_string(),
+                e.to.within_package(),
+                e.to.package(),
                 e.origin.as_ref_type(),
                 e.source_file.as_str(),
                 i64::from(e.line),

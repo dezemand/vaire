@@ -104,10 +104,22 @@ form** (`^1`, `^2`, …): a dependent matches a major line and adopts its minor/
 automatically. Tighter pins and ranges are rejected — minor and patch changes never break
 references by definition, so pinning would only create churn.
 
-Dependency *resolution* (locating the depended-on packages and resolving cross-package
-references) is a separate concern layered on top of this file; the manifest only declares the
-constraints. A dependency that is declared but unresolved, or referenced but undeclared, is a
-`vaire check` finding rather than a manifest error.
+Add a dependency with **`vaire add <name>[@^N]`** (default `^1`) — it edits `[dependencies]`
+in place, preserving your formatting and comments (cli.md §4.2a). Dependency *resolution*
+(locating the depended-on packages and resolving cross-package references) is a separate
+concern layered on top of this file; the manifest only declares the constraints.
+
+A reference to another package is written `@<name>/<type>:<id>` (design.md §6) and must name
+a declared dependency. `vaire check` enforces the manifest side of this today:
+
+| finding | severity | when |
+|---|---|---|
+| **undeclared import** | error | an `@pkg/…` reference whose package is not in `[dependencies]` (a pure table check — no resolution needed) |
+| undeclared type | warning | a value matching the reference grammar whose `type` is not in `types` (quote it, or declare the type) |
+
+The findings that need actual cross-package *resolution* — a declared dependency that
+resolves to nothing (dangling), a declared-but-unreferenced dependency (unused) — are layered
+on top once workspace resolution lands.
 
 ## 6. Machine and consumer settings are not here
 

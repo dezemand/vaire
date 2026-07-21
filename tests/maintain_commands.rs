@@ -131,6 +131,61 @@ fn orphan_is_a_warning_not_a_failure_unless_strict() {
 }
 
 #[test]
+fn check_flags_undeclared_cross_package_import() {
+    // A cross-package `@pkg/` reference whose package isn't in [dependencies] is an
+    // undeclared import — a violation (packages.md §8). Pure table check, no resolution.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/checkout.md",
+        "---\nid: checkout\ntype: system\nowner: \"@acme-core/department:platform\"\n---\n# Checkout\n",
+    )
+    .commit()
+    .build();
+
+    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    assert!(failed, "undeclared import is a violation");
+    assert!(
+        report.violations.iter().any(|v| matches!(
+            v,
+            Violation::UndeclaredImport { package, to, .. }
+                if package == "acme-core" && to == "@acme-core/department:platform"
+        )),
+        "expected undeclared_import: {:?}",
+        report.violations
+    );
+    // It is NOT reported as a local dangling reference.
+    assert!(
+        !report
+            .violations
+            .iter()
+            .any(|v| matches!(v, Violation::DanglingRef { .. }))
+    );
+}
+
+#[test]
+fn declared_cross_package_import_is_clean() {
+    // Same reference, but the package is declared → no undeclared_import. It still doesn't
+    // resolve (that's M5), but declaring the dependency clears the manifest-only lint.
+    let c = Corpus::empty();
+    c.with_dependencies(&[("acme-core", "^1")]).add(
+        "knowledge/checkout.md",
+        "---\nid: checkout\ntype: system\nowner: \"@acme-core/department:platform\"\n---\n# Checkout\n",
+    )
+    .commit()
+    .build();
+
+    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    assert!(
+        !report
+            .violations
+            .iter()
+            .any(|v| matches!(v, Violation::UndeclaredImport { .. })),
+        "declared dependency should clear the lint: {:?}",
+        report.violations
+    );
+}
+
+#[test]
 fn check_warns_on_unreferenceable_declared_id() {
     // The file indexes (files are truth), but its declared id falls outside the strict
     // reference grammar (design.md §6), so no reference can ever address it — the trap

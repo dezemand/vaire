@@ -73,6 +73,14 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         return Ok(ExitCode::Success);
     }
 
+    // `add` edits the manifest's [dependencies]; it needs the package root but not the
+    // index, so it runs before `Ctx` is built (like `init`/`configure`).
+    if let Command::Add { spec } = &cli.command {
+        let out = commands::add::run(cli.repo.as_deref(), cli.config.as_deref(), spec)?;
+        emit(&out, json);
+        return Ok(ExitCode::Success);
+    }
+
     // `mcp` builds its own long-lived context and never returns output.
     if let Command::Mcp = cli.command {
         let ctx = Ctx::new(cli.repo, cli.config)?;
@@ -156,7 +164,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Status => {
             emit(&commands::status::run(&ctx)?, json);
         }
-        Command::Init { .. } | Command::Mcp | Command::Configure { .. } => {
+        Command::Init { .. } | Command::Mcp | Command::Configure { .. } | Command::Add { .. } => {
             unreachable!("handled above")
         }
     }

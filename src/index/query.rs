@@ -113,9 +113,11 @@ impl Index {
         limit: Option<usize>,
     ) -> Result<Vec<EdgeRow>> {
         let mut sql = String::from(
+            // Local inbound edges only: a cross-package edge's bare to_id could coincide
+            // with this local id but points at another package's node, not this one.
             "SELECT e.from_id, n.type, n.path, e.ref_type, e.line
              FROM edges e JOIN nodes n ON n.id = e.from_id
-             WHERE e.to_id = ?1",
+             WHERE e.to_package IS NULL AND e.to_id = ?1",
         );
         let mut params: Vec<Value> = vec![Value::from(id.to_string())];
         if let Some(t) = type_filter {
@@ -183,12 +185,21 @@ impl Index {
         Ok(found)
     }
 
-    /// Outbound edges of one node, in stable order, as `(to_id, ref_type, line)`.
+    /// Outbound edges of one node, in stable order, as `(to, ref_type, line)`. A
+    /// cross-package target regains its `@pkg/` qualifier so it renders (and de-dupes)
+    /// correctly; it is not a node in this index, so traversal simply won't follow it (M5).
     fn outbound(&self, from: &NodeId) -> Result<Vec<(NodeId, String, u32)>> {
         self.query_rows(
-            "SELECT to_id, ref_type, line FROM edges WHERE from_id = ?1 ORDER BY line, to_id",
+            "SELECT to_id, to_package, ref_type, line FROM edges
+             WHERE from_id = ?1 ORDER BY line, to_id",
             [from.to_string()],
-            |r| Ok((parse_id(col_text(r, 0)?), col_text(r, 1)?, col_u32(r, 2)?)),
+            |r| {
+                let mut to = parse_id(col_text(r, 0)?);
+                if let Some(pkg) = col_opt_text(r, 1)? {
+                    to = to.with_package(pkg);
+                }
+                Ok((to, col_text(r, 2)?, col_u32(r, 3)?))
+            },
         )
     }
 
@@ -216,7 +227,7 @@ impl Index {
             params.push(Value::from(s.to_string()));
             let scope_idx = params.len();
             sql.push_str(&format!(
-                " AND record_id IN (SELECT from_id FROM edges WHERE ref_type = ?{field_idx} AND to_id = ?{scope_idx})"
+                " AND record_id IN (SELECT from_id FROM edges WHERE to_package IS NULL AND ref_type = ?{field_idx} AND to_id = ?{scope_idx})"
             ));
         }
         sql.push_str(" ORDER BY source_file ASC, line ASC");

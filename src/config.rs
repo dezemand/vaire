@@ -172,7 +172,7 @@ impl Config {
 }
 
 /// A package/id slug: `[a-z][a-z0-9-]*`.
-fn is_slug(s: &str) -> bool {
+pub fn is_slug(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
         Some(c) if c.is_ascii_lowercase() => {}
@@ -195,6 +195,6 @@ fn is_semver(s: &str) -> bool {
 /// The only legal dependency constraint form: `^MAJOR` (a caret then a non-empty run of
 /// digits). Tighter pins or ranges are rejected — minor/patch never break references, so a
 /// pin could only create churn (packages.md §6).
-fn is_caret_major(s: &str) -> bool {
+pub fn is_caret_major(s: &str) -> bool {
     matches!(s.strip_prefix('^'), Some(rest) if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
 }

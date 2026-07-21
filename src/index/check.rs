@@ -5,7 +5,7 @@
 //! (or any warning under `--strict`).
 
 use crate::error::Result;
-use crate::index::db::{Index, col_text, col_u32};
+use crate::index::db::{Index, col_opt_text, col_text, col_u32};
 use crate::model::id::{NodeId, NodeType};
 
 /// A hard violation (fails the check).
@@ -21,6 +21,16 @@ pub enum Violation {
         path: String,
         line: u32,
     },
+    /// An `@pkg/…` reference whose package is not in the manifest `[dependencies]`
+    /// (packages.md §8: undeclared import). A pure table check — no cross-package
+    /// *resolution* is needed to know the dependency was never declared.
+    UndeclaredImport {
+        package: String,
+        from: String,
+        to: String,
+        path: String,
+        line: u32,
+    },
 }
 
 impl Violation {
@@ -29,6 +39,7 @@ impl Violation {
         match self {
             Violation::DuplicateId { .. } => "duplicate_id",
             Violation::DanglingRef { .. } => "dangling_ref",
+            Violation::UndeclaredImport { .. } => "undeclared_import",
         }
     }
 
@@ -43,6 +54,15 @@ impl Violation {
                 line,
             } => {
                 format!("{from} → {to}  {path}:{line}")
+            }
+            Violation::UndeclaredImport {
+                package,
+                from,
+                to,
+                path,
+                line,
+            } => {
+                format!("{from} → {to}  package '{package}' not in [dependencies]  {path}:{line}")
             }
         }
     }
@@ -156,11 +176,12 @@ pub struct CheckReport {
 
 impl Index {
     /// Run the integrity guards. `config` supplies the type vocabulary (`types`, used to flag
-    /// candidate references whose type isn't configured and so was ignored) and the scoping
-    /// policy (`scoped_types_whitelist`/`blacklist`). Duplicate IDs and dangling refs are
-    /// violations; orphans, drift, frontmatter-wikilink, unknown-type, scoped-type-not-
-    /// permitted, and unreferenceable-id are warnings (promoted to failures only under
-    /// `--strict`).
+    /// candidate references whose type isn't configured and so was ignored), the declared
+    /// `dependencies` (used to flag an `@pkg/` import of an undeclared package), and the
+    /// scoping policy (`scoped_types_whitelist`/`blacklist`). Duplicate IDs, dangling refs,
+    /// and undeclared imports are violations; orphans, drift, frontmatter-wikilink,
+    /// unknown-type, scoped-type-not-permitted, and unreferenceable-id are warnings (promoted
+    /// to failures only under `--strict`).
     pub fn check(&self, config: &crate::config::Config) -> Result<CheckReport> {
         let configured: std::collections::HashSet<&str> =
             config.types.iter().map(String::as_str).collect();
@@ -181,10 +202,12 @@ impl Index {
             });
         }
 
-        // Dangling references: a (resolved) edge whose target is not a node.
+        // Dangling references: a (resolved) *local* edge whose target is not a node. A
+        // cross-package target (to_package set) can't be checked until workspace
+        // resolution (M5), so it is excluded here — undeclared_import guards it instead.
         let dangling: Vec<(String, String, String, u32)> = self.query_rows(
             "SELECT from_id, to_id, source_file, line FROM edges
-             WHERE to_id NOT IN (SELECT id FROM nodes)
+             WHERE to_package IS NULL AND to_id NOT IN (SELECT id FROM nodes)
              ORDER BY source_file, line",
             (),
             |r| {
@@ -205,11 +228,42 @@ impl Index {
             });
         }
 
-        // Orphans (warning): a node with no inbound or outbound edges.
+        // Undeclared import (violation): an `@pkg/…` edge whose package is not declared in
+        // the manifest `[dependencies]` (packages.md §8). Pure table check — the package is
+        // recorded on the edge (M4), so this needs no cross-package resolution.
+        let imports: Vec<(String, String, String, String, u32)> = self.query_rows(
+            "SELECT to_package, from_id, to_id, source_file, line FROM edges
+             WHERE to_package IS NOT NULL ORDER BY source_file, line",
+            (),
+            |r| {
+                Ok((
+                    col_text(r, 0)?,
+                    col_text(r, 1)?,
+                    col_text(r, 2)?,
+                    col_text(r, 3)?,
+                    col_u32(r, 4)?,
+                ))
+            },
+        )?;
+        for (package, from, to_id, path, line) in imports {
+            if !config.dependencies.contains_key(&package) {
+                violations.push(Violation::UndeclaredImport {
+                    to: display_target(&to_id, Some(&package)),
+                    package,
+                    from,
+                    path,
+                    line,
+                });
+            }
+        }
+
+        // Orphans (warning): a node with no inbound or outbound edges. Inbound counts only
+        // *local* edges — a cross-package edge's bare to_id could coincide with a local id
+        // but points at another package's node, not this one.
         let orphans: Vec<(String, String)> = self.query_rows(
             "SELECT id, path FROM nodes
              WHERE id NOT IN (SELECT from_id FROM edges)
-               AND id NOT IN (SELECT to_id FROM edges)
+               AND id NOT IN (SELECT to_id FROM edges WHERE to_package IS NULL)
              ORDER BY id",
             (),
             |r| Ok((col_text(r, 0)?, col_text(r, 1)?)),
@@ -220,27 +274,30 @@ impl Index {
 
         // Drift (warning): a resolved inline ref whose target is not also a frontmatter
         // edge of the same node. De-duplicated per (from, to); one direction only.
-        let drift: Vec<(String, String, String, u32)> = self.query_rows(
-            "SELECT e.from_id, e.to_id, MIN(e.source_file), MIN(e.line)
+        let drift: Vec<(String, String, Option<String>, String, u32)> = self.query_rows(
+            "SELECT e.from_id, e.to_id, e.to_package, MIN(e.source_file), MIN(e.line)
              FROM edges e
              WHERE e.ref_type = 'inline'
                AND NOT EXISTS (
                    SELECT 1 FROM edges f
-                   WHERE f.from_id = e.from_id AND f.to_id = e.to_id AND f.ref_type <> 'inline'
+                   WHERE f.from_id = e.from_id AND f.to_id = e.to_id
+                     AND f.to_package IS e.to_package AND f.ref_type <> 'inline'
                )
-             GROUP BY e.from_id, e.to_id
+             GROUP BY e.from_id, e.to_id, e.to_package
              ORDER BY MIN(e.source_file), MIN(e.line)",
             (),
             |r| {
                 Ok((
                     col_text(r, 0)?,
                     col_text(r, 1)?,
-                    col_text(r, 2)?,
-                    col_u32(r, 3)?,
+                    col_opt_text(r, 2)?,
+                    col_text(r, 3)?,
+                    col_u32(r, 4)?,
                 ))
             },
         )?;
-        for (id, to, path, line) in drift {
+        for (id, to, to_package, path, line) in drift {
+            let to = display_target(&to, to_package.as_deref());
             warnings.push(Warning::Drift { id, to, path, line });
         }
 
@@ -324,6 +381,16 @@ impl Index {
             violations,
             warnings,
         })
+    }
+}
+
+/// Render a stored edge target for display: a local target is its bare `to_id`, a
+/// cross-package target regains its `@pkg/` qualifier (`to_id` is the within-package
+/// address; the package lives in a separate column).
+fn display_target(to_id: &str, to_package: Option<&str>) -> String {
+    match to_package {
+        Some(pkg) => format!("@{pkg}/{to_id}"),
+        None => to_id.to_string(),
     }
 }
 

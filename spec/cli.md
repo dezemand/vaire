@@ -399,16 +399,22 @@ so the checks see uncommitted edits — the agent's edit→validate loop without
 Checks:
 
 - **Duplicate IDs** — two nodes sharing one `id:` (the duplicate-entity guard).
-- **Dangling references** — a non-`?` reference whose target ID is not a node.
+- **Dangling references** — a non-`?` *local* reference whose target ID is not a node.
+  (Cross-package targets are excluded — they aren't resolvable until workspace resolution;
+  `undeclared_import` guards them instead.)
+- **Undeclared import** — an `@pkg/…` reference whose package is not in the manifest
+  `[dependencies]` (packages.md §8). A pure table check — no cross-package resolution needed.
 - **Frontmatter/inline drift** — a resolved reference linked **inline** whose target is
   not also in the frontmatter edge list (the actionable "declare it" direction). Advisory,
   since narrative inline links legitimately exceed the structured edge list — a *warning*,
   not a failure.
 - **Orphans** — nodes with no inbound or outbound edges. A warning.
+- **Unreferenceable id** — a node whose declared `id`/scope falls outside the reference
+  grammar (design.md §6), so nothing can address it. The node still indexes. A warning.
 
-Duplicate IDs and dangling references are violations. Orphans and drift are warnings;
-`--strict` promotes them to failures. Exit `0` clean, `6` on any violation (or any warning
-under `--strict`).
+Duplicate IDs, dangling references, and undeclared imports are violations. Orphans, drift,
+and unreferenceable ids are warnings; `--strict` promotes them to failures. Exit `0` clean,
+`6` on any violation (or any warning under `--strict`).
 
 JSON:
 
@@ -424,9 +430,9 @@ JSON:
 }
 ```
 
-`kind` is one of `duplicate_id`, `dangling_ref` (violations), `drift`, `orphan`,
-`frontmatter_wikilink`, `unknown_type`, `unreferenceable_id`, `scoped_type_not_permitted`
-(warnings). `unknown_type` flags a frontmatter value that matches the reference `target`
+`kind` is one of `duplicate_id`, `dangling_ref`, `undeclared_import` (violations), `drift`,
+`orphan`, `frontmatter_wikilink`, `unknown_type`, `unreferenceable_id`,
+`scoped_type_not_permitted` (warnings). `unknown_type` flags a frontmatter value that matches the reference `target`
 grammar (`field: team:alpha`) whose type isn't in `types` — it was *ignored* rather than
 made an edge, so the warning surfaces the silent drop (declare the type, or quote the value
 as a string). Identification is by shape (design.md §6), so a URL, a time, or a colon in a
@@ -434,6 +440,24 @@ non-reference value (`url: https://…`, `summary: "TODO: …"`) is structurally
 reference and is never flagged. `unreferenceable_id` flags a node whose *declared* id or
 scope falls outside the target grammar (`id: Jane_Doe`) — the file still indexes (files are
 truth), but no reference can ever address it, so the trap is surfaced instead of silent.
+
+### 4.2a `vaire add`
+
+Declare a dependency on another package.
+
+```
+vaire add <name>[@^MAJOR]     # e.g. vaire add acme-core, vaire add acme-web@^2
+```
+
+Edits `[dependencies]` in `knowledge.toml`, **preserving the file's formatting and
+comments** (the manifest is authored, not generated). `^MAJOR` is the only legal constraint
+(manifest.md §5); the default is `^1`. Adding a package that is already present updates its
+constraint in place — idempotent. A malformed name or constraint is a usage error (exit `2`),
+caught before the manifest is touched. Needs the package root but not the index.
+
+```json
+{ "name": "acme-core", "constraint": "^1", "config_path": "knowledge.toml", "updated": false }
+```
 
 ### 4.3 `vaire status`
 

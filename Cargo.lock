@@ -3286,6 +3286,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "toml_edit",
  "turso",
  "ureq",
  "walkdir",
