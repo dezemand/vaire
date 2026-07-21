@@ -6,7 +6,7 @@
 
 use std::process::ExitCode as ProcExitCode;
 
-use vaire::cli::{Cli, Command};
+use vaire::cli::{Cli, Command, ConfigureSection};
 use vaire::commands::{self, Ctx};
 use vaire::error::{ExitCode, VaireError};
 use vaire::output::Output;
@@ -45,27 +45,31 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     }
 
     // `configure` writes the global user config; corpus-independent, so no discovery.
-    if let Command::Configure {
-        provider,
-        model,
-        dimensions,
-        command,
-        openai_key,
-        base_url,
-    } = &cli.command
-    {
-        let opts = commands::configure::ConfigureOpts {
-            provider: provider.clone(),
-            model: model.clone(),
-            dimensions: *dimensions,
-            command: command.clone(),
-            openai_key: openai_key.clone(),
-            base_url: base_url.clone(),
+    // A section runs non-interactively; bare `configure` opens the guided prompt.
+    if let Command::Configure { section } = &cli.command {
+        let home = vaire::userconfig::config_home();
+        let out = match section {
+            Some(ConfigureSection::Embeddings {
+                provider,
+                model,
+                dimensions,
+                command,
+                api_key,
+                api_url,
+            }) => {
+                let opts = commands::configure::ConfigureOpts {
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    dimensions: *dimensions,
+                    command: command.clone(),
+                    api_key: api_key.clone(),
+                    api_url: api_url.clone(),
+                };
+                commands::configure::run(&home, opts)?
+            }
+            None => commands::configure::run_interactive(&home)?,
         };
-        emit(
-            &commands::configure::run(&vaire::userconfig::config_home(), opts)?,
-            json,
-        );
+        emit(&out, json);
         return Ok(ExitCode::Success);
     }
 

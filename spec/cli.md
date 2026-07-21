@@ -583,7 +583,7 @@ Providers that need credentials (currently `openai`) resolve them with the prece
 §6.3):
 
 - `OPENAI_API_KEY` — required for `provider = "openai"`. Set it in the shell environment, or
-  via `vaire configure --openai-key sk-…` (which writes `credentials.toml`).
+  via `vaire configure embeddings --api-key sk-…` (which writes `credentials.toml`).
 - `OPENAI_BASE_URL` — optional; overrides the API endpoint (proxies / Azure-style gateways).
 
 `credentials.toml` is a TOML `KEY = "value"` table written with `600` permissions (owner
@@ -593,15 +593,22 @@ never committed. `vaire` reads it on demand — it does not mutate the process e
 ### 6.3 Global user config — `vaire configure`
 
 Machine/consumer settings are **not** part of any package manifest (a package must not dictate
-how a consumer indexes it). They live in a per-user config, set with `vaire configure`:
+how a consumer indexes it). They live in a per-user config, set with `vaire configure`. The
+command has two forms:
 
 ```
-vaire configure [--provider local|command|openai] [--model <m>] [--dimensions <n>]
-                [--command <cmd>] [--openai-key <key>] [--base-url <url>]
+vaire configure                       # interactive: pick a section, then guided prompts
+vaire configure embeddings [--provider local|command|openai] [--model <m>]
+                           [--dimensions <n>] [--command <cmd>]
+                           [--api-key <key>] [--api-url <url>]
 ```
 
+- Bare `vaire configure` opens an interactive prompt (currently one section, **Embeddings**;
+  the section menu is there so future settings slot in without changing the UX). Cancelling
+  (Esc / Ctrl-C) exits cleanly and writes nothing.
+- `vaire configure embeddings` sets the same settings non-interactively.
 - Non-secret settings (embedding provider, model, dimensions, command) → `config.toml`.
-- Secrets (`--openai-key`, `--base-url`) → `credentials.toml` (§6.2).
+- Secrets (`--api-key`, `--api-url`) → `credentials.toml` (§6.2).
 - Only the flags you pass are changed; the rest are preserved.
 
 The **config home** is `VAIRE_CONFIG_HOME` if set, else the platform config directory for

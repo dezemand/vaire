@@ -141,26 +141,10 @@ pub enum Command {
     /// Report index state.
     Status,
 
-    /// Set embedding settings and secrets in the global user config.
+    /// Configure global user settings. With no subcommand, opens an interactive prompt.
     Configure {
-        /// Embedding provider: local | command | openai.
-        #[arg(long)]
-        provider: Option<String>,
-        /// Embedding model (for the openai provider).
-        #[arg(long)]
-        model: Option<String>,
-        /// Embedding vector dimensions.
-        #[arg(long)]
-        dimensions: Option<usize>,
-        /// Command to run for the `command` provider.
-        #[arg(long)]
-        command: Option<String>,
-        /// OpenAI API key. Stored in credentials.toml (owner-only), never the config file.
-        #[arg(long = "openai-key")]
-        openai_key: Option<String>,
-        /// OpenAI base URL override. Stored in credentials.toml.
-        #[arg(long = "base-url")]
-        base_url: Option<String>,
+        #[command(subcommand)]
+        section: Option<ConfigureSection>,
     },
 
     // ---- agent surface ----
@@ -174,4 +158,31 @@ impl Command {
     pub fn supports_json(&self) -> bool {
         !matches!(self, Command::Mcp)
     }
+}
+
+/// The sections `vaire configure <section>` can set non-interactively. Bare `vaire
+/// configure` (no section) walks the same settings through an interactive prompt.
+#[derive(Debug, Subcommand)]
+pub enum ConfigureSection {
+    /// Configure the embedding provider and its credentials.
+    Embeddings {
+        /// Embedding provider: local | command | openai.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Embedding model (for the openai provider).
+        #[arg(long)]
+        model: Option<String>,
+        /// Embedding vector dimensions.
+        #[arg(long)]
+        dimensions: Option<usize>,
+        /// Command to run for the `command` provider.
+        #[arg(long)]
+        command: Option<String>,
+        /// API key for the provider. Stored in credentials.toml (owner-only), never the config file.
+        #[arg(long = "api-key")]
+        api_key: Option<String>,
+        /// API base URL override. Stored in credentials.toml.
+        #[arg(long = "api-url")]
+        api_url: Option<String>,
+    },
 }

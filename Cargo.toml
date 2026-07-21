@@ -47,6 +47,9 @@ thiserror = "2"
 ureq = "2"
 directories = "6.0.0"
 
+# Interactive prompts for `vaire configure` (guided TUI-style wizard)
+inquire = "0.7"
+
 [dev-dependencies]
 # Throwaway git-repo corpora for integration tests
 tempfile = "3"

@@ -359,10 +359,16 @@ pub struct ConfigureOutput {
     pub dimensions: usize,
     /// Secret keys written to `credentials.toml` this run (values never shown).
     pub credentials_set: Vec<String>,
+    /// The interactive flow was cancelled (Esc/Ctrl-C); nothing was written.
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 impl Output for ConfigureOutput {
     fn render_human(&self) -> String {
+        if self.cancelled {
+            return "Cancelled — no changes written.".to_string();
+        }
         let mut s = format!(
             "{} configured embeddings\n  provider:   {}\n  dimensions: {}\n  config:     {}",
             green("✓"),

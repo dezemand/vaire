@@ -31,7 +31,7 @@ fn stores_openai_key_in_credentials_not_config() {
     let out = configure::run(
         dir.path(),
         ConfigureOpts {
-            openai_key: Some("sk-secret".into()),
+            api_key: Some("sk-secret".into()),
             ..Default::default()
         },
     )

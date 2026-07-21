@@ -43,7 +43,7 @@ pub fn from_user_config(user: &UserConfig) -> Result<Box<dyn Embedder>> {
             let api_key = crate::userconfig::credential("OPENAI_API_KEY").ok_or_else(|| {
                 VaireError::Config(
                     "embeddings provider is \"openai\" but OPENAI_API_KEY is not set \
-                     (env var or credentials.toml — run `vaire configure`)"
+                     (env var or credentials.toml — run `vaire configure embeddings`)"
                         .into(),
                 )
             })?;
