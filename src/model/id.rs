@@ -40,13 +40,18 @@ impl fmt::Display for NodeType {
 /// A node identity. The node's own ID is `<type>:<slug>` (the last path segment); a
 /// **scoped** ID prepends a container path — `<scope>/<type>:<slug>`, where `scope` is
 /// the container's ID (one level today: a project, e.g.
-/// `project:atlas-2026-q2/record:standup`). `node_type`/`slug` always describe the node
-/// itself; `scope` is the prefix. See cli.md §6.1.
+/// `project:atlas-2026-q2/record:standup`). A **cross-package** reference additionally
+/// carries a leading `@<package>/` qualifier (`@acme-core/department:platform`) — always
+/// explicit, so resolution never depends on the consumer's dependency set (packages.md
+/// §2). `node_type`/`slug` always describe the node itself; `scope` is the within-package
+/// prefix; `package` is the owning package for a cross-package target (`None` = local).
+/// See cli.md §6.1, design.md §6.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NodeId {
     pub node_type: NodeType,
     pub slug: String,
     pub scope: Option<String>,
+    pub package: Option<String>,
 }
 
 impl NodeId {
@@ -55,6 +60,7 @@ impl NodeId {
             node_type,
             slug: slug.into(),
             scope: None,
+            package: None,
         }
     }
 
@@ -68,6 +74,11 @@ impl NodeId {
         self.scope.as_deref()
     }
 
+    /// The owning package for a cross-package target (`@pkg/…`), or `None` when local.
+    pub fn package(&self) -> Option<&str> {
+        self.package.as_deref()
+    }
+
     /// The node's own local slug (never includes the scope).
     pub fn local(&self) -> &str {
         &self.slug
@@ -78,26 +89,48 @@ impl NodeId {
         format!("{}:{}", self.node_type, self.slug)
     }
 
+    /// The within-package address — scope path + node, **never** the `@package/` qualifier.
+    /// This is what the index stores as an edge's `to_id`; the package travels separately
+    /// in `to_package`.
+    pub fn within_package(&self) -> String {
+        match &self.scope {
+            Some(scope) => format!("{}/{}:{}", scope, self.node_type, self.slug),
+            None => format!("{}:{}", self.node_type, self.slug),
+        }
+    }
+
     /// Set (or replace) the scope prefix.
     pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
         self.scope = Some(scope.into());
         self
     }
 
-    /// Parse an ID string the index itself stored (`nodes.id`, `edges.from_id`, …).
+    /// Set (or replace) the owning package (`@pkg/` qualifier).
+    pub fn with_package(mut self, package: impl Into<String>) -> Self {
+        self.package = Some(package.into());
+        self
+    }
+
+    /// Parse an ID string the index itself stored (`nodes.id`, `edges.from_id`, …), or one
+    /// reconstructed for display (`@pkg/scope/type:slug`).
     ///
-    /// Deliberately **lenient** (structure only: last `/` splits the scope, first `:`
-    /// splits `type:slug`) where [`FromStr`] is strict. A *declared* id is data — a file
-    /// with `id: Jane_Doe` still indexes (files are truth) and must round-trip through
-    /// the index unchanged. The strict grammar governs what a *reference* can say, not
-    /// what the corpus may declare; `vaire check` surfaces the gap (`unreferenceable_id`).
+    /// Deliberately **lenient** (structure only: a leading `@pkg/`, then last `/` splits
+    /// the scope, first `:` splits `type:slug`) where [`FromStr`] is strict. A *declared*
+    /// id is data — a file with `id: Jane_Doe` still indexes (files are truth) and must
+    /// round-trip through the index unchanged. The strict grammar governs what a
+    /// *reference* can say, not what the corpus may declare; `vaire check` surfaces the
+    /// gap (`unreferenceable_id`).
     ///
     /// Panics on a string without a `:` — the index only ever stores composed
     /// `type:slug` ids, so that would be an internal invariant violation, not bad input.
     pub fn parse_stored(s: &str) -> NodeId {
-        let (scope, node_part) = match s.rsplit_once('/') {
+        let (package, rest) = match s.strip_prefix('@').and_then(|a| a.split_once('/')) {
+            Some((pkg, rest)) => (Some(pkg.to_string()), rest),
+            None => (None, s),
+        };
+        let (scope, node_part) = match rest.rsplit_once('/') {
             Some((prefix, last)) if !prefix.is_empty() => (Some(prefix.to_string()), last),
-            _ => (None, s),
+            _ => (None, rest),
         };
         let (ty, slug) = node_part
             .split_once(':')
@@ -106,12 +139,16 @@ impl NodeId {
             node_type: NodeType::new(ty),
             slug: slug.to_string(),
             scope,
+            package,
         }
     }
 }
 
 impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(package) = &self.package {
+            write!(f, "@{package}/")?;
+        }
         match &self.scope {
             Some(scope) => write!(f, "{}/{}:{}", scope, self.node_type, self.slug),
             None => write!(f, "{}:{}", self.node_type, self.slug),
@@ -122,22 +159,39 @@ impl fmt::Display for NodeId {
 /// Parse a reference **target** against the strict grammar (design.md §6):
 ///
 /// ```text
-/// target := entity ( "/" entity )*      # >1 entity = scoped; last segment is the node
-/// entity := type ":" id
-/// type   := [a-z][a-z0-9-]*             # lowercase, starts with a letter
-/// id     := [a-z0-9][a-z0-9-]*          # lowercase; no '.', no '/', no '@'
+/// target  := [ "@" package "/" ] entity ( "/" entity )*   # >1 entity = scoped
+/// entity  := type ":" id
+/// type    := [a-z][a-z0-9-]*            # lowercase, starts with a letter
+/// id      := [a-z0-9][a-z0-9-]*         # lowercase; no '.', no '/', no '@'
+/// package := [a-z][a-z0-9-]*            # never contains ':' or '/'
 /// ```
 ///
 /// The charset is strict **on purpose**: identification is by shape alone, so a URL, an
 /// email, a time, or a date is structurally not an ID and a colon in ordinary prose is
-/// never mistaken for a reference (§6, identification vs classification). The `@pkg/`
-/// cross-package qualifier is recorded by the package groundwork (not parsed yet).
+/// never mistaken for a reference (§6, identification vs classification). A leading
+/// `@package/` marks a cross-package target; it is *recorded* now (packages.md §3),
+/// *resolved* across a local workspace in M5.
 impl FromStr for NodeId {
     type Err = IdParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut segments: Vec<&str> = s.split('/').collect();
-        let node_part = segments.pop().expect("split yields at least one segment");
+
+        // Optional leading `@package/` qualifier — decidable by shape: a first segment
+        // starting with `@` is the package (it carries no `:`, unlike an entity).
+        let package = match segments.first().and_then(|seg| seg.strip_prefix('@')) {
+            Some(pkg) => {
+                if !is_package(pkg) {
+                    return Err(IdParseError::BadPackage);
+                }
+                let pkg = pkg.to_string();
+                segments.remove(0);
+                Some(pkg)
+            }
+            None => None,
+        };
+
+        let node_part = segments.pop().ok_or(IdParseError::MissingColon)?;
         if !segments.iter().all(|seg| is_entity(seg)) {
             return Err(IdParseError::BadScopeSegment);
         }
@@ -164,6 +218,7 @@ impl FromStr for NodeId {
             } else {
                 Some(segments.join("/"))
             },
+            package,
         })
     }
 }
@@ -173,6 +228,11 @@ fn is_type(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some('a'..='z'))
         && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+}
+
+/// `package := [a-z][a-z0-9-]*` — same charset as a type (matches `config.rs::is_slug`).
+fn is_package(s: &str) -> bool {
+    is_type(s)
 }
 
 /// `id := [a-z0-9][a-z0-9-]*` — lowercase; no `.`, no `/`, no `@`, no uppercase.
@@ -232,6 +292,8 @@ pub enum IdParseError {
     BadSlug,
     #[error("scope segment is not a type:id entity")]
     BadScopeSegment,
+    #[error("package must match [a-z][a-z0-9-]* (lowercase, starting with a letter)")]
+    BadPackage,
 }
 
 #[cfg(test)]
@@ -276,10 +338,35 @@ mod tests {
     #[test]
     fn scope_segments_must_be_entities() {
         assert!("project:atlas/record:kickoff".parse::<NodeId>().is_ok());
-        // Cross-package `@pkg/` targets are recorded by the package groundwork — the
-        // local grammar structurally rejects them for now.
-        assert!("@acme-core/department:x".parse::<NodeId>().is_err());
         assert!("notanentity/record:kickoff".parse::<NodeId>().is_err());
+    }
+
+    #[test]
+    fn cross_package_targets_parse_and_round_trip() {
+        // packages.md §3: `@package/` marks a cross-package target — recorded here.
+        let x: NodeId = "@acme-core/department:platform".parse().unwrap();
+        assert_eq!(x.package(), Some("acme-core"));
+        assert_eq!(x.scope(), None);
+        assert_eq!(x.local_id(), "department:platform");
+        assert_eq!(x.within_package(), "department:platform");
+        assert_eq!(x.to_string(), "@acme-core/department:platform");
+
+        // With a within-package scope path.
+        let scoped: NodeId = "@acme-core/project:atlas/record:standup".parse().unwrap();
+        assert_eq!(scoped.package(), Some("acme-core"));
+        assert_eq!(scoped.scope(), Some("project:atlas"));
+        assert_eq!(scoped.within_package(), "project:atlas/record:standup");
+        assert_eq!(
+            scoped.to_string(),
+            "@acme-core/project:atlas/record:standup"
+        );
+    }
+
+    #[test]
+    fn cross_package_rejects_bad_package_and_stray_at() {
+        assert!("@Acme-Core/department:x".parse::<NodeId>().is_err()); // uppercase package
+        assert!("@acme-core".parse::<NodeId>().is_err()); // package, no entity
+        assert!("person:jane@doe".parse::<NodeId>().is_err()); // @ mid-slug still fails
     }
 
     #[test]
@@ -291,5 +378,14 @@ mod tests {
         let scoped = NodeId::parse_stored("project:atlas/record:Kick.Off");
         assert_eq!(scoped.scope(), Some("project:atlas"));
         assert_eq!(scoped.to_string(), "project:atlas/record:Kick.Off");
+    }
+
+    #[test]
+    fn parse_stored_reconstructs_cross_package_display() {
+        let id = NodeId::parse_stored("@acme-core/project:atlas/record:x");
+        assert_eq!(id.package(), Some("acme-core"));
+        assert_eq!(id.scope(), Some("project:atlas"));
+        assert_eq!(id.within_package(), "project:atlas/record:x");
+        assert_eq!(id.to_string(), "@acme-core/project:atlas/record:x");
     }
 }
