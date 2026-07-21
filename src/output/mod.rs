@@ -795,6 +795,87 @@ pub struct UnresolvedItem {
     pub display_path: Option<String>,
 }
 
+// ---- deps (cli.md §3.8) ----------------------------------------------------
+
+/// `vaire deps`: the resolved local dependency tree (live link inspection, no index).
+#[derive(Debug, Serialize)]
+pub struct DepsOutput {
+    pub name: String,
+    pub version: String,
+    pub dependencies: Vec<DepNode>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DepNode {
+    pub name: String,
+    pub constraint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Where the link resolves, relative to the run-root package (null = unavailable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<String>,
+    /// Whether the resolved version's MAJOR satisfies the constraint (surfaced only —
+    /// enforcement is v0.3); null when unresolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub satisfied: Option<bool>,
+    /// This dependency closes a cycle back to a package already on this path; its own
+    /// subtree is not repeated.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cycle: bool,
+    /// Why the dependency is unavailable, when it is (with the fix).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<DepNode>,
+}
+
+impl Output for DepsOutput {
+    fn render_human(&self) -> String {
+        let mut out = format!("{} {}\n", bold(&cyan(&self.name)), dim(&self.version));
+        render_dep_nodes(&mut out, &self.dependencies, "");
+        out.trim_end().to_string()
+    }
+}
+
+fn render_dep_nodes(out: &mut String, nodes: &[DepNode], prefix: &str) {
+    for (i, node) in nodes.iter().enumerate() {
+        let last = i == nodes.len() - 1;
+        let branch = if last { "└── " } else { "├── " };
+        let line = if let Some(note) = &node.note {
+            format!(
+                "{}{} {}  {}",
+                cyan(&node.name),
+                dim(&node.constraint),
+                yellow("MISSING"),
+                yellow(note),
+            )
+        } else {
+            let version = node.version.as_deref().unwrap_or("?");
+            let marker = match node.satisfied {
+                Some(false) => format!(
+                    "  {}",
+                    yellow(&format!("({version} outside {})", node.constraint))
+                ),
+                _ => format!("  {}", dim(&format!("({version})"))),
+            };
+            let cycle = if node.cycle {
+                format!("  {}", dim("(cycle)"))
+            } else {
+                String::new()
+            };
+            format!(
+                "{} {} → {}{marker}{cycle}",
+                cyan(&node.name),
+                dim(&node.constraint),
+                node.resolved.as_deref().unwrap_or("?"),
+            )
+        };
+        out.push_str(&format!("{prefix}{branch}{line}\n"));
+        let child_prefix = format!("{prefix}{}", if last { "    " } else { "│   " });
+        render_dep_nodes(out, &node.dependencies, &child_prefix);
+    }
+}
+
 // ---- status (cli.md §4.3) --------------------------------------------------
 
 #[derive(Debug, Serialize)]

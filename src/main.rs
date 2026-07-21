@@ -189,6 +189,9 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Status => {
             emit(&commands::status::run(&ctx)?, json);
         }
+        Command::Deps => {
+            emit(&commands::deps::run(&ctx)?, json);
+        }
         Command::Init { .. } | Command::Mcp | Command::Configure { .. } | Command::Add { .. } => {
             unreachable!("handled above")
         }

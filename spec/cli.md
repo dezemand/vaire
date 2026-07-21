@@ -380,6 +380,32 @@ JSON:
 `score` is an opaque relative rank (an exact `name`/alias match outranks a token-subset
 match, both outrank a prose-only hit).
 
+### 3.8 `vaire deps`
+
+The resolved local dependency tree — what each member's links actually point at.
+
+```
+vaire deps [--json]
+```
+
+- Pure **live link inspection** (§6.5): no index needed, so it is a safe first command in
+  a fresh workspace. Always exits `0` — reporting is its job; erroring is `vaire check`'s.
+- Each member's own dependencies resolve through *its* manifest and links (the same
+  (source package, dependency name) keying as reference resolution). Cycles are annotated
+  once (`(cycle)`) and not descended into; an unavailable dependency shows `MISSING` with
+  the exact fix; a resolved version whose MAJOR falls outside the `^N` constraint is
+  marked (surfaced only — enforcement is v0.3).
+
+```
+acme-web 1.0.0
+├── acme-core ^1 → ../acme-core  (1.0.0)
+│   └── acme-web ^1 → .  (1.0.0)  (cycle)
+└── acme-shared ^1 → ../acme-shared  (1.0.0)
+```
+
+JSON is the nested tree: `{ "name", "version", "dependencies": [{ "name", "constraint",
+"version", "resolved", "satisfied", "cycle"?, "note"?, "dependencies": […] }] }`.
+
 ## 4. Maintain commands
 
 Not exposed over MCP. These read the working tree and write `.vaire/`; they never write the

@@ -10,6 +10,7 @@ pub mod add;
 pub mod backlinks;
 pub mod check;
 pub mod configure;
+pub mod deps;
 pub mod index;
 pub mod init;
 pub mod refs;

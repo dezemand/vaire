@@ -758,6 +758,66 @@ fn check_ensures_dep_indexes_from_a_cold_clone() {
     assert!(ws.root("acme-core").join(".vaire/index.db").exists());
 }
 
+// ---- vaire deps (M5c) -------------------------------------------------------
+
+#[test]
+fn deps_prints_the_resolved_tree_with_cycle_annotation() {
+    // Acceptance: `vaire deps` → acme-core ^1, acme-shared ^1 (resolved) — and the
+    // acme-core → acme-web edge closes the cycle without descending.
+    let ws = Ws::acceptance();
+    let out = commands::deps::run(&ws.ctx("acme-web")).unwrap();
+    assert_eq!(out.name, "acme-web");
+
+    let core = out
+        .dependencies
+        .iter()
+        .find(|d| d.name == "acme-core")
+        .unwrap();
+    assert_eq!(core.constraint, "^1");
+    assert_eq!(core.resolved.as_deref(), Some("../acme-core"));
+    assert_eq!(core.satisfied, Some(true));
+    let back = core
+        .dependencies
+        .iter()
+        .find(|d| d.name == "acme-web")
+        .unwrap();
+    assert!(back.cycle, "cycle annotated, not descended");
+    assert!(back.dependencies.is_empty());
+
+    let shared = out
+        .dependencies
+        .iter()
+        .find(|d| d.name == "acme-shared")
+        .unwrap();
+    assert_eq!(shared.resolved.as_deref(), Some("../acme-shared"));
+}
+
+#[test]
+fn deps_needs_no_index_and_reports_missing_with_the_fix() {
+    // The safe first command: works before any vaire index, exit 0 even when broken.
+    let ws = Ws::new();
+    ws.add_package("solo", &["note"], &[("acme-core", "^1")])
+        .add_file(
+            "solo",
+            "knowledge/n.md",
+            "---\nid: n\ntype: note\n---\n# N\n",
+        )
+        .commit("solo");
+    // No build at all.
+    let out = commands::deps::run(&ws.ctx("solo")).unwrap();
+    let core = out
+        .dependencies
+        .iter()
+        .find(|d| d.name == "acme-core")
+        .unwrap();
+    assert!(core.resolved.is_none());
+    assert!(
+        core.note.as_deref().unwrap_or_default().contains("--link"),
+        "{:?}",
+        core.note
+    );
+}
+
 // ---- per-consumer link precedence (the reason for the npm model) ------------
 
 /// The diamond: acme-app (run-root) depends on acme-mid and acme-shared; TWO directories

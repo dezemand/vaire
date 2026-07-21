@@ -105,6 +105,9 @@ pub enum Command {
         local: bool,
     },
 
+    /// Print the resolved local dependency tree (live link inspection; no index needed).
+    Deps,
+
     /// Every unresolved reference ([[?...]]) currently in the corpus.
     Unresolved {
         #[arg(long = "type")]
