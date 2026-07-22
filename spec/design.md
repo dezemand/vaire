@@ -225,6 +225,62 @@ colon is a *descriptor*, not an ID — the index must **not** follow it as a gra
 `?` and it is a real reference to a real entity. The type after `?` is a hint: optional,
 and overridable by the entity-creation pass.
 
+**The target grammar — strict on purpose.** One *reference target* grammar is shared by
+both syntactic contexts (inline `[[ ]]` and bare frontmatter values, §5). The charset is
+deliberately narrow so a target is identifiable by **shape alone**, without consulting
+config:
+
+```
+target   := [ "@" package "/" ] entity ( "/" entity )*   # >1 entity = scoped (cli.md §6.1)
+entity   := type ":" id
+type     := [a-z][a-z0-9-]*        # lowercase, starts with a letter
+id       := [a-z0-9][a-z0-9-]*     # lowercase; no '.', no '/', no '@', no uppercase
+package  := [a-z][a-z0-9-]*        # never contains ':' or '/'
+```
+
+```
+[[department:platform]]                        local entity
+[[@acme-core/department:platform]]             cross-package entity
+[[project:atlas-2026-q2/record:standup]]       local scoped record
+[[@acme-core/department:platform|Platform]]    display override
+```
+
+The `@package/` qualifier marks a **cross-package** reference. Cross-package references are
+*always* explicitly qualified — a bare reference never searches the dependency set, so the
+same file resolves identically regardless of the consumer's dependencies. The `@` is a
+declaration, not an inference: a cross-package reference is version-constrained and must
+name a declared dependency (manifest.md §5), and `grep '@'` enumerates every cross-package
+edge. In frontmatter, `@` is a YAML reserved indicator, so cross-package values must be
+quoted: `owner: "@acme-core/department:platform"`. Resolution routes through the linked
+package for that name — `.vaire/packages/<name>`, keyed by the *referencing* package's
+own dependencies (§9, "Linked packages"). Loose ends (`?`) stay package-agnostic — a
+descriptor's package is unknown by definition, and Vairë never guesses a package any more
+than it guesses an ID.
+
+**Identification vs classification — two separate steps.** Conflating them was the
+original `url:` bug:
+
+1. **Identification is syntactic and config-free.** A value is a *candidate reference* iff
+   it matches `target` exactly. The strict charset structurally excludes URLs, emails,
+   paths, times, versions, dates:
+
+   | value | candidate? | why not |
+   |---|---|---|
+   | `department:platform` | yes | |
+   | `@acme-core/department:platform` | yes | |
+   | `https://somewhere` | no | id can't begin `/` |
+   | `mailto:a@b.com` | no | `@`, `.` |
+   | `C:\Users` | no | uppercase, `\` |
+   | `12:30` | no | type must start with a letter |
+   | `1.2.3`, `2026-06-15` | no | dots / no colon |
+
+2. **Classification consults config, and never silences.** A candidate whose `type` is in
+   the manifest `types` is an **edge**. A candidate whose type is *not* declared is neither
+   silently an edge nor silently a string — it is a `vaire check` warning (`unknown_type`:
+   quote it as a string, or declare the type). So the only residual ambiguity is
+   *surfaced*, consistent with "never guess." Values that fail identification (URLs) are
+   plain scalars, full stop.
+
 **Display name & rendering.** A resolved reference carries *display text*. With no `|`,
 the display defaults to the target's **`name:`** field; a `|` overrides it. Rendering a
 reference produces a relative Markdown link — the display in the brackets, the target file
@@ -342,10 +398,13 @@ of its own — the deeds live in the files — it weaves them into a tapestry th
 queried across. CLI binary: `vaire`. The CLI surface is specified in [cli.md](cli.md);
 this section specifies what the index *is*.
 
-A **Rust + SQLite** engine. It is a derived cache — disposable, rebuildable from the files
+A **Rust + Turso** engine — Turso Database, the ground-up rewrite of SQLite in Rust, run as
+a local embedded file engine (never a server, never the network) for its native full-text
+search and native vectors. It is a derived cache — disposable, rebuildable from the files
 in seconds — and it **never writes the corpus.** This is the safe asymmetry: a derived
 index cannot corrupt the truth, whereas an authoritative DB would be a liability to back
-up and protect.
+up and protect. Because the index is disposable, adopting a pre-1.0 engine is low-risk: any
+regression is one `vaire index --full` away from a clean rebuild off the Markdown.
 
 **Discovery (layout-agnostic).** A file is a Vairë node if its frontmatter carries an
 `id:` (a local slug) **and** a `type:`; its address is the composition `type:id`
@@ -359,9 +418,10 @@ be **unique** (the duplicate-entity guard), and every non-`?` reference must **r
 (dangling refs surface). An optional committed config carries include/exclude globs (skip
 `node_modules`, drafts, archives) — that is *where to look*; the `id:`+`type:` pair is *what it is*.
 
-**Storage:** an edges table (`from_id, to_id, ref_type, source_file, line`), an FTS5 index
-over prose, and per-section embeddings. SQLite as a graph is plenty at this scale — no
-dedicated graph database.
+**Storage:** an edges table (`from_id, to_id, ref_type, source_file, line`), a `sections`
+table with a native **FTS index** over prose (heading weighted above body, BM25 ranking via
+`fts_score`), and per-section embeddings in a native **vector** column. Turso as a graph is
+plenty at this scale — no dedicated graph database.
 
 **Schema version.** A one-row `schema_version` table stamps the index with a version
 number — the one table whose shape never changes, so any future build can read it to learn
@@ -380,10 +440,10 @@ the recall layer behind FTS-and-aliases, primary only for open search — not th
 mechanism.
 
 **Embeddings — per section, local, cached.** Sections split on headings (`##`); each chunk
-is embedded; the **file is the returned unit**. Vectors live in the *same*
-`.vaire/index.db` — either via `sqlite-vec`, or (simpler at this scale) an embedding blob
-column with brute-force cosine in Rust; a few thousand sections is sub-millisecond, so ANN
-may be unnecessary. Same reasoning as SQLite-as-graph: no separate vector store. Embedding
+is embedded; the **file is the returned unit**. Vectors live in the *same* `.vaire/index.db`
+as a native vector column, scored with Turso's **exact** `vector_distance_cos`; a few
+thousand sections is sub-millisecond, so ANN indexing is unnecessary (and arrives for free
+if Turso ships it). Same reasoning as Turso-as-graph: no separate vector store. Embedding
 is a **pluggable `embed(texts) → vectors` step, local by default** — three concrete
 reasons over an API: the corpus may hold confidential content (an API means data egress on
 every section), a rebuild-in-seconds/offline tool cannot depend on the network, and
@@ -393,34 +453,77 @@ sections); a cold rebuild re-embeds once. Without the cache, "rebuildable in sec
 breaks the moment embeddings exist. Providers are opt-in beyond the local default: a
 `command` provider (shell out to any local model) and an `openai` provider (the OpenAI API,
 accepting the egress) — the latter reads `OPENAI_API_KEY` from the environment or the
-gitignored `.vaire/.env` (cli.md §6.2).
+user-level `credentials.toml`, set with `vaire configure` (cli.md §6.2–6.3). Embedding
+settings are user config, not part of a package manifest.
 
-**On disk.** Everything Vairë owns lives under `.vaire/` in the repo root. That directory
-holds two things with opposite lifecycles: one **committed** file — `config.toml`, the
-authored, version-controlled settings (ID-prefix vocabulary, embedding config, include
-globs) — and everything else, which is **derived and gitignored**: `index.db` plus its
-WAL-mode `index.db-wal` / `index.db-shm` sidecars and lock, the embedding cache, and any
-future derived artifacts. The gitignore rule encodes exactly that boundary — ignore all of
-`.vaire/`, then re-include the one authored file:
+**On disk.** The one **committed** authored file is `knowledge.toml` at the repo root — the
+package manifest (type vocabulary, include globs, dependencies, …; full spec in manifest.md).
+Everything Vairë *derives* lives under `.vaire/` and is **entirely gitignored**: `index.db`
+plus its WAL-mode `index.db-wal` / `index.db-shm` sidecars and lock, the embedding cache, and
+any future derived artifacts. `vaire init` drops a self-contained gitignore under `.vaire/`:
 
 ```gitignore
 # Vairë — derived index, rebuildable from files
-.vaire/*
-!.vaire/config.toml
+*
+!.gitignore
 ```
 
-So *everything in `.vaire/` except `config.toml` is the disposable derived layer.* Keeping
-config beside the index it configures (rather than elsewhere in the repo) keeps all of
-Vairë's footprint in one directory, while the gitignore whitelist preserves the rule that
-nothing derived is ever committed.
+So *everything under `.vaire/` is the disposable derived layer* — nothing there is ever
+committed.
 
-The committed `.vaire/config.toml` is also what **marks a corpus**: `vaire` discovers the
-root by walking up to the nearest `.vaire/` (cli.md §2.1), and creates `index.db` inside
-that existing directory on first run. A fresh clone therefore has the truth (files) and the
-config, and no index until it is built — which is correct, and reinforces
-files-authoritative. Because the db is gitignored and per-checkout, every machine and agent
+The committed `knowledge.toml` is also what **marks a corpus**: `vaire` discovers the root by
+walking up to the nearest `knowledge.toml` (cli.md §2.1), and creates `.vaire/index.db` on
+first run. A fresh clone therefore has the truth (files) and the manifest, and no index until
+it is built — which is correct, and reinforces files-authoritative. Because the db is
+gitignored and per-checkout, every machine and agent
 runs its **own** local Vairë over the same shared corpus files: there is no index to sync,
 because each rebuilds from the canonical source.
+
+**Linked packages — where dependencies live.** A dependency named in `[dependencies]`
+resolves to the directory **`.vaire/packages/<name>`** — a symlink (or a real directory)
+whose target is a package: a directory with a `knowledge.toml` declaring that same `name`
+(mismatch is an error; identity is declared, never path-derived). `vaire add acme-core
+--link ../acme-core` writes the manifest entry *and* the link. The split is deliberate:
+the **committed manifest carries only the contract** (`acme-core = "^1"` — no
+machine-local paths in git), while **link state is per-checkout**, under the
+already-gitignored `.vaire/`. The layout is the whole interface: today `add --link`
+populates it; a future `vaire install` populates the same entries as links into a shared
+local cache (`~/.cache/vaire/packages/<name>/<version>/`) resolved through a lockfile —
+and because the resolver only ever reads `.vaire/packages/<name>`, nothing above the
+populator changes when packages start arriving from a registry. Two consumers may point
+the same name at different targets (that is how per-consumer versions will work), which a
+global workspace scan could never represent.
+
+**Resolution is keyed (source package, dependency name).** An `@pkg/type:id` reference in
+one of acme-core's files resolves through **acme-core's** `[dependencies]` and
+acme-core's own links — never the querying consumer's — so a file resolves identically
+regardless of who consumes it (the §6 invariant). Lookup order for a package's alias: its
+**own** `.vaire/packages/<name>` first; then the **run-root package itself** when the
+alias names it (a dependency cycle back into the package the command was invoked from
+needs no link); then the **run-root's** links as a fallback — so linking a whole closure
+flat at the top level works, while a package that manages its own links stays
+self-contained. A
+`superseded_by:` tombstone that points cross-package re-enters resolution *as the
+tombstone owner's reference* (same keying); supersession follows a visited set and, on a
+cycle, stops and returns the node where the cycle closed — same behaviour as local
+redirects. Dependency cycles between packages are legal and cost nothing: resolution
+needs existence, not topological order. Handles are keyed by canonicalized target, so one
+real directory reached through different links is one package.
+
+**The index stays federated.** There is no merged workspace index: every package —
+current, linked sibling, or future cache entry — carries exactly its own
+`.vaire/index.db`, built from its own manifest (its `types`, `include`/`exclude`, scope
+field), bound to its own commits, holding its own embeddings. Cross-package reads open
+the dependency's index in place and compose in the CLI. Nothing merges, so ids and paths
+can never collide across packages, a dependency's vectors are embedded once and shared by
+every consumer, and a registry can ship a package *with its index* — pre-built,
+pre-embedded — so consumers pay nothing to adopt it. Building a linked dependency's index
+(`vaire index` refreshes the closure) writes only that package's derived `.vaire/` cache
+— never its corpus. Concurrent consumers refreshing the same dependency should be guarded
+by an advisory `.vaire/index.lock` next to the db (specified here as the mitigation;
+readers treat a briefly-unopenable index as "run `vaire index`"). Deferred, by name: a
+registry-era **reverse query** — "which packages reference this entity of mine?" — an
+inversion the per-consumer alias map (`aliases_for`) is already shaped for.
 
 **Indexing prefers commit (commit-as-publish), with a working-tree fallback.** When the
 corpus root is a Git repo with commits, indexing reads the **committed** tree: committing
@@ -447,8 +550,9 @@ depth. The full command surface, flags, output shapes, and exit codes are specif
 [cli.md](cli.md); the summary:
 
 - **Read** (also the MCP tool surface): `resolve`, `render`, `backlinks`, `refs`,
-  `search`, `suggest`, `unresolved`. (`render` is the one that returns a body — resolved
-  Markdown — rather than pointers; `suggest` ranks existing IDs for a descriptor.)
+  `search`, `suggest`, `unresolved`, `deps`. (`render` is the one that returns a body —
+  resolved Markdown — rather than pointers; `suggest` ranks existing IDs for a
+  descriptor; `deps` prints the resolved linked-package tree.)
 - **Maintain** (run by humans / git hooks / CI, **not** exposed over MCP): `init`,
   `index`, `check`, `status`.
 
@@ -480,9 +584,9 @@ Kept with their reasons, because decisions without reasons get undone.
   slug; `type:` is the authoritative type *and* the ID namespace. They compose to the
   address (`id: hr` + `type: department` ⇒ `department:hr`). No redundant prefix-in-`id:` to
   keep in sync — `type:` is the single source of a node's type.
-- **Optional project-scoped IDs for records** — a path of typed IDs,
-  `<project-id>/<type>:<local>` (config `scoped_types`, cli.md §6.1). A scoped record writes
-  only a container-local `id:`; the scope *is* its `scope:` value (the field is
+- **Data-driven scoped IDs** — a path of typed IDs, `<container-id>/<type>:<local>` (cli.md
+  §6.1). Any node carrying the `scope_field` is scoped, regardless of type. A scoped record
+  writes only a container-local `id:`; the scope *is* its `scope:` value (the field is
   `scope_field`, default `scope`; the value names any container type), so composition is
   purely local (no per-container declaration,
   no cross-file lookup, single-pass), and uniqueness + stability come free from the
@@ -494,9 +598,9 @@ Kept with their reasons, because decisions without reasons get undone.
   entity-vs-record. Forces two integrity checks at index time: ID uniqueness and reference
   resolvability. Trade-off accepted: `project:` and the `type:` field become the
   authoritative sources of scope and type (no longer inferable from path).
-- **Hybrid search; embeddings local + cached.** FTS5 + the `aliases:` list carry precision
-  (and most of resolution); vectors are the recall layer, primary only for open retrieval.
-  Vectors live in the same SQLite db (no separate store). Embedding is pluggable and local
+- **Hybrid search; embeddings local + cached.** Native FTS + the `aliases:` list carry
+  precision (and most of resolution); vectors are the recall layer, primary only for open
+  retrieval. Vectors live in the same Turso db (no separate store). Embedding is pluggable and local
   by default (data egress, offline, re-embed-on-reindex), with a content-hash cache so
   rebuilds stay cheap.
 - **Typed IDs — `type:id`** (`person:`, `department:`, `method:`, `system:`, `event:`,

@@ -7,6 +7,7 @@
 //! section headings.
 
 pub mod frontmatter;
+pub mod markdown;
 pub mod repo;
 pub mod scan;
 pub mod section;

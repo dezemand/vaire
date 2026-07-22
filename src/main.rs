@@ -4,9 +4,10 @@
 //! command, render its output (human or `--json`), and map the outcome to one of the
 //! documented exit codes (cli.md §7). All real work lives in the `vaire` library crate.
 
+use std::io::Read;
 use std::process::ExitCode as ProcExitCode;
 
-use vaire::cli::{Cli, Command};
+use vaire::cli::{Cli, Command, ConfigureSection};
 use vaire::commands::{self, Ctx};
 use vaire::error::{ExitCode, VaireError};
 use vaire::output::Output;
@@ -36,8 +37,63 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     let json = cli.json;
 
     // `init` scaffolds the corpus, so it runs *before* discovery (which needs `.vaire/`).
+    // Its target is the positional path if given, else the `--repo`/`VAIRE_REPO` override,
+    // else the current directory.
     if let Command::Init { path } = &cli.command {
-        emit(&commands::init::run(path.as_deref())?, json);
+        let target = path.as_deref().or(cli.repo.as_deref());
+        emit(&commands::init::run(target)?, json);
+        return Ok(ExitCode::Success);
+    }
+
+    // `configure` writes the global user config; corpus-independent, so no discovery.
+    // A section runs non-interactively; bare `configure` opens the guided prompt.
+    if let Command::Configure { section } = &cli.command {
+        let home = vaire::userconfig::config_home();
+        let out = match section {
+            Some(ConfigureSection::Embeddings {
+                provider,
+                model,
+                dimensions,
+                command,
+                api_key_stdin,
+                api_url,
+            }) => {
+                let opts = commands::configure::ConfigureOpts {
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    dimensions: *dimensions,
+                    command: command.clone(),
+                    api_key: (*api_key_stdin).then(read_api_key_from_stdin).transpose()?,
+                    api_url: api_url.clone(),
+                };
+                commands::configure::run(&home, opts)?
+            }
+            Some(ConfigureSection::LocalPackages { path, unset }) => {
+                commands::configure::run_local_packages(&home, path.as_deref(), *unset)?
+            }
+            None => commands::configure::run_interactive(&home)?,
+        };
+        emit(&out, json);
+        return Ok(ExitCode::Success);
+    }
+
+    // `upgrade` operates on the binary itself — corpus-independent, no discovery.
+    if let Command::Upgrade { version, check } = &cli.command {
+        emit(&commands::upgrade::run(version.as_deref(), *check)?, json);
+        return Ok(ExitCode::Success);
+    }
+
+    // `add` edits the manifest's [dependencies] (and with --link, the package links);
+    // it needs the package root but not the index, so it runs before `Ctx` is built
+    // (like `init`/`configure`).
+    if let Command::Add { spec, link } = &cli.command {
+        let out = commands::add::run(
+            cli.repo.as_deref(),
+            cli.config.as_deref(),
+            spec,
+            link.as_deref(),
+        )?;
+        emit(&out, json);
         return Ok(ExitCode::Success);
     }
 
@@ -78,6 +134,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             type_filter,
             scope,
             limit,
+            local,
         } => {
             let out = commands::search::run(
                 &ctx,
@@ -85,6 +142,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 type_filter.as_deref(),
                 scope.as_deref(),
                 Some(limit),
+                local,
             )?;
             emit(&out, json);
         }
@@ -92,30 +150,47 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             descriptor,
             type_filter,
             limit,
+            local,
         } => {
-            let out =
-                commands::suggest::run(&ctx, &descriptor, type_filter.as_deref(), Some(limit))?;
+            let out = commands::suggest::run(
+                &ctx,
+                &descriptor,
+                type_filter.as_deref(),
+                Some(limit),
+                local,
+            )?;
             emit(&out, json);
         }
-        Command::Unresolved { type_filter, scope } => {
-            let out = commands::unresolved::run(&ctx, type_filter.as_deref(), scope.as_deref())?;
+        Command::Unresolved {
+            type_filter,
+            scope,
+            all_packages,
+        } => {
+            let out = commands::unresolved::run(
+                &ctx,
+                type_filter.as_deref(),
+                scope.as_deref(),
+                all_packages,
+            )?;
             emit(&out, json);
         }
         Command::Index {
             full,
             working_tree,
             re_embed,
+            no_deps,
         } => {
             emit(
-                &commands::index::run(&ctx, full, working_tree, re_embed)?,
+                &commands::index::run(&ctx, full, working_tree, re_embed, no_deps)?,
                 json,
             );
         }
         Command::Check {
             strict,
             working_tree,
+            no_deps,
         } => {
-            let (report, failed) = commands::check::run(&ctx, strict, working_tree)?;
+            let (report, failed) = commands::check::run(&ctx, strict, working_tree, no_deps)?;
             emit(&report, json);
             if failed {
                 return Ok(ExitCode::CheckViolations);
@@ -124,10 +199,42 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Status => {
             emit(&commands::status::run(&ctx)?, json);
         }
-        Command::Init { .. } | Command::Mcp => unreachable!("handled above"),
+        Command::Deps => {
+            emit(&commands::deps::run(&ctx)?, json);
+        }
+        Command::Init { .. }
+        | Command::Mcp
+        | Command::Configure { .. }
+        | Command::Add { .. }
+        | Command::Upgrade { .. } => {
+            unreachable!("handled above")
+        }
     }
 
     Ok(ExitCode::Success)
+}
+
+/// Read a non-empty API key without ever placing it in argv. A trailing newline is accepted
+/// for `printf ... | vaire configure embeddings --api-key-stdin` ergonomics.
+fn read_api_key_from_stdin() -> Result<String> {
+    const MAX_API_KEY_BYTES: u64 = 16 * 1024;
+
+    let mut key = String::new();
+    std::io::stdin()
+        .take(MAX_API_KEY_BYTES + 1)
+        .read_to_string(&mut key)?;
+    if key.len() as u64 > MAX_API_KEY_BYTES {
+        return Err(VaireError::Usage(
+            "--api-key-stdin accepts at most 16 KiB".into(),
+        ));
+    }
+    let key = key.trim_end_matches(['\r', '\n']);
+    if key.is_empty() {
+        return Err(VaireError::Usage(
+            "--api-key-stdin requires a non-empty key on standard input".into(),
+        ));
+    }
+    Ok(key.to_string())
 }
 
 /// Write a command result to stdout — JSON or human text (cli.md §2.3).

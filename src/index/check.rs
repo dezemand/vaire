@@ -5,7 +5,8 @@
 //! (or any warning under `--strict`).
 
 use crate::error::Result;
-use crate::index::db::Index;
+use crate::index::db::{Index, col_opt_text, col_text, col_u32};
+use crate::model::id::{NodeId, NodeType};
 
 /// A hard violation (fails the check).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -20,6 +21,21 @@ pub enum Violation {
         path: String,
         line: u32,
     },
+    /// An `@pkg/…` reference whose package is not in the manifest `[dependencies]`
+    /// (packages.md §8: undeclared import). A pure table check — no cross-package
+    /// *resolution* is needed to know the dependency was never declared.
+    UndeclaredImport {
+        package: String,
+        from: String,
+        to: String,
+        path: String,
+        line: u32,
+    },
+    /// A declared dependency that is unavailable — not linked, a broken link, or a name
+    /// mismatch — so its references cannot be verified at all. Reported once per
+    /// dependency; its edges are skipped by the dangling pass (no spam). The note
+    /// carries the exact fix (cli.md §6.5).
+    MissingDependency { package: String, note: String },
 }
 
 impl Violation {
@@ -28,6 +44,8 @@ impl Violation {
         match self {
             Violation::DuplicateId { .. } => "duplicate_id",
             Violation::DanglingRef { .. } => "dangling_ref",
+            Violation::UndeclaredImport { .. } => "undeclared_import",
+            Violation::MissingDependency { .. } => "missing_dependency",
         }
     }
 
@@ -42,6 +60,18 @@ impl Violation {
                 line,
             } => {
                 format!("{from} → {to}  {path}:{line}")
+            }
+            Violation::UndeclaredImport {
+                package,
+                from,
+                to,
+                path,
+                line,
+            } => {
+                format!("{from} → {to}  package '{package}' not in [dependencies]  {path}:{line}")
+            }
+            Violation::MissingDependency { package, note } => {
+                format!("'{package}' unavailable — {note}")
             }
         }
     }
@@ -72,14 +102,44 @@ pub enum Warning {
         field: String,
         path: String,
     },
-    /// A reference-shaped frontmatter value (`field: team:alpha`) whose **type is not in
-    /// `id_prefixes`**, so it was *ignored* rather than made an edge. Surfaces the silent
-    /// drop — usually a type you forgot to add to the vocabulary (cli.md §6).
+    /// A frontmatter value matching the reference target grammar (`field: team:alpha`)
+    /// whose **type is not in `types`**, so it was *ignored* rather than made an edge
+    /// (classification, design.md §6). Surfaces the silent drop — declare the type, or
+    /// quote the value as a string. Values that fail identification (URLs, times, prose
+    /// with a colon) are plain scalars and never flagged.
     UnknownType {
         id: String,
         field: String,
         value: String,
         path: String,
+    },
+    /// A node is scoped (carries a `scope`) but its type is not permitted by the scoping
+    /// policy (`scoped_types_whitelist` / `scoped_types_blacklist`, manifest.md). Behaviour is
+    /// unchanged — the node is still scoped — but the policy flags it.
+    ScopedTypeNotPermitted {
+        id: String,
+        node_type: String,
+        path: String,
+    },
+    /// A node whose *declared* id (or scope) falls outside the strict reference target
+    /// grammar (design.md §6) — e.g. `id: Jane_Doe`. The file still indexes (files are
+    /// truth), but no reference can ever address it: identification is by shape, so a
+    /// target naming this node fails to parse. Surfaced instead of left as a silent trap.
+    UnreferenceableId {
+        id: String,
+        path: String,
+        reason: String,
+    },
+    /// A declared dependency no reference ever uses (packages.md §8: unused). Pure
+    /// manifest + edge-table check.
+    UnusedDependency { package: String },
+    /// A linked dependency whose declared MAJOR falls outside this package's `^N`
+    /// constraint. Surfaced only — version *enforcement* is explicitly out of scope for
+    /// v0.2 (issue #2 cut line).
+    DependencyVersionMismatch {
+        package: String,
+        constraint: String,
+        version: String,
     },
 }
 
@@ -90,6 +150,10 @@ impl Warning {
             Warning::Drift { .. } => "drift",
             Warning::FrontmatterWikilink { .. } => "frontmatter_wikilink",
             Warning::UnknownType { .. } => "unknown_type",
+            Warning::ScopedTypeNotPermitted { .. } => "scoped_type_not_permitted",
+            Warning::UnreferenceableId { .. } => "unreferenceable_id",
+            Warning::UnusedDependency { .. } => "unused_dependency",
+            Warning::DependencyVersionMismatch { .. } => "dependency_version_mismatch",
         }
     }
 
@@ -110,6 +174,28 @@ impl Warning {
             } => {
                 format!("{id}  field '{field}': '{value}' — unconfigured type, ignored  {path}")
             }
+            Warning::ScopedTypeNotPermitted {
+                id,
+                node_type,
+                path,
+            } => {
+                format!("{id}  type '{node_type}' is scoped but not permitted by policy  {path}")
+            }
+            Warning::UnreferenceableId { id, path, reason } => {
+                format!("{id}  no reference can address this id ({reason})  {path}")
+            }
+            Warning::UnusedDependency { package } => {
+                format!("'{package}' is declared but never referenced")
+            }
+            Warning::DependencyVersionMismatch {
+                package,
+                constraint,
+                version,
+            } => {
+                format!(
+                    "'{package}' declares version {version}, outside this package's {constraint}"
+                )
+            }
         }
     }
 }
@@ -123,46 +209,51 @@ pub struct CheckReport {
 }
 
 impl Index {
-    /// Run the integrity guards. `configured_types` is the `id_prefixes` vocabulary, used
-    /// to flag reference-shaped frontmatter values whose type isn't configured (and so was
-    /// ignored). Duplicate IDs and dangling refs are violations; orphans, drift,
-    /// frontmatter-wikilink, and unknown-type are warnings (promoted to failures only
-    /// under `--strict`).
-    pub fn check(&self, configured_types: &[String]) -> Result<CheckReport> {
-        let conn = self.conn();
+    /// Run the integrity guards. `config` supplies the type vocabulary (`types`, used to flag
+    /// candidate references whose type isn't configured and so was ignored), the declared
+    /// `dependencies` (used to flag an `@pkg/` import of an undeclared package), and the
+    /// scoping policy (`scoped_types_whitelist`/`blacklist`). Duplicate IDs, dangling refs,
+    /// and undeclared imports are violations; orphans, drift, frontmatter-wikilink,
+    /// unknown-type, scoped-type-not-permitted, and unreferenceable-id are warnings (promoted
+    /// to failures only under `--strict`).
+    pub fn check(&self, config: &crate::config::Config) -> Result<CheckReport> {
         let configured: std::collections::HashSet<&str> =
-            configured_types.iter().map(String::as_str).collect();
+            config.types.iter().map(String::as_str).collect();
         let mut violations = Vec::new();
         let mut warnings = Vec::new();
 
         // Duplicate IDs: the same composed `type:id` parsed from more than one file.
-        let mut dup = conn.prepare(
+        let dups: Vec<(String, String)> = self.query_rows(
             "SELECT id, group_concat(path, '\n') FROM node_files
              GROUP BY id HAVING COUNT(*) > 1 ORDER BY id",
+            (),
+            |r| Ok((col_text(r, 0)?, col_text(r, 1)?)),
         )?;
-        for row in dup.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-            let (id, paths) = row?;
+        for (id, paths) in dups {
             violations.push(Violation::DuplicateId {
                 id,
                 paths: paths.split('\n').map(str::to_string).collect(),
             });
         }
 
-        // Dangling references: a (resolved) edge whose target is not a node.
-        let mut dangling = conn.prepare(
+        // Dangling references: a (resolved) *local* edge whose target is not a node. A
+        // cross-package target (to_package set) can't be checked until workspace
+        // resolution (M5), so it is excluded here — undeclared_import guards it instead.
+        let dangling: Vec<(String, String, String, u32)> = self.query_rows(
             "SELECT from_id, to_id, source_file, line FROM edges
-             WHERE to_id NOT IN (SELECT id FROM nodes)
+             WHERE to_package IS NULL AND to_id NOT IN (SELECT id FROM nodes)
              ORDER BY source_file, line",
+            (),
+            |r| {
+                Ok((
+                    col_text(r, 0)?,
+                    col_text(r, 1)?,
+                    col_text(r, 2)?,
+                    col_u32(r, 3)?,
+                ))
+            },
         )?;
-        for row in dangling.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, u32>(3)?,
-            ))
-        })? {
-            let (from, to, path, line) = row?;
+        for (from, to, path, line) in dangling {
             violations.push(Violation::DanglingRef {
                 from,
                 to,
@@ -171,55 +262,88 @@ impl Index {
             });
         }
 
-        // Orphans (warning): a node with no inbound or outbound edges.
-        let mut orphan = conn.prepare(
+        // Undeclared import (violation): an `@pkg/…` edge whose package is not declared in
+        // the manifest `[dependencies]` (packages.md §8). Pure table check — the package is
+        // recorded on the edge (M4), so this needs no cross-package resolution.
+        let imports: Vec<(String, String, String, String, u32)> = self.query_rows(
+            "SELECT to_package, from_id, to_id, source_file, line FROM edges
+             WHERE to_package IS NOT NULL ORDER BY source_file, line",
+            (),
+            |r| {
+                Ok((
+                    col_text(r, 0)?,
+                    col_text(r, 1)?,
+                    col_text(r, 2)?,
+                    col_text(r, 3)?,
+                    col_u32(r, 4)?,
+                ))
+            },
+        )?;
+        for (package, from, to_id, path, line) in imports {
+            if !config.dependencies.contains_key(&package) {
+                violations.push(Violation::UndeclaredImport {
+                    to: display_target(&to_id, Some(&package)),
+                    package,
+                    from,
+                    path,
+                    line,
+                });
+            }
+        }
+
+        // Orphans (warning): a node with no inbound or outbound edges. Inbound counts only
+        // *local* edges — a cross-package edge's bare to_id could coincide with a local id
+        // but points at another package's node, not this one.
+        let orphans: Vec<(String, String)> = self.query_rows(
             "SELECT id, path FROM nodes
              WHERE id NOT IN (SELECT from_id FROM edges)
-               AND id NOT IN (SELECT to_id FROM edges)
+               AND id NOT IN (SELECT to_id FROM edges WHERE to_package IS NULL)
              ORDER BY id",
+            (),
+            |r| Ok((col_text(r, 0)?, col_text(r, 1)?)),
         )?;
-        for row in orphan.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-            let (id, path) = row?;
+        for (id, path) in orphans {
             warnings.push(Warning::Orphan { id, path });
         }
 
         // Drift (warning): a resolved inline ref whose target is not also a frontmatter
         // edge of the same node. De-duplicated per (from, to); one direction only.
-        let mut drift = conn.prepare(
-            "SELECT e.from_id, e.to_id, MIN(e.source_file), MIN(e.line)
+        let drift: Vec<(String, String, Option<String>, String, u32)> = self.query_rows(
+            "SELECT e.from_id, e.to_id, e.to_package, MIN(e.source_file), MIN(e.line)
              FROM edges e
              WHERE e.ref_type = 'inline'
                AND NOT EXISTS (
                    SELECT 1 FROM edges f
-                   WHERE f.from_id = e.from_id AND f.to_id = e.to_id AND f.ref_type <> 'inline'
+                   WHERE f.from_id = e.from_id AND f.to_id = e.to_id
+                     AND f.to_package IS e.to_package AND f.ref_type <> 'inline'
                )
-             GROUP BY e.from_id, e.to_id
+             GROUP BY e.from_id, e.to_id, e.to_package
              ORDER BY MIN(e.source_file), MIN(e.line)",
+            (),
+            |r| {
+                Ok((
+                    col_text(r, 0)?,
+                    col_text(r, 1)?,
+                    col_opt_text(r, 2)?,
+                    col_text(r, 3)?,
+                    col_u32(r, 4)?,
+                ))
+            },
         )?;
-        for row in drift.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, u32>(3)?,
-            ))
-        })? {
-            let (id, to, path, line) = row?;
+        for (id, to, to_package, path, line) in drift {
+            let to = display_target(&to, to_package.as_deref());
             warnings.push(Warning::Drift { id, to, path, line });
         }
 
         // Frontmatter wikilink trap (warning): a frontmatter value written with `[[ ]]`
         // brackets — detectable from the stored JSON as either a string containing `[[`
         // or a nested array (the unquoted `[[...]]` parses to one). cli.md §6.3.
-        let mut fm = conn.prepare("SELECT id, path, frontmatter FROM nodes ORDER BY id")?;
-        for row in fm.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })? {
-            let (id, path, fm_json) = row?;
+        let fm_rows: Vec<(String, String, String)> = self.query_rows(
+            "SELECT id, path, frontmatter FROM nodes ORDER BY id",
+            (),
+            |r| Ok((col_text(r, 0)?, col_text(r, 1)?, col_text(r, 2)?)),
+        )?;
+        for (id, path, fm_json) in fm_rows {
             if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str(&fm_json) {
                 for (field, value) in &obj {
                     if looks_like_frontmatter_wikilink(value) {
@@ -229,12 +353,13 @@ impl Index {
                             path: path.clone(),
                         });
                     }
-                    // Reference-shaped value whose type isn't configured → silently
-                    // dropped; surface it (skip the non-reference display/identity fields).
+                    // Classification (design.md §6): a candidate reference whose type
+                    // isn't declared was *ignored* rather than made an edge — never
+                    // silence it (skip the non-reference display/identity fields).
                     if !crate::corpus::frontmatter::NON_EDGE_KEYS.contains(&field.as_str()) {
                         for v in scalar_strings(value) {
-                            if let Some(ty) = referenced_type(v)
-                                && !configured.contains(ty)
+                            if let Some(ty) = candidate_type(v)
+                                && !configured.contains(ty.as_str())
                             {
                                 warnings.push(Warning::UnknownType {
                                     id: id.clone(),
@@ -249,11 +374,57 @@ impl Index {
             }
         }
 
+        // Scoped-type policy (warning): a scoped node (id has a `/`) whose type is not
+        // permitted by the whitelist/blacklist. Data-driven scoping is unaffected — this only
+        // flags the policy violation.
+        let scoped: Vec<(String, String, String)> = self.query_rows(
+            "SELECT id, type, path FROM nodes WHERE id LIKE '%/%' ORDER BY id",
+            (),
+            |r| Ok((col_text(r, 0)?, col_text(r, 1)?, col_text(r, 2)?)),
+        )?;
+        for (id, node_type, path) in scoped {
+            if !config.scoping_permitted(&node_type) {
+                warnings.push(Warning::ScopedTypeNotPermitted {
+                    id,
+                    node_type,
+                    path,
+                });
+            }
+        }
+
+        // Unreferenceable id (warning): the node indexed — files are truth — but its
+        // declared id (or scope) falls outside the strict target grammar (design.md §6),
+        // so no reference can ever parse to it. Surface the trap instead of leaving it
+        // silent.
+        let all_ids: Vec<(String, String)> =
+            self.query_rows("SELECT id, path FROM nodes ORDER BY id", (), |r| {
+                Ok((col_text(r, 0)?, col_text(r, 1)?))
+            })?;
+        for (id, path) in all_ids {
+            if let Err(e) = id.parse::<NodeId>() {
+                warnings.push(Warning::UnreferenceableId {
+                    id,
+                    path,
+                    reason: e.to_string(),
+                });
+            }
+        }
+
         Ok(CheckReport {
             ok: violations.is_empty(),
             violations,
             warnings,
         })
+    }
+}
+
+/// Render a stored edge target for display: a local target is its bare `to_id`, a
+/// cross-package target regains its `@pkg/` qualifier (`to_id` is the within-package
+/// address; the package lives in a separate column).
+fn display_target(to_id: &str, to_package: Option<&str>) -> String {
+    match to_package {
+        Some(pkg) => format!("@{pkg}/{to_id}"),
+        None => to_id.to_string(),
     }
 }
 
@@ -267,30 +438,31 @@ fn scalar_strings(value: &serde_json::Value) -> Vec<&str> {
     }
 }
 
-/// If `value` is **reference-shaped** — a bare `type:slug` with no whitespace and a clean
-/// type token (so a title/note with a colon is excluded) — return its type. Used to flag
-/// references whose type isn't configured. Unresolved `?type:` forms are skipped.
-fn referenced_type(value: &str) -> Option<&str> {
+/// If `value` is a **candidate reference** — it matches the strict target grammar, i.e.
+/// identification per design.md §6 — return the node's own type (the last segment's, for
+/// a scoped target). This is the *same parser* the edge path uses, so check and build can
+/// never disagree on what counts as a reference: a URL, a time, or a colon in prose fails
+/// the grammar and is structurally not a candidate (the `url:` fix). Stray `[[ ]]`
+/// brackets are stripped first (the frontmatter trap, flagged separately); unresolved
+/// `?type:` forms are skipped.
+fn candidate_type(value: &str) -> Option<NodeType> {
     let v = value.trim();
     let v = v
         .strip_prefix("[[")
         .and_then(|x| x.strip_suffix("]]"))
         .map(str::trim)
         .unwrap_or(v);
-    if v.is_empty() || v.starts_with('?') || v.chars().any(char::is_whitespace) {
+    if v.starts_with('?') {
         return None;
     }
-    let (ty, slug) = v.split_once(':')?;
-    if ty.is_empty() || slug.is_empty() {
+    let id: NodeId = v.parse().ok()?;
+    // A cross-package candidate is classified by its OWNING package's vocabulary, never
+    // this one's (same rule as the edge gate in build.rs) — the resolution lints judge
+    // it instead.
+    if id.package().is_some() {
         return None;
     }
-    if !ty
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return None;
-    }
-    Some(ty)
+    Some(id.node_type)
 }
 
 /// Whether a stored frontmatter value bears the `[[ ]]` trap: a string containing the

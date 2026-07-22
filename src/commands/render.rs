@@ -6,33 +6,48 @@
 //! override or the target's `name:`, href a path relative to this file. Unresolved
 //! `[[?...]]` render as their plain descriptor (they are not links). Dangling targets
 //! and wikilinks inside fenced code blocks are left verbatim.
+//!
+//! Cross-package (M5): the rendered node may itself live in a linked package, and its
+//! inline references resolve **in that package's context** — an `@pkg/` ref inside an
+//! acme-core file goes through acme-core's `[dependencies]`, not the run-root's
+//! (design.md §9). Hrefs to another package are filesystem-relative paths through the
+//! link (`../../acme-core/…`); same-package hrefs are byte-identical to before.
+
+use std::rc::Rc;
 
 use crate::commands::Ctx;
 use crate::error::{Result, VaireError};
-use crate::index::Index;
 use crate::model::id::NodeId;
 use crate::model::reference::Reference;
 use crate::output::RenderOutput;
+use crate::workspace::resolver::{self, Resolved};
+use crate::workspace::{PackageHandle, Workspace};
 
 pub fn run(ctx: &Ctx, id: &str) -> Result<RenderOutput> {
     let id: NodeId = id
         .parse()
         .map_err(|e| VaireError::Usage(format!("bad id '{id}': {e}")))?;
-    let index = ctx.open_index()?;
-    let resolved = index.resolve(&id)?; // exit 5 if not a node; follows superseded_by
-    let source_path = resolved.path;
+    let ws = ctx.workspace()?;
+    let resolved = resolver::resolve(ws, ws.current(), &id)?; // exit 5 if not a node
 
-    let source_scope = resolved.id.scope().map(str::to_string);
+    // The rendered node's owning package is the context every inline ref resolves in.
+    let owner = if resolved.package == ws.current().id {
+        ws.current()
+    } else {
+        ws.handle_at(&resolved.root).ok_or_else(|| {
+            VaireError::Dependency(format!(
+                "package '{}' disappeared during render",
+                resolved.package
+            ))
+        })?
+    };
+    let source_path = resolved.node.path.clone();
+    let source_scope = resolved.node.id.scope().map(str::to_string);
 
-    let raw = std::fs::read_to_string(ctx.repo.root().join(&source_path))?;
+    let path = crate::corpus::repo::Repo::safe_file_under(&resolved.root, &source_path)?;
+    let raw = std::fs::read_to_string(path)?;
     let (header, prose) = split_raw(&raw);
-    let body = render_prose(
-        &prose,
-        &source_path,
-        source_scope.as_deref(),
-        &ctx.config.scoped_types,
-        &index,
-    );
+    let body = render_prose(&prose, &source_path, source_scope.as_deref(), ws, &owner);
 
     let mut markdown = String::new();
     if !header.is_empty() {
@@ -44,9 +59,11 @@ pub fn run(ctx: &Ctx, id: &str) -> Result<RenderOutput> {
         markdown.push('\n');
     }
 
+    let cross = resolved.package != ws.current().id;
     Ok(RenderOutput {
-        id: resolved.id.to_string(),
+        id: resolved.node.id.to_string(),
         path: source_path,
+        package: cross.then(|| resolved.package.to_string()),
         markdown,
     })
 }
@@ -71,29 +88,18 @@ fn render_prose(
     prose: &str,
     source_path: &str,
     source_scope: Option<&str>,
-    scoped_types: &[String],
-    index: &Index,
+    ws: &Workspace,
+    owner: &Rc<PackageHandle>,
 ) -> String {
     let mut out = String::new();
-    let mut in_fence = false;
+    let mut fences = crate::corpus::markdown::Fences::new();
     for line in prose.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        }
-        if in_fence {
+        // Code passes through verbatim — a `[[...]]` inside an example is text to show,
+        // not a reference to re-render.
+        if fences.is_code(line) {
             out.push_str(line);
         } else {
-            out.push_str(&render_line(
-                line,
-                source_path,
-                source_scope,
-                scoped_types,
-                index,
-            ));
+            out.push_str(&render_line(line, source_path, source_scope, ws, owner));
         }
         out.push('\n');
     }
@@ -104,8 +110,8 @@ fn render_line(
     line: &str,
     source_path: &str,
     source_scope: Option<&str>,
-    scoped_types: &[String],
-    index: &Index,
+    ws: &Workspace,
+    owner: &Rc<PackageHandle>,
 ) -> String {
     let mut result = String::new();
     let mut rest = line;
@@ -120,8 +126,8 @@ fn render_line(
             &after[..end],
             source_path,
             source_scope,
-            scoped_types,
-            index,
+            ws,
+            owner,
         ));
         rest = &after[end + 2..];
     }
@@ -129,43 +135,78 @@ fn render_line(
     result
 }
 
+/// Resolve a reference target **scope-first, then global** (cli.md §6.1): a bare target
+/// inside a scoped node prefers a same-scope sibling; otherwise the global target.
+/// Scope-first applies only within the owner's own package — an `@pkg/` target skips it.
+/// Any resolution failure (dangling, unlinked dependency) yields `None` → verbatim.
+fn resolve_scope_first(
+    ws: &Workspace,
+    owner: &Rc<PackageHandle>,
+    target: &NodeId,
+    source_scope: Option<&str>,
+) -> Option<Resolved> {
+    if let Some(scope) = source_scope
+        && target.scope().is_none()
+        && target.package().is_none()
+    {
+        let mut scoped = target.clone();
+        scoped.scope = Some(scope.to_string());
+        if let Ok(node) = resolver::resolve(ws, owner.clone(), &scoped) {
+            return Some(node);
+        }
+    }
+    resolver::resolve(ws, owner.clone(), target).ok()
+}
+
 fn render_ref(
     inner: &str,
     source_path: &str,
     source_scope: Option<&str>,
-    scoped_types: &[String],
-    index: &Index,
+    ws: &Workspace,
+    owner: &Rc<PackageHandle>,
 ) -> String {
     match Reference::parse_inner(inner) {
-        Some(Reference::Resolved {
-            mut target,
-            display,
-        }) => {
-            // Expand a relative scoped ref against the rendering node's own scope.
-            if let Some(scope) = source_scope
-                && scoped_types.iter().any(|t| t == target.node_type.as_str())
-                && target.scope().is_none()
-            {
-                target.scope = Some(scope.to_string());
-            }
-            match index.resolve(&target) {
-                Ok(node) => {
-                    let name = node
+        Some(Reference::Resolved { target, display }) => {
+            match resolve_scope_first(ws, owner, &target, source_scope) {
+                Some(resolved) => {
+                    let name = resolved
+                        .node
                         .frontmatter
                         .get("name")
                         .and_then(|v| v.as_str())
                         .map(str::to_string)
                         .unwrap_or_else(|| target.slug.clone());
                     let text = display.unwrap_or(name);
-                    let href = relative_path(source_path, &node.path);
+                    let href = if resolved.root == owner.root {
+                        // Same package: byte-identical to the pre-M5 output.
+                        relative_path(source_path, &resolved.node.path)
+                    } else {
+                        cross_package_href(owner, source_path, &resolved)
+                    };
                     format!("[{text}]({href})")
                 }
-                Err(_) => format!("[[{inner}]]"), // dangling — keep verbatim
+                None => format!("[[{inner}]]"), // dangling — keep verbatim
             }
         }
         // Loose ends are not links: render the author's descriptor as plain text.
         Some(Reference::Unresolved { descriptor, .. }) => descriptor,
         None => format!("[[{inner}]]"),
+    }
+}
+
+/// Href from a file in `owner` to a node in another package: filesystem-relative through
+/// the canonical roots (`../../acme-core/knowledge/….md`).
+fn cross_package_href(owner: &PackageHandle, source_path: &str, resolved: &Resolved) -> String {
+    let from_dir = owner
+        .root
+        .join(source_path)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| owner.root.clone());
+    let to = resolved.root.join(&resolved.node.path);
+    match crate::workspace::relative_to(&to, &from_dir) {
+        Some(rel) => rel.display().to_string(),
+        None => to.display().to_string(),
     }
 }
 

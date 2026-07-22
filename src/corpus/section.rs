@@ -36,9 +36,15 @@ impl Section {
             body.clear();
         };
 
+        // A `## ` inside a fenced block is code, not a heading — shell and Python examples
+        // routinely start comments that way. Splitting on them produced sections whose
+        // "heading" was a line of code and search anchors pointing inside code blocks.
+        let mut fences = crate::corpus::markdown::Fences::new();
+
         for (i, raw) in prose.lines().enumerate() {
             let file_line = prose_start_line + i as u32;
-            if let Some(h) = raw.strip_prefix("## ") {
+            let is_code = fences.is_code(raw);
+            if let Some(h) = raw.strip_prefix("## ").filter(|_| !is_code) {
                 if open {
                     flush(&mut heading, line, &mut body);
                 }
@@ -83,5 +89,20 @@ mod tests {
 
         assert_eq!(sections[2].heading.as_deref(), Some("Decision"));
         assert_eq!(sections[2].body, "body two");
+    }
+
+    #[test]
+    fn hash_hash_inside_a_code_fence_is_not_a_heading() {
+        // Shell and Python examples routinely comment with "## ". Splitting on those
+        // produced a section whose heading was a line of code, and a search anchor
+        // pointing inside the fence.
+        let prose = "## Setup\nIntro.\n```bash\n## install deps\napt install foo\n```\nOutro.";
+        let sections = Section::split(prose, 1);
+        assert_eq!(sections.len(), 1, "one real heading: {sections:?}");
+        assert_eq!(sections[0].heading.as_deref(), Some("Setup"));
+        assert!(
+            sections[0].body.contains("apt install foo"),
+            "the fenced block stays in its section body"
+        );
     }
 }

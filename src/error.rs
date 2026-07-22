@@ -45,6 +45,8 @@ pub enum ErrorKind {
     IndexNotBuilt,
     IdNotFound,
     CheckViolations,
+    Dependency,
+    Upgrade,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -53,9 +55,14 @@ pub enum VaireError {
     Usage(String),
 
     #[error(
-        "no corpus found: no .vaire/ directory here or in any parent (point --repo at a corpus root, or create .vaire/config.toml to mark one)"
+        "no corpus found: no knowledge.toml here or in any parent (point --repo at a package root, or run `vaire init` to create one)"
     )]
     NoRepo,
+
+    #[error(
+        "found a legacy .vaire/config.toml at {0} but no knowledge.toml; run `vaire init` to migrate it"
+    )]
+    LegacyConfig(String),
 
     #[error("index not built yet at {0}; run `vaire index`")]
     IndexNotBuilt(String),
@@ -69,11 +76,23 @@ pub enum VaireError {
     #[error("`vaire check` found {0} violation(s)")]
     CheckViolations(usize),
 
+    /// A declared dependency is unavailable on this machine — not linked, a broken link,
+    /// a name mismatch, or an unreadable target (cli.md §6.5). The message carries the
+    /// exact fix (usually a `vaire add <name> --link <path>` or `vaire index`).
+    #[error("dependency error: {0}")]
+    Dependency(String),
+
+    /// `vaire upgrade` could not complete — API/download failure, no release asset
+    /// for this platform, or the binary is managed by a package manager (the message
+    /// then names that manager's own upgrade command). Exit `1`.
+    #[error("upgrade error: {0}")]
+    Upgrade(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("sqlite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    #[error("index engine error: {0}")]
+    Turso(#[from] turso::Error),
 
     #[error("config error: {0}")]
     Config(String),
@@ -87,10 +106,12 @@ impl VaireError {
         match self {
             VaireError::Usage(_) => ExitCode::Usage,
             VaireError::NoRepo => ExitCode::NoRepoOrIndex,
+            VaireError::LegacyConfig(_) => ExitCode::NoRepoOrIndex,
             VaireError::IndexNotBuilt(_) => ExitCode::NoRepoOrIndex,
             VaireError::IndexCorrupt(_) => ExitCode::IndexCorrupt,
             VaireError::IdNotFound(_) => ExitCode::IdNotFound,
             VaireError::CheckViolations(_) => ExitCode::CheckViolations,
+            VaireError::Dependency(_) => ExitCode::NoRepoOrIndex,
             _ => ExitCode::Generic,
         }
     }
@@ -99,10 +120,13 @@ impl VaireError {
         match self {
             VaireError::Usage(_) => ErrorKind::Usage,
             VaireError::NoRepo => ErrorKind::NoRepo,
+            VaireError::LegacyConfig(_) => ErrorKind::NoRepo,
             VaireError::IndexNotBuilt(_) => ErrorKind::IndexNotBuilt,
             VaireError::IndexCorrupt(_) => ErrorKind::IndexCorrupt,
             VaireError::IdNotFound(_) => ErrorKind::IdNotFound,
             VaireError::CheckViolations(_) => ErrorKind::CheckViolations,
+            VaireError::Dependency(_) => ErrorKind::Dependency,
+            VaireError::Upgrade(_) => ErrorKind::Upgrade,
             _ => ErrorKind::Generic,
         }
     }

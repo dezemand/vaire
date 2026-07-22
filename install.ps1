@@ -10,8 +10,9 @@
     irm https://raw.githubusercontent.com/dezemand/vaire/main/install.ps1 | iex
 
 .PARAMETER Version
-    Tag to install (e.g. v0.1.0). Defaults to the latest release.
-    Override via the env var VAIRE_VERSION.
+    Version to install (e.g. 0.1.0; a leading v is accepted). Defaults to the
+    latest release — skipped when the installed vaire is already at or above it.
+    A pinned version always installs. Override via the env var VAIRE_VERSION.
 
 .PARAMETER InstallDir
     Where to put vaire.exe. Defaults to %LOCALAPPDATA%\Programs\vaire.
@@ -37,6 +38,7 @@ switch ($arch) {
 }
 
 # --- resolve version ---------------------------------------------------------
+$Pinned = [bool]$Version
 if (-not $Version) {
     Write-Host 'Resolving latest release...' -ForegroundColor DarkGray
     $rel = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest" `
@@ -44,14 +46,33 @@ if (-not $Version) {
     $Version = $rel.tag_name
     if (-not $Version) { throw 'Could not determine the latest release version. Set VAIRE_VERSION.' }
 }
+# Versions are bare (0.2.0); the v prefix exists only on the git tag (and the
+# asset/download paths built from it). VAIRE_VERSION is accepted either way.
+$Version = $Version -replace '^v', ''
+$Tag = "v$Version"
 
-$stem  = "$Bin-$Version-$target"
+$stem  = "$Bin-$Tag-$target"
 $asset = "$stem.zip"
-$url   = "https://github.com/$Repo/releases/download/$Version/$asset"
+$url   = "https://github.com/$Repo/releases/download/$Tag/$asset"
 
 # --- install dir -------------------------------------------------------------
 if (-not $InstallDir) {
     $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\vaire"
+}
+
+# --- skip when already up to date --------------------------------------------
+# Installing the latest is a no-op when the installed vaire is already at or above
+# it; a pinned version always installs (that is how an install is repaired).
+$exePath = Join-Path $InstallDir "$Bin.exe"
+if (-not $Pinned -and (Test-Path $exePath)) {
+    $installed = $null
+    try { if ((& $exePath --version 2>$null) -match '(\d+\.\d+\.\d+)') { $installed = $Matches[1] } } catch {}
+    $targetCore = $Version -replace '-.*', ''
+    if ($installed -and $targetCore -match '^\d+\.\d+\.\d+$' -and
+        [version]$installed -ge [version]$targetCore) {
+        Write-Host "$Bin $installed is already installed at $exePath (latest release: $Version) — nothing to do." -ForegroundColor Green
+        return
+    }
 }
 
 Write-Host "Installing $Bin $Version " -NoNewline
@@ -65,6 +86,45 @@ New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 try {
     $zip = Join-Path $tmp $asset
     Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -Headers @{ 'User-Agent' = 'vaire-installer' }
+
+    # Verify against the release's published digests before extracting. HTTPS authenticates
+    # the transport, not the artifact, so it is no defence against a replaced release asset.
+    # Set VAIRE_SKIP_CHECKSUM=1 to bypass deliberately.
+    if ($env:VAIRE_SKIP_CHECKSUM -eq '1') {
+        Write-Host "  skipping checksum verification (VAIRE_SKIP_CHECKSUM=1)" -ForegroundColor DarkGray
+    }
+    else {
+        $sumsUrl = "https://github.com/$Repo/releases/download/$Tag/SHA256SUMS"
+        $sums = Join-Path $tmp 'SHA256SUMS'
+        $havesums = $true
+        try {
+            Invoke-WebRequest -Uri $sumsUrl -OutFile $sums -UseBasicParsing -Headers @{ 'User-Agent' = 'vaire-installer' }
+        }
+        catch {
+            # Releases published before SHA256SUMS existed have nothing to verify against.
+            $havesums = $false
+            Write-Host "  no SHA256SUMS published for $Version - skipping verification" -ForegroundColor DarkGray
+        }
+        if ($havesums) {
+            # Exact filename match (stripping sha256sum's binary-mode '*' marker), not a
+            # substring search — a sibling asset like "<asset>.sig" would also match.
+            $expected = $null
+            foreach ($line in Get-Content $sums) {
+                $fields = $line -split '\s+', 2
+                if ($fields.Count -eq 2 -and $fields[1].Trim().TrimStart('*') -eq $asset) {
+                    $expected = $fields[0]
+                    break
+                }
+            }
+            if (-not $expected) { throw "No checksum for $asset in SHA256SUMS." }
+            $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash
+            if ($actual -ne $expected) {
+                throw "Checksum mismatch for ${asset}: expected $expected, got $actual. Refusing to install."
+            }
+            Write-Host "  checksum ok" -ForegroundColor DarkGray
+        }
+    }
+
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
 
     # Archive holds a top-level directory ($stem) with the .exe; fall back to flat.
@@ -82,11 +142,25 @@ finally {
 Write-Host "Installed $InstallDir\$Bin.exe" -ForegroundColor Green
 
 # --- ensure on PATH (user scope) ---------------------------------------------
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-$onPath = ($userPath -split ';') -contains $InstallDir
+# Read and write the raw registry value rather than going through
+# [Environment]::GetEnvironmentVariable/SetEnvironmentVariable. Those expand and rewrite the
+# value as REG_SZ: a user PATH stored as REG_EXPAND_SZ (entries like %USERPROFILE%\bin — a
+# common setup) would come back with those references frozen to whatever they resolve to
+# today, silently breaking if the profile ever moves. Preserving the existing value kind
+# keeps the user's PATH exactly as they wrote it.
+$key = 'HKCU:\Environment'
+$raw = (Get-ItemProperty -Path $key -Name Path -ErrorAction SilentlyContinue)
+$userPath = if ($null -ne $raw) { $raw.Path } else { '' }
+$onPath = ($userPath -split ';' | Where-Object { $_ }) -contains $InstallDir
 if (-not $onPath) {
+    $kind = 'String'
+    try {
+        $existing = (Get-Item -Path $key).GetValueKind('Path')
+        if ($existing -eq 'ExpandString') { $kind = 'ExpandString' }
+    }
+    catch { }   # no existing Path value: a plain REG_SZ is right
     $newPath = if ([string]::IsNullOrEmpty($userPath)) { $InstallDir } else { "$userPath;$InstallDir" }
-    [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+    New-ItemProperty -Path $key -Name Path -Value $newPath -PropertyType $kind -Force | Out-Null
     $env:Path = "$env:Path;$InstallDir"   # make it usable in the current session too
     Write-Host "Added $InstallDir to your user PATH. Restart your terminal for it to take effect everywhere." -ForegroundColor Yellow
 }

@@ -6,8 +6,11 @@
 //! surface. Each `run` returns a typed output; the binary handles rendering (human vs
 //! `--json`) and the exit-code mapping (cli.md §7).
 
+pub mod add;
 pub mod backlinks;
 pub mod check;
+pub mod configure;
+pub mod deps;
 pub mod index;
 pub mod init;
 pub mod refs;
@@ -17,6 +20,7 @@ pub mod search;
 pub mod status;
 pub mod suggest;
 pub mod unresolved;
+pub mod upgrade;
 
 use std::path::PathBuf;
 
@@ -29,6 +33,12 @@ use crate::error::Result;
 pub struct Ctx {
     pub repo: Repo,
     pub config: Config,
+    /// The linked-package view (cli.md §6.5), built lazily on first cross-package need —
+    /// a standalone package never constructs it.
+    workspace: std::cell::OnceCell<crate::workspace::Workspace>,
+    /// The embedding provider can own an HTTP connection pool or command configuration;
+    /// retain it for the invocation (and all MCP requests) rather than recreating it per call.
+    embedder: std::cell::OnceCell<Box<dyn crate::embed::Embedder>>,
 }
 
 impl Ctx {
@@ -38,7 +48,21 @@ impl Ctx {
         let repo = Repo::discover(repo_override.as_deref(), &cwd)?;
         let config_path = config_override.unwrap_or_else(|| repo.config_path());
         let config = Config::load(&config_path)?;
-        Ok(Ctx { repo, config })
+        Ok(Ctx {
+            repo,
+            config,
+            workspace: std::cell::OnceCell::new(),
+            embedder: std::cell::OnceCell::new(),
+        })
+    }
+
+    /// The linked-package view rooted at this package (memoized).
+    pub fn workspace(&self) -> Result<&crate::workspace::Workspace> {
+        if self.workspace.get().is_none() {
+            let ws = crate::workspace::Workspace::new(&self.repo, &self.config)?;
+            let _ = self.workspace.set(ws);
+        }
+        Ok(self.workspace.get().expect("just initialized"))
     }
 
     /// Open the already-built index, mapping a missing/corrupt file to the documented
@@ -58,10 +82,14 @@ impl Ctx {
         }
     }
 
-    /// Build the configured embedder, giving it `.vaire/` so providers that need secrets
-    /// (e.g. OpenAI) can read `.vaire/.env`.
-    pub fn embedder(&self) -> Result<Box<dyn crate::embed::Embedder>> {
-        let vaire_dir = self.repo.vaire_dir();
-        crate::embed::from_config(&self.config, Some(vaire_dir.as_path()))
+    /// Build the embedder from the global user config (M2); providers that need secrets
+    /// (e.g. OpenAI) resolve them from the environment or `credentials.toml`.
+    pub fn embedder(&self) -> Result<&dyn crate::embed::Embedder> {
+        if self.embedder.get().is_none() {
+            let user = crate::userconfig::UserConfig::load()?;
+            let embedder = crate::embed::from_user_config(&user)?;
+            let _ = self.embedder.set(embedder);
+        }
+        Ok(self.embedder.get().expect("embedder initialized").as_ref())
     }
 }

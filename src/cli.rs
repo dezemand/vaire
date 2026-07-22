@@ -25,7 +25,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Path to the config file (default: <root>/.vaire/config.toml).
+    /// Path to the manifest (default: <root>/knowledge.toml).
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
@@ -75,17 +75,21 @@ pub enum Command {
         type_filter: Option<String>,
     },
 
-    /// Hybrid full-text + vector search over the corpus.
+    /// Hybrid full-text + vector search over the corpus and its linked dependencies.
     Search {
         query: String,
         #[arg(long = "type")]
         type_filter: Option<String>,
-        /// Restrict to records in a project (matches the `project:` field).
+        /// Restrict to records in a container (`project:atlas`, or `@pkg/project:atlas`
+        /// to search inside a dependency's container).
         #[arg(long)]
         scope: Option<String>,
         /// Max results (default: 10).
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// Search only this package (skip linked dependencies).
+        #[arg(long)]
+        local: bool,
     },
 
     /// Suggest existing node IDs a descriptor might refer to (lookup-before-reference).
@@ -96,7 +100,13 @@ pub enum Command {
         /// Max suggestions (default: 5).
         #[arg(long, default_value_t = 5)]
         limit: usize,
+        /// Suggest only from this package (skip linked dependencies).
+        #[arg(long)]
+        local: bool,
     },
+
+    /// Print the resolved local dependency tree (live link inspection; no index needed).
+    Deps,
 
     /// Every unresolved reference ([[?...]]) currently in the corpus.
     Unresolved {
@@ -104,13 +114,28 @@ pub enum Command {
         type_filter: Option<String>,
         #[arg(long)]
         scope: Option<String>,
+        /// Also list linked dependencies' loose ends (default: this package only —
+        /// a dependency's worklist belongs to its owner).
+        #[arg(long = "all-packages")]
+        all_packages: bool,
     },
 
     // ---- maintain commands (NOT on the MCP surface) ----
-    /// Scaffold a corpus: write .vaire/config.toml so the directory is discoverable.
+    /// Scaffold a package: write knowledge.toml so the directory is discoverable
+    /// (or migrate a legacy .vaire/config.toml).
     Init {
         /// Directory to initialize (default: current directory).
         path: Option<PathBuf>,
+    },
+
+    /// Declare a dependency on another package in knowledge.toml.
+    Add {
+        /// The package to depend on: `<name>` or `<name>@^MAJOR` (default `^1`).
+        spec: String,
+        /// Also link where it lives: creates the `.vaire/packages/<name>` symlink to
+        /// this path (a package directory declaring the same name).
+        #[arg(long)]
+        link: Option<PathBuf>,
     },
 
     /// (Re)build the index from the committed files.
@@ -125,6 +150,9 @@ pub enum Command {
         /// after changing the embedding model/provider). Keeps the graph as-is.
         #[arg(long = "re-embed")]
         re_embed: bool,
+        /// Skip the linked-dependency ensure pass (index only this package).
+        #[arg(long = "no-deps")]
+        no_deps: bool,
     },
 
     /// Run the integrity guards ID-based discovery enables.
@@ -135,10 +163,32 @@ pub enum Command {
         /// Reindex the working tree first, then check uncommitted edits.
         #[arg(long)]
         working_tree: bool,
+        /// Skip the linked-dependency ensure pass (resolution lints then judge the
+        /// dependency indexes as-is).
+        #[arg(long = "no-deps")]
+        no_deps: bool,
     },
 
     /// Report index state.
     Status,
+
+    /// Self-update: download the release binary for this platform and replace this
+    /// executable (same contract as the installer script).
+    Upgrade {
+        /// Version to install (e.g. `0.3.0`; default: the latest release, only if newer.
+        /// An explicit version always installs, so `vaire upgrade <current>` repairs an
+        /// install).
+        version: Option<String>,
+        /// Only report whether a newer release exists; install nothing.
+        #[arg(long)]
+        check: bool,
+    },
+
+    /// Configure global user settings. With no subcommand, opens an interactive prompt.
+    Configure {
+        #[command(subcommand)]
+        section: Option<ConfigureSection>,
+    },
 
     // ---- agent surface ----
     /// Start a STDIO MCP server exposing the read commands as tools.
@@ -151,4 +201,43 @@ impl Command {
     pub fn supports_json(&self) -> bool {
         !matches!(self, Command::Mcp)
     }
+}
+
+/// The sections `vaire configure <section>` can set non-interactively. Bare `vaire
+/// configure` (no section) walks the same settings through an interactive prompt.
+#[derive(Debug, Subcommand)]
+pub enum ConfigureSection {
+    /// Configure the embedding provider and its credentials.
+    Embeddings {
+        /// Embedding provider: local | command | openai.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Embedding model (for the openai provider).
+        #[arg(long)]
+        model: Option<String>,
+        /// Embedding vector dimensions.
+        #[arg(long)]
+        dimensions: Option<usize>,
+        /// Command to run for the `command` provider.
+        #[arg(long)]
+        command: Option<String>,
+        /// Read an API key from standard input and store it in credentials.toml. This avoids
+        /// exposing it in shell history or process arguments.
+        #[arg(long = "api-key-stdin")]
+        api_key_stdin: bool,
+        /// API base URL override. Stored in credentials.toml.
+        #[arg(long = "api-url")]
+        api_url: Option<String>,
+    },
+
+    /// Set the directory where your local packages live. Declared dependencies are
+    /// satisfied from here automatically (by declared name, at any depth).
+    #[command(name = "local-packages")]
+    LocalPackages {
+        /// The directory to search. Omit to show the current setting.
+        path: Option<String>,
+        /// Clear the setting (no automatic discovery).
+        #[arg(long)]
+        unset: bool,
+    },
 }

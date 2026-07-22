@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use common::{Corpus, CountingEmbedder, head};
 
 use vaire::commands;
+use vaire::embed::Embedder;
+use vaire::error::Result as VaireResult;
 use vaire::index::build::Mode;
 use vaire::index::check::{Violation, Warning};
 
@@ -52,7 +54,7 @@ fn status_behind_head_after_new_commit() {
 #[test]
 fn check_clean_fixture_has_no_violations() {
     let c = Corpus::fixture();
-    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(report.violations.is_empty(), "{:?}", report.violations);
     assert!(!failed);
 }
@@ -75,7 +77,7 @@ fn check_detects_duplicate_id() {
     .commit()
     .build();
 
-    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(failed);
     assert!(
         report
@@ -95,7 +97,7 @@ fn check_detects_dangling_reference() {
     .commit()
     .build();
 
-    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(failed);
     assert!(
         report
@@ -116,7 +118,7 @@ fn orphan_is_a_warning_not_a_failure_unless_strict() {
     .commit()
     .build();
 
-    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         report
             .warnings
@@ -126,8 +128,92 @@ fn orphan_is_a_warning_not_a_failure_unless_strict() {
     assert!(!failed, "orphans are warnings by default");
 
     // --strict promotes the warning to a failure (exit 6).
-    let (_report, failed_strict) = commands::check::run(&c.ctx(), true, false).unwrap();
+    let (_report, failed_strict) = commands::check::run(&c.ctx(), true, false, false).unwrap();
     assert!(failed_strict);
+}
+
+#[test]
+fn check_flags_undeclared_cross_package_import() {
+    // A cross-package `@pkg/` reference whose package isn't in [dependencies] is an
+    // undeclared import — a violation (packages.md §8). Pure table check, no resolution.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/checkout.md",
+        "---\nid: checkout\ntype: system\nowner: \"@acme-core/department:platform\"\n---\n# Checkout\n",
+    )
+    .commit()
+    .build();
+
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
+    assert!(failed, "undeclared import is a violation");
+    assert!(
+        report.violations.iter().any(|v| matches!(
+            v,
+            Violation::UndeclaredImport { package, to, .. }
+                if package == "acme-core" && to == "@acme-core/department:platform"
+        )),
+        "expected undeclared_import: {:?}",
+        report.violations
+    );
+    // It is NOT reported as a local dangling reference.
+    assert!(
+        !report
+            .violations
+            .iter()
+            .any(|v| matches!(v, Violation::DanglingRef { .. }))
+    );
+}
+
+#[test]
+fn declared_cross_package_import_is_clean() {
+    // Same reference, but the package is declared → no undeclared_import. It still doesn't
+    // resolve (that's M5), but declaring the dependency clears the manifest-only lint.
+    let c = Corpus::empty();
+    c.with_dependencies(&[("acme-core", "^1")]).add(
+        "knowledge/checkout.md",
+        "---\nid: checkout\ntype: system\nowner: \"@acme-core/department:platform\"\n---\n# Checkout\n",
+    )
+    .commit()
+    .build();
+
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
+    assert!(
+        !report
+            .violations
+            .iter()
+            .any(|v| matches!(v, Violation::UndeclaredImport { .. })),
+        "declared dependency should clear the lint: {:?}",
+        report.violations
+    );
+}
+
+#[test]
+fn check_warns_on_unreferenceable_declared_id() {
+    // The file indexes (files are truth), but its declared id falls outside the strict
+    // reference grammar (design.md §6), so no reference can ever address it — the trap
+    // is surfaced as a warning, never silent, never a block.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/jane.md",
+        "---\nid: Jane_Doe\ntype: person\nname: Jane\n---\n# Jane\n",
+    )
+    .commit()
+    .build();
+
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, Warning::UnreferenceableId { id, .. } if id == "person:Jane_Doe")),
+        "expected unreferenceable_id: {:?}",
+        report.warnings
+    );
+    assert!(!failed, "a warning, not a violation");
+
+    // The node itself still indexed — files are truth.
+    let status = commands::status::run(&c.ctx()).unwrap();
+    assert_eq!(status.nodes.total, 1);
 }
 
 #[test]
@@ -143,7 +229,7 @@ fn drift_is_an_advisory_warning_for_inline_only_refs() {
         .commit()
         .build();
 
-    let (report, failed) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     // Inline-only system:x drifts; system:y (also in frontmatter) does not.
     assert!(
         report
@@ -161,7 +247,7 @@ fn drift_is_an_advisory_warning_for_inline_only_refs() {
     assert!(!failed, "drift is advisory");
 
     // --strict promotes it to a failure.
-    let (_r, failed_strict) = commands::check::run(&c.ctx(), true, false).unwrap();
+    let (_r, failed_strict) = commands::check::run(&c.ctx(), true, false, false).unwrap();
     assert!(failed_strict);
 }
 
@@ -194,6 +280,53 @@ fn incremental_reindex_reembeds_only_changed_sections() {
 
     // Preamble + Alpha are content-hash cache hits; only Beta is re-embedded.
     assert_eq!(counter.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn full_build_batches_embeddings_across_files() {
+    struct BatchCountingEmbedder {
+        calls: Arc<AtomicUsize>,
+        texts: Arc<AtomicUsize>,
+    }
+
+    impl Embedder for BatchCountingEmbedder {
+        fn embed(&self, inputs: &[String]) -> VaireResult<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.texts.fetch_add(inputs.len(), Ordering::Relaxed);
+            Ok(inputs.iter().map(|_| vec![0.0; 8]).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            8
+        }
+    }
+
+    let c = Corpus::empty();
+    for (id, body) in [
+        ("one", "first body"),
+        ("two", "second body"),
+        ("three", "third body"),
+        ("four", "first body"),
+    ] {
+        c.add(
+            &format!("knowledge/{id}.md"),
+            &format!("---\nid: {id}\ntype: method\n---\n# Shared\n\n{body}\n"),
+        );
+    }
+    c.commit();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let texts = Arc::new(AtomicUsize::new(0));
+    let embedder = BatchCountingEmbedder {
+        calls: calls.clone(),
+        texts: texts.clone(),
+    };
+    c.build_with(&embedder, Mode::Full);
+
+    // The fourth file reuses the first file's section body, so all three unique
+    // sections are embedded in one cross-file batch.
+    assert_eq!(texts.load(Ordering::Relaxed), 3);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -336,15 +469,211 @@ fn check_working_tree_validates_uncommitted_edits() {
     );
 
     // Committed check (reads the existing committed index) is still clean.
-    let (committed, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (committed, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(committed.violations.is_empty());
 
     // Working-tree check reindexes from disk and catches the dangling ref.
-    let (wt, failed) = commands::check::run(&c.ctx(), false, true).unwrap();
+    let (wt, failed) = commands::check::run(&c.ctx(), false, true, false).unwrap();
     assert!(failed);
     assert!(
         wt.violations
             .iter()
             .any(|v| matches!(v, Violation::DanglingRef { to, .. } if to == "system:ghost"))
+    );
+}
+
+// ---- Git plumbing robustness (src/git.rs) ----------------------------------
+
+#[test]
+fn index_includes_files_with_non_ascii_names() {
+    // Git's default core.quotepath=true C-quotes non-ASCII paths on the newline-delimited
+    // plumbing forms ("caf\303\251.md"), which then misses the include globs and fails
+    // `cat-file` — the file vanished from the index with no error. The path listings pass
+    // `-z`, so raw bytes come back instead.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/café.md",
+        "---\nid: cafe\ntype: place\nname: Café\n---\n# Café\n",
+    );
+    c.add(
+        "knowledge/ascii.md",
+        "---\nid: ascii\ntype: place\nname: Ascii\n---\n# Ascii\n",
+    );
+    c.commit().build();
+
+    assert_eq!(node_name(&c, "place:cafe"), "Café");
+    assert_eq!(node_name(&c, "place:ascii"), "Ascii");
+}
+
+#[test]
+fn unreachable_anchor_commit_rebuilds_instead_of_freezing_the_index() {
+    // A `git diff` Git cannot answer (anchor rewritten away and gc'd) used to look
+    // identical to an empty diff: the build indexed nothing, reported success, and
+    // advanced last_indexed_commit to HEAD — stranding every intervening edit forever.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/jane.md",
+        "---\nid: jane\ntype: person\nname: Jane\n---\n# Jane\n",
+    );
+    c.commit().build();
+
+    // Rewrite history so the recorded anchor becomes unreachable.
+    c.add(
+        "knowledge/jane.md",
+        "---\nid: jane\ntype: person\nname: Jane Amended\n---\n# Jane\n",
+    );
+    c.add(
+        "knowledge/bob.md",
+        "---\nid: bob\ntype: person\nname: Bob\n---\n# Bob\n",
+    );
+    common::git(c.root(), &["add", "-A"]);
+    common::git(c.root(), &["commit", "-q", "--amend", "-m", "rewritten"]);
+    common::git(c.root(), &["reflog", "expire", "--expire=now", "--all"]);
+    common::git(c.root(), &["gc", "--prune=now", "-q"]);
+
+    // A plain (incremental) reindex must fall back to a full rebuild and pick both up.
+    c.build_with(&common::DummyEmbedder { dims: 8 }, Mode::Incremental);
+    assert_eq!(node_name(&c, "person:bob"), "Bob");
+    assert_eq!(node_name(&c, "person:jane"), "Jane Amended");
+}
+
+// ---- rebuild durability + embed-cache reuse (src/index/build.rs) -----------
+
+/// Fails on any embed call — stands in for a provider 5xx or a stalled request part-way
+/// through a rebuild.
+struct FailingEmbedder;
+
+impl Embedder for FailingEmbedder {
+    fn embed(&self, _texts: &[String]) -> VaireResult<Vec<Vec<f32>>> {
+        Err(vaire::error::VaireError::Config("provider exploded".into()))
+    }
+    fn dimensions(&self) -> usize {
+        8
+    }
+}
+
+#[test]
+fn a_failed_full_rebuild_leaves_the_previous_index_queryable() {
+    // The rebuild used to unlink index.db and stamp a fresh schema before parsing or
+    // embedding, so any failure after that point left a schema-VALID but empty index:
+    // open_index accepted it, resolve reported not-found, and MCP search returned [] with
+    // isError:false. Staging the rebuild and promoting by rename keeps the old index.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/jane.md",
+        "---\nid: jane\ntype: person\nname: Jane\n---\n# Jane\n",
+    )
+    .commit()
+    .build();
+    assert_eq!(node_name(&c, "person:jane"), "Jane");
+
+    // New prose the cache has never seen, so the rebuild must actually call the provider.
+    c.add(
+        "knowledge/bob.md",
+        "---\nid: bob\ntype: person\nname: Bob\n---\n# Bob\n\nunseen prose\n",
+    )
+    .commit();
+
+    let config = vaire::config::Config::load(&c.root().join("knowledge.toml")).unwrap();
+    let err = vaire::index::build::run(&c.repo(), &config, &FailingEmbedder, Mode::Full);
+    assert!(err.is_err(), "the build must surface the provider failure");
+
+    // The previous index is untouched and still answers queries.
+    assert_eq!(node_name(&c, "person:jane"), "Jane");
+}
+
+#[test]
+fn a_full_rebuild_reuses_cached_vectors_for_unchanged_sections() {
+    // The content-hash cache lives inside index.db, so recreating the file discarded it —
+    // every rebuild of a non-Git corpus, and every --working-tree run, re-embedded the
+    // whole corpus. design.md §9 promises only changed sections are re-embedded.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/n.md",
+        "---\nid: n\ntype: method\nname: N\n---\n# N\n\n## Alpha\n\nalpha\n\n## Beta\n\nbeta\n",
+    )
+    .commit();
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let emb = CountingEmbedder {
+        dims: 8,
+        embedded: counter.clone(),
+    };
+
+    c.build_with(&emb, Mode::Full);
+    assert_eq!(
+        counter.swap(0, Ordering::Relaxed),
+        3,
+        "cold build embeds all"
+    );
+
+    // A second full rebuild re-reads every file but must reuse the cached vectors.
+    c.build_with(&emb, Mode::Full);
+    assert_eq!(
+        counter.load(Ordering::Relaxed),
+        0,
+        "unchanged sections must come from the cache the rebuild carried over"
+    );
+}
+
+#[test]
+fn switching_provider_rebuilds_instead_of_mixing_vector_spaces() {
+    // dep_mode forced a full rebuild when a *dependency's* provider changed, but the
+    // current package always went incremental: changed sections got the new model's
+    // vectors, unchanged ones kept the old model's (the cache keys on text alone), and
+    // embed_provider was then re-stamped with the new identity — certifying a mixed index
+    // as homogeneous. Equal-width spaces are the dangerous case, since the length filter
+    // in search cannot detect them.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/n.md",
+        "---\nid: n\ntype: method\nname: N\n---\n# N\n\n## Alpha\n\nalpha\n",
+    )
+    .commit()
+    .build_with(&common::DummyEmbedder { dims: 8 }, Mode::Full);
+
+    // A different embedder identity at the SAME dimensions.
+    let counter = Arc::new(AtomicUsize::new(0));
+    let switched = CountingEmbedder {
+        dims: 8,
+        embedded: counter.clone(),
+    };
+    assert_ne!(
+        switched.identity(),
+        common::DummyEmbedder { dims: 8 }.identity(),
+        "the two embedders must differ for this test to mean anything"
+    );
+
+    // A plain incremental run with no file changes must still re-embed everything.
+    c.build_with(&switched, Mode::Incremental);
+    assert!(
+        counter.load(Ordering::Relaxed) > 0,
+        "a provider switch must re-embed, not reuse the previous model's vectors"
+    );
+}
+
+#[test]
+fn a_bracketed_scope_value_is_stripped_like_any_frontmatter_reference() {
+    // design.md §5: Vairë strips stray `[[ ]]` from frontmatter values forgivingly. The
+    // edge collector did; apply_scoping did not — so `project: "[[project:atlas]]"` baked
+    // the brackets into the node's own id, producing an address no reference could name
+    // and one that disagreed with the edge derived from that same field.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/atlas.md",
+        "---\nid: atlas\ntype: project\nname: Atlas\n---\n# Atlas\n",
+    )
+    .add(
+        "knowledge/standup.md",
+        "---\nid: standup\ntype: record\nname: Standup\nscope: \"[[project:atlas]]\"\n---\n# Standup\n",
+    )
+    .commit()
+    .build();
+
+    // The scoped node is addressable at the stripped scope.
+    assert_eq!(
+        node_name(&c, "project:atlas/record:standup"),
+        "Standup",
+        "the scope must be `project:atlas`, not `[[project:atlas]]`"
     );
 }

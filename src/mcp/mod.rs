@@ -22,7 +22,7 @@ use crate::output::Output;
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// The read tools, mapped 1:1 to CLI commands (cli.md §5 table).
-pub const READ_TOOLS: [&str; 7] = [
+pub const READ_TOOLS: [&str; 8] = [
     "resolve",
     "render",
     "backlinks",
@@ -30,6 +30,7 @@ pub const READ_TOOLS: [&str; 7] = [
     "search",
     "suggest",
     "unresolved",
+    "deps",
 ];
 
 /// Run the STDIO MCP server until the client disconnects (EOF on stdin).
@@ -121,6 +122,7 @@ pub fn call_tool(ctx: &Ctx, name: &str, args: &Value) -> std::result::Result<Val
             opt_str(args, "type").as_deref(),
             opt_str(args, "scope").as_deref(),
             opt_usize(args, "limit"),
+            opt_bool(args, "local"),
         )
         .map(|o| o.to_json()),
         "suggest" => commands::suggest::run(
@@ -128,14 +130,17 @@ pub fn call_tool(ctx: &Ctx, name: &str, args: &Value) -> std::result::Result<Val
             &required_str(args, "descriptor")?,
             opt_str(args, "type").as_deref(),
             opt_usize(args, "limit"),
+            opt_bool(args, "local"),
         )
         .map(|o| o.to_json()),
         "unresolved" => commands::unresolved::run(
             ctx,
             opt_str(args, "type").as_deref(),
             opt_str(args, "scope").as_deref(),
+            opt_bool(args, "all_packages"),
         )
         .map(|o| o.to_json()),
+        "deps" => commands::deps::run(ctx).map(|o| o.to_json()),
         other => return Err(format!("unknown tool: {other}")),
     };
 
@@ -203,8 +208,9 @@ pub fn tools_list() -> Value {
                 "properties": {
                     "query": { "type": "string" },
                     "type": { "type": "string" },
-                    "scope": { "type": "string", "description": "Restrict to records in a project (project:...)" },
-                    "limit": { "type": "integer", "description": "Max results (default 10)" }
+                    "scope": { "type": "string", "description": "Restrict to records in a container (project:..., or @pkg/project:... inside a dependency)" },
+                    "limit": { "type": "integer", "description": "Max results (default 10)" },
+                    "local": { "type": "boolean", "description": "Search only this package (skip linked dependencies)" }
                 },
                 "required": ["query"]
             }
@@ -217,7 +223,8 @@ pub fn tools_list() -> Value {
                 "properties": {
                     "descriptor": { "type": "string" },
                     "type": { "type": "string", "description": "Restrict to a node type" },
-                    "limit": { "type": "integer", "description": "Max suggestions (default 5)" }
+                    "limit": { "type": "integer", "description": "Max suggestions (default 5)" },
+                    "local": { "type": "boolean", "description": "Suggest only from this package (skip linked dependencies)" }
                 },
                 "required": ["descriptor"]
             }
@@ -229,9 +236,15 @@ pub fn tools_list() -> Value {
                 "type": "object",
                 "properties": {
                     "type": { "type": "string", "description": "Restrict to a ?type hint" },
-                    "scope": { "type": "string" }
+                    "scope": { "type": "string" },
+                    "all_packages": { "type": "boolean", "description": "Also list linked dependencies' loose ends (default: this package only)" }
                 }
             }
+        },
+        {
+            "name": "deps",
+            "description": "The resolved local dependency tree (linked packages; live link inspection, no index needed).",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ])
 }
@@ -258,6 +271,10 @@ fn required_str(args: &Value, key: &str) -> std::result::Result<String, String> 
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| format!("missing required argument '{key}'"))
+}
+
+fn opt_bool(args: &Value, key: &str) -> bool {
+    args.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
 fn opt_str(args: &Value, key: &str) -> Option<String> {

@@ -6,10 +6,10 @@
 
 use std::collections::HashSet;
 
-use rusqlite::OptionalExtension;
+use turso::Value;
 
 use crate::error::{Result, VaireError};
-use crate::index::db::Index;
+use crate::index::db::{Index, col_opt_text, col_text, col_u32};
 use crate::model::id::{NodeId, NodeType};
 
 /// A resolved node location + frontmatter (cli.md §3.1).
@@ -47,31 +47,39 @@ pub struct UnresolvedRow {
     pub line: u32,
 }
 
-/// A node's stored core fields.
-struct Stored {
-    node_type: String,
-    path: String,
-    frontmatter: String,
-    superseded_by: Option<String>,
+/// One cross-package edge row (`to_id` is the bare within-package address; the package
+/// travels in `to_package`).
+pub(crate) struct CrossEdge {
+    pub(crate) to_package: String,
+    pub(crate) to_id: String,
+    pub(crate) from_id: String,
+    pub(crate) source_file: String,
+    pub(crate) line: u32,
+}
+
+/// A node's stored core fields. `pub(crate)` so the workspace resolver can compose
+/// per-package lookups without re-following redirects locally.
+pub(crate) struct Stored {
+    pub(crate) node_type: String,
+    pub(crate) path: String,
+    pub(crate) frontmatter: String,
+    pub(crate) superseded_by: Option<String>,
 }
 
 impl Index {
-    fn stored(&self, id: &NodeId) -> Result<Option<Stored>> {
-        Ok(self
-            .conn()
-            .query_row(
-                "SELECT type, path, frontmatter, superseded_by FROM nodes WHERE id = ?1",
-                [id.to_string()],
-                |r| {
-                    Ok(Stored {
-                        node_type: r.get(0)?,
-                        path: r.get(1)?,
-                        frontmatter: r.get(2)?,
-                        superseded_by: r.get(3)?,
-                    })
-                },
-            )
-            .optional()?)
+    pub(crate) fn stored(&self, id: &NodeId) -> Result<Option<Stored>> {
+        self.query_opt(
+            "SELECT type, path, frontmatter, superseded_by FROM nodes WHERE id = ?1",
+            [id.to_string()],
+            |r| {
+                Ok(Stored {
+                    node_type: col_text(r, 0)?,
+                    path: col_text(r, 1)?,
+                    frontmatter: col_text(r, 2)?,
+                    superseded_by: col_opt_text(r, 3)?,
+                })
+            },
+        )
     }
 
     /// `resolve <id>`: locate a node, following `superseded_by` redirects. Errors with
@@ -116,11 +124,15 @@ impl Index {
         limit: Option<usize>,
     ) -> Result<Vec<EdgeRow>> {
         let mut sql = String::from(
+            // Local inbound edges only: a cross-package edge's bare to_id could coincide
+            // with this local id but points at another package's node, not this one.
             "SELECT e.from_id, n.type, n.path, e.ref_type, e.line
              FROM edges e JOIN nodes n ON n.id = e.from_id
-             WHERE e.to_id = ?1",
+             WHERE e.to_package IS NULL AND e.to_id = ?1",
         );
-        if type_filter.is_some() {
+        let mut params: Vec<Value> = vec![Value::from(id.to_string())];
+        if let Some(t) = type_filter {
+            params.push(Value::from(t.as_str().to_string()));
             sql.push_str(" AND n.type = ?2");
         }
         sql.push_str(" ORDER BY e.from_id ASC, e.line ASC");
@@ -128,86 +140,104 @@ impl Index {
             sql.push_str(&format!(" LIMIT {n}"));
         }
 
-        let mut stmt = self.conn().prepare(&sql)?;
-        let map = |r: &rusqlite::Row| -> rusqlite::Result<EdgeRow> {
+        self.query_rows(&sql, params, |r| {
             Ok(EdgeRow {
-                id: parse_id(r.get::<_, String>(0)?),
-                node_type: NodeType::new(r.get::<_, String>(1)?),
-                path: r.get(2)?,
-                ref_type: r.get(3)?,
-                line: r.get(4)?,
+                id: parse_id(col_text(r, 0)?),
+                node_type: NodeType::new(col_text(r, 1)?),
+                path: col_text(r, 2)?,
+                ref_type: col_text(r, 3)?,
+                line: col_u32(r, 4)?,
                 distance: 1,
             })
-        };
-        let rows = if let Some(t) = type_filter {
-            stmt.query_map(rusqlite::params![id.to_string(), t.as_str()], map)?
-                .collect::<std::result::Result<_, _>>()?
-        } else {
-            stmt.query_map([id.to_string()], map)?
-                .collect::<std::result::Result<_, _>>()?
-        };
-        Ok(rows)
+        })
     }
 
-    /// `refs <id> --depth N`: outbound edges as a BFS. The result is a de-duplicated node
-    /// set, each at its shortest distance, sorted by `(distance, id)`. Targets that are
-    /// not nodes (dangling refs) are not traversable and are omitted (cli.md §3.3).
-    pub fn refs(
+    /// Every cross-package edge in THIS index — the input to `vaire check`'s
+    /// resolution lints.
+    pub(crate) fn cross_edges(&self) -> Result<Vec<CrossEdge>> {
+        self.query_rows(
+            "SELECT to_package, to_id, from_id, source_file, line FROM edges
+             WHERE to_package IS NOT NULL ORDER BY source_file, line",
+            (),
+            |r| {
+                Ok(CrossEdge {
+                    to_package: col_text(r, 0)?,
+                    to_id: col_text(r, 1)?,
+                    from_id: col_text(r, 2)?,
+                    source_file: col_text(r, 3)?,
+                    line: col_u32(r, 4)?,
+                })
+            },
+        )
+    }
+
+    /// Whether any edge references `to_package = name` — the unused-dependency probe.
+    pub(crate) fn references_package(&self, name: &str) -> Result<bool> {
+        Ok(self
+            .query_opt(
+                "SELECT 1 FROM edges WHERE to_package = ?1 LIMIT 1",
+                [name],
+                |_| Ok(()),
+            )?
+            .is_some())
+    }
+
+    /// Inbound edges in THIS index that point at another package's node: rows whose
+    /// `to_package` is `alias` and whose bare `to_id` matches. The cross-package
+    /// composition (`workspace::resolver::backlinks`) merges these per member.
+    pub(crate) fn backlinks_via(
         &self,
-        id: &NodeId,
-        depth: u32,
+        alias: &str,
+        bare_id: &str,
         type_filter: Option<&NodeType>,
+        limit: Option<usize>,
     ) -> Result<Vec<EdgeRow>> {
-        let mut seen: HashSet<String> = HashSet::from([id.to_string()]);
-        let mut found: Vec<EdgeRow> = Vec::new();
-        let mut frontier = vec![id.clone()];
-
-        for dist in 1..=depth {
-            let mut next = Vec::new();
-            for node in &frontier {
-                for (to_id, ref_type, line) in self.outbound(node)? {
-                    if !seen.insert(to_id.to_string()) {
-                        continue;
-                    }
-                    // Only real nodes are traversable / returned.
-                    if let Some(stored) = self.stored(&to_id)? {
-                        found.push(EdgeRow {
-                            node_type: NodeType::new(stored.node_type),
-                            path: stored.path,
-                            ref_type,
-                            line,
-                            distance: dist,
-                            id: to_id.clone(),
-                        });
-                        next.push(to_id);
-                    }
-                }
-            }
-            frontier = next;
-        }
-
+        let mut sql = String::from(
+            "SELECT e.from_id, n.type, n.path, e.ref_type, e.line
+             FROM edges e JOIN nodes n ON n.id = e.from_id
+             WHERE e.to_package = ?1 AND e.to_id = ?2",
+        );
+        let mut params: Vec<Value> = vec![
+            Value::from(alias.to_string()),
+            Value::from(bare_id.to_string()),
+        ];
         if let Some(t) = type_filter {
-            found.retain(|r| &r.node_type == t);
+            params.push(Value::from(t.as_str().to_string()));
+            sql.push_str(" AND n.type = ?3");
         }
-        found.sort_by(|a, b| a.distance.cmp(&b.distance).then(a.id.cmp(&b.id)));
-        Ok(found)
+        sql.push_str(" ORDER BY e.from_id ASC, e.line ASC");
+        if let Some(n) = limit {
+            sql.push_str(&format!(" LIMIT {n}"));
+        }
+
+        self.query_rows(&sql, params, |r| {
+            Ok(EdgeRow {
+                id: parse_id(col_text(r, 0)?),
+                node_type: NodeType::new(col_text(r, 1)?),
+                path: col_text(r, 2)?,
+                ref_type: col_text(r, 3)?,
+                line: col_u32(r, 4)?,
+                distance: 1,
+            })
+        })
     }
 
-    /// Outbound edges of one node, in stable order, as `(to_id, ref_type, line)`.
-    fn outbound(&self, from: &NodeId) -> Result<Vec<(NodeId, String, u32)>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT to_id, ref_type, line FROM edges WHERE from_id = ?1 ORDER BY line, to_id",
-        )?;
-        let rows = stmt
-            .query_map([from.to_string()], |r| {
-                Ok((
-                    parse_id(r.get::<_, String>(0)?),
-                    r.get::<_, String>(1)?,
-                    r.get::<_, u32>(2)?,
-                ))
-            })?
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
+    /// Outbound edges of one node, in stable order, as `(to, ref_type, line)`. A
+    /// cross-package target regains its `@pkg/` qualifier; following it across the
+    /// package boundary is the workspace resolver's job (`workspace::resolver::refs`).
+    pub(crate) fn outbound(&self, from: &NodeId) -> Result<Vec<(NodeId, String, u32)>> {
+        self.query_rows(
+            "SELECT to_id, to_package, ref_type, line FROM edges
+             WHERE from_id = ?1 ORDER BY line, to_id",
+            [from.to_string()],
+            |r| {
+                let mut to = parse_id(col_text(r, 0)?);
+                if let Some(pkg) = col_opt_text(r, 1)? {
+                    to = to.with_package(pkg);
+                }
+                Ok((to, col_text(r, 2)?, col_u32(r, 3)?))
+            },
+        )
     }
 
     /// `unresolved`: every `[[?...]]` currently in the corpus, derived fresh from the
@@ -223,55 +253,44 @@ impl Index {
         let mut sql = String::from(
             "SELECT record_id, type_guess, descriptor, source_file, line FROM unresolved WHERE 1=1",
         );
-        if type_filter.is_some() {
-            sql.push_str(" AND type_guess = ?type");
+        let mut params: Vec<Value> = Vec::new();
+        if let Some(t) = type_filter {
+            params.push(Value::from(t.as_str().to_string()));
+            sql.push_str(&format!(" AND type_guess = ?{}", params.len()));
         }
-        if scope.is_some() {
-            sql.push_str(
-                " AND record_id IN (SELECT from_id FROM edges WHERE ref_type = ?scopefield AND to_id = ?scope)",
-            );
+        if let Some(s) = scope {
+            params.push(Value::from(scope_field.to_string()));
+            let field_idx = params.len();
+            params.push(Value::from(s.to_string()));
+            let scope_idx = params.len();
+            sql.push_str(&format!(
+                " AND record_id IN (SELECT from_id FROM edges WHERE to_package IS NULL AND ref_type = ?{field_idx} AND to_id = ?{scope_idx})"
+            ));
         }
         sql.push_str(" ORDER BY source_file ASC, line ASC");
 
-        let mut params: Vec<(&str, String)> = Vec::new();
-        if let Some(t) = type_filter {
-            params.push((":type", t.as_str().to_string()));
-        }
-        if let Some(s) = scope {
-            params.push((":scope", s.to_string()));
-            params.push((":scopefield", scope_field.to_string()));
-        }
-        // Named placeholders above are spelled ?name; normalize to :name for rusqlite.
-        let sql = sql.replace("?type", ":type").replace("?scope", ":scope");
-
-        let mut stmt = self.conn().prepare(&sql)?;
-        let bound: Vec<(&str, &dyn rusqlite::ToSql)> = params
-            .iter()
-            .map(|(k, v)| (*k, v as &dyn rusqlite::ToSql))
-            .collect();
-        let rows = stmt
-            .query_map(bound.as_slice(), |r| {
-                Ok(UnresolvedRow {
-                    record: parse_id(r.get::<_, String>(0)?),
-                    type_guess: r.get::<_, Option<String>>(1)?.map(NodeType::new),
-                    descriptor: r.get(2)?,
-                    path: r.get(3)?,
-                    line: r.get(4)?,
-                })
-            })?
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
+        self.query_rows(&sql, params, |r| {
+            Ok(UnresolvedRow {
+                record: parse_id(col_text(r, 0)?),
+                type_guess: col_opt_text(r, 1)?.map(NodeType::new),
+                descriptor: col_text(r, 2)?,
+                path: col_text(r, 3)?,
+                line: col_u32(r, 4)?,
+            })
+        })
     }
 }
 
-/// Parse a stored ID string back into a [`NodeId`]; stored IDs are always well-formed.
+/// Parse a stored ID string back into a [`NodeId`]. Lenient by design: a declared id
+/// that falls outside the strict reference grammar still indexes (files are truth) and
+/// must round-trip unchanged — see [`NodeId::parse_stored`].
 fn parse_id(s: String) -> NodeId {
-    s.parse().expect("stored ids are well-formed type:id")
+    NodeId::parse_stored(&s)
 }
 
 /// The frontmatter view returned by `resolve`: the stored JSON minus `id`/`type`, which
 /// are surfaced as top-level fields (cli.md §3.1).
-fn frontmatter_view(json: &str) -> serde_json::Value {
+pub(crate) fn frontmatter_view(json: &str) -> serde_json::Value {
     let mut value: serde_json::Value =
         serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
     if let Some(obj) = value.as_object_mut() {

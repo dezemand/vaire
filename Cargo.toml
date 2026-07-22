@@ -1,8 +1,8 @@
 [package]
 name = "vaire"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Derived reference-graph index over a Markdown knowledge corpus, with a CLI and an MCP server"
 authors = ["Maarten van Ittersum"]
 license = "MIT"
@@ -32,9 +32,17 @@ serde_yaml = "0.9"
 
 # Authored config (cli.md §6)
 toml = "0.8"
+# Format- and comment-preserving edits to the user-authored knowledge.toml (`vaire add`);
+# already in the build graph as a transitive dep of `toml`.
+toml_edit = "0.22"
 
-# Derived index: SQLite with bundled FTS5 (design.md §9)
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Derived index: Turso Database — the Rust rewrite of SQLite — as a local embedded file
+# engine, for its native full-text search and native vectors (design.md §9, issue #2 M3).
+# `fts` gates the experimental FTS index method (also enabled per-connection at runtime).
+turso = { version = "0.7", features = ["fts"] }
+# Turso's embedded API is async (io_uring); we own one current-thread runtime inside the
+# `Index` and `block_on` at that boundary, keeping the rest of the CLI synchronous.
+tokio = { version = "1", features = ["rt"] }
 
 # Corpus discovery: include/exclude globs over the working tree (cli.md §6)
 globset = "0.4"
@@ -45,9 +53,19 @@ thiserror = "2"
 
 # Blocking HTTP for the OpenAI embedding provider (rustls TLS, no async runtime)
 ureq = "2"
+url = "2"
+directories = "6.0.0"
+
+# SHA-256 for verifying release downloads against the published SHA256SUMS
+# (`vaire upgrade`, mirroring install.sh/install.ps1). Note `embed::cache::hash_text` is
+# NOT usable here — it is a DefaultHasher stub for cache keys, not a cryptographic digest.
+sha2 = "0.10"
+
+# Interactive prompts for `vaire configure` (guided TUI-style wizard)
+inquire = "0.9"
 
 [dev-dependencies]
 # Throwaway git-repo corpora for integration tests
 tempfile = "3"
-# Direct index inspection/tampering in tests (dedups with the normal dependency)
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Compute expected digests when asserting on release-download verification
+sha2 = "0.10"

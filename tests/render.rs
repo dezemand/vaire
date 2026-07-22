@@ -9,7 +9,11 @@ use vaire::error::ExitCode;
 #[test]
 fn render_keeps_frontmatter_and_resolves_links() {
     let c = Corpus::fixture();
-    let out = commands::render::run(&c.ctx(), "record:2026-06-10-broker-sync").unwrap();
+    let out = commands::render::run(
+        &c.ctx(),
+        "project:atlas-2026-q2/record:2026-06-10-broker-sync",
+    )
+    .unwrap();
     let md = out.markdown;
 
     // Frontmatter is kept verbatim.
@@ -60,4 +64,22 @@ fn render_unknown_id_is_exit_5() {
     let c = Corpus::fixture();
     let err = commands::render::run(&c.ctx(), "person:nobody").unwrap_err();
     assert_eq!(err.exit_code(), ExitCode::IdNotFound);
+}
+
+#[test]
+fn render_rejects_an_index_path_outside_the_package() {
+    let c = Corpus::empty();
+    c.add("knowledge/a.md", "---\nid: a\ntype: method\n---\n# A\n")
+        .commit()
+        .build();
+    let index = vaire::index::Index::open(&c.repo().index_db()).unwrap();
+    index
+        .execute(
+            "UPDATE nodes SET path = ?1 WHERE id = ?2",
+            ["../../outside.md", "method:a"],
+        )
+        .unwrap();
+
+    let err = commands::render::run(&c.ctx(), "method:a").unwrap_err();
+    assert_eq!(err.exit_code(), ExitCode::IndexCorrupt);
 }

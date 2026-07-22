@@ -3,7 +3,7 @@
 > A derived reference-graph index over a Markdown knowledge corpus — with a CLI and an MCP server.
 
 Vairë turns a folder of Markdown into a queryable graph. You author plain `.md` files;
-Vairë weaves their frontmatter and `[[wikilinks]]` into a derived SQLite index you can query
+Vairë weaves their frontmatter and `[[wikilinks]]` into a derived index you can query
 for backlinks, references, and search — from a shell or from an agent over MCP.
 
 The core idea: **references are stable typed IDs, not display names.** Names change and
@@ -11,7 +11,24 @@ break links; IDs don't. Change an entity's `name:` once and every reference re-r
 files stay the source of truth — the index is a disposable cache, rebuildable in seconds and
 never written back to the corpus.
 
-> **Status:** early (0.1). The CLI and on-disk shapes are settling; expect changes.
+> **Status:** early (0.2). The CLI and on-disk shapes are settling; expect changes.
+
+Since 0.2, a corpus is a **knowledge package** (`knowledge.toml`), and packages can
+reference each other: declare a dependency (`vaire add acme-core`) and
+`@acme-core/team:platform` resolves, searches, and lints across the boundary — locally,
+no registry needed. See [`examples/workspace/`](examples/workspace/).
+
+Tell Vairë where you keep your packages once, and declared dependencies wire themselves
+up — a fresh clone is just `vaire index`:
+
+```bash
+vaire configure local-packages ~/Documents/Knowledge
+```
+
+Packages are matched by the name their manifest **declares**, at any depth, so a knowledge
+base living inside a bigger repo is found like any other. Two packages declaring the same
+name are reported rather than guessed between, and `vaire add <pkg> --link <path>` still
+wires anything explicitly (it always wins).
 
 ## Install
 
@@ -28,10 +45,21 @@ On Windows (PowerShell), installs `vaire.exe` and adds it to your user PATH:
 irm https://raw.githubusercontent.com/dezemand/vaire/main/install.ps1 | iex
 ```
 
-Both honor `VAIRE_VERSION` (a tag like `v0.1.0`) and `VAIRE_INSTALL_DIR` to override
-the version and target directory.
+Both honor `VAIRE_VERSION` (a version like `0.1.0`; a leading `v` is accepted) and
+`VAIRE_INSTALL_DIR` to override the version and target directory. Installing the
+latest is a no-op when the installed `vaire` is already at or above it; a pinned
+`VAIRE_VERSION` always installs.
 
-**From source (Rust 1.85+)** — also the path for Intel macOS or arm64 Linux, which
+Each release publishes a `SHA256SUMS` asset, and both installers verify the archive
+against it before extracting — HTTPS authenticates the transport, not the artifact.
+A mismatch aborts the install. Set `VAIRE_SKIP_CHECKSUM=1` to bypass the check, and
+verify a manual download with:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+**From source (Rust 1.88+)** — also the path for Intel macOS or arm64 Linux, which
 have no prebuilt binary yet:
 
 ```bash
@@ -40,10 +68,18 @@ cargo install --path .        # installs the `vaire` binary
 # or: cargo build --release   # → target/release/vaire
 ```
 
+**Upgrading.** An installed binary updates itself to the latest release
+(`vaire upgrade --check` only reports; a cargo-installed binary is left to
+`cargo install`):
+
+```bash
+vaire upgrade
+```
+
 ## Quickstart
 
 ```bash
-vaire init my-notes && cd my-notes      # scaffolds .vaire/config.toml
+vaire init my-notes && cd my-notes      # scaffolds knowledge.toml
 # author some files (see "The model" below), then:
 git init && git add -A && git commit -m "notes"
 vaire index                              # build the index from the committed tree
@@ -53,8 +89,10 @@ vaire suggest "the logistics team"       # descriptor → ranked existing IDs
 ```
 
 While drafting, `vaire index --working-tree` indexes uncommitted edits so you can validate
-before committing. There's a runnable corpus in [`example/`](example/) — `cd example &&
-vaire --repo . index` and poke around.
+before committing. There are two runnable examples in [`examples/`](examples/) — a single
+package in [`examples/corpus/`](examples/corpus/) (`cd examples/corpus && vaire --repo .
+index` and poke around), and a three-package workspace in
+[`examples/workspace/`](examples/workspace/).
 
 ## The model
 
@@ -83,12 +121,14 @@ Drives the [[method:event-sourcing]] rollout; owns [[system:ingest-api]].
 - **Loose ends.** Reference something not yet created with `[[?person: someone from ops]]`
   (inline) or `head: "?person: …"` (frontmatter) — a *descriptor*, never a guessed ID. These
   surface in `vaire unresolved` and never become edges.
-- **Scoped IDs** (opt-in). With `scoped_types = ["record"]`, a record under a container is
-  addressed `<container-id>/type:local`, e.g. `project:atlas/record:2026-06-10-standup`, so
-  records only need a container-local id.
+- **Scoped IDs** (data-driven). A node carrying `scope: <container-id>` is addressed
+  `<container-id>/type:local`, e.g. `project:atlas/record:2026-06-10-standup`, so records only
+  need a container-local id. Any type can be scoped; `scoped_types_whitelist`/`blacklist` are a
+  `vaire check` lint policy, not a gate.
 
-See [`spec/design.md`](spec/design.md) for the full design and rationale, and
-[`spec/cli.md`](spec/cli.md) for the exact command surface.
+See [`spec/design.md`](spec/design.md) for the full design and rationale,
+[`spec/cli.md`](spec/cli.md) for the exact command surface, and
+[`spec/manifest.md`](spec/manifest.md) for the `knowledge.toml` package manifest.
 
 ## Commands
 
@@ -105,7 +145,7 @@ See [`spec/design.md`](spec/design.md) for the full design and rationale, and
 | `unresolved` | Every `[[?…]]` loose end (the entity-creation work list). |
 
 **Maintain** — `init`, `index` (`--full` / `--working-tree` / `--re-embed`), `check`
-(`--strict`), `status`. Not exposed over MCP.
+(`--strict`), `status`, `configure`. Not exposed over MCP.
 
 The index is bound to commit (commit-as-publish): `vaire index` reads the committed tree.
 `vaire check` guards integrity — duplicate IDs and dangling references (failures); orphans,
@@ -113,13 +153,15 @@ drift, frontmatter-`[[ ]]`, and unknown-type references (warnings).
 
 ## Embeddings
 
-Pluggable, **local by default** (a built-in, offline, dependency-free embedder), configured
-in `.vaire/config.toml`:
+Pluggable, **local by default** (a built-in, offline, dependency-free embedder). Embeddings
+are machine-local config — not part of a package manifest — set with `vaire configure` and
+stored in the user config (see `spec/cli.md` §6.3):
 
 - `provider = "local"` — built-in, no network, no model file.
 - `provider = "command"` — shell out to any local model (JSON texts in, JSON vectors out).
 - `provider = "openai"` — the OpenAI embeddings API; reads `OPENAI_API_KEY` from the
-  environment or a gitignored `.vaire/.env`. Sends corpus text to OpenAI (data egress).
+  environment or `credentials.toml` (`printf '%s' "$OPENAI_API_KEY" | vaire configure
+  embeddings --api-key-stdin`). Sends corpus text to OpenAI (data egress).
 
 After switching models, `vaire index --re-embed` refreshes vectors without re-parsing.
 

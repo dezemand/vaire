@@ -17,7 +17,7 @@ fn colon_in_display_field_is_not_a_reference() {
     )
     .commit()
     .build();
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         !report
             .violations
@@ -38,7 +38,7 @@ fn frontmatter_reference_with_unconfigured_type_is_ignored() {
     )
     .commit()
     .build();
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         !report
             .violations
@@ -67,13 +67,44 @@ fn check_does_not_flag_colon_in_non_reference_value() {
     )
     .commit()
     .build();
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         !report
             .warnings
             .iter()
             .any(|w| matches!(w, Warning::UnknownType { .. }))
     );
+}
+
+#[test]
+fn check_does_not_flag_urls_or_emails() {
+    // Identification is by shape (design.md §6): a URL or an email is structurally not a
+    // reference — neither an edge nor an unknown_type warning. Pins the url: fix (the old
+    // reference-shape heuristic flagged `url: https://…` as an unconfigured `https` type).
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/r.md",
+        "---\nid: r\ntype: record\nurl: https://example.com\ncontact: mailto:a@b.com\n---\n# R\n",
+    )
+    .commit()
+    .build();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, Warning::UnknownType { .. })),
+        "URLs/emails must not be flagged: {:?}",
+        report.warnings
+    );
+    assert!(
+        !report
+            .violations
+            .iter()
+            .any(|v| matches!(v, Violation::DanglingRef { .. }))
+    );
+    let refs = commands::refs::run(&c.ctx(), "record:r", 1, None).unwrap();
+    assert!(refs.refs.is_empty(), "no edges expected: {:?}", refs.refs);
 }
 
 #[test]
@@ -89,7 +120,7 @@ fn check_does_not_flag_configured_reference_type() {
     )
     .commit()
     .build();
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         !report
             .warnings
@@ -129,7 +160,7 @@ fn frontmatter_unresolved_reference_appears_in_unresolved() {
     .commit()
     .build();
 
-    let out = commands::unresolved::run(&c.ctx(), None, None).unwrap();
+    let out = commands::unresolved::run(&c.ctx(), None, None, false).unwrap();
     assert!(out.unresolved.iter().any(|u| {
         u.descriptor == "someone senior" && u.type_guess.as_deref() == Some("person")
     }));
@@ -145,7 +176,7 @@ fn frontmatter_typeless_unresolved_reference() {
     .commit()
     .build();
 
-    let out = commands::unresolved::run(&c.ctx(), None, None).unwrap();
+    let out = commands::unresolved::run(&c.ctx(), None, None, false).unwrap();
     let item = out
         .unresolved
         .iter()
@@ -193,7 +224,7 @@ fn check_warns_on_quoted_bracket_frontmatter() {
     .commit()
     .build();
 
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         report
             .warnings
@@ -213,7 +244,7 @@ fn check_warns_on_unquoted_bracket_frontmatter() {
     .commit()
     .build();
 
-    let (report, _) = commands::check::run(&c.ctx(), false, false).unwrap();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
         report
             .warnings

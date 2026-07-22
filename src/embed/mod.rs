@@ -11,12 +11,13 @@
 
 pub mod cache;
 
-use std::io::Write;
-use std::path::Path;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
-use crate::config::{Config, EmbeddingProvider};
+use crate::config::EmbeddingProvider;
 use crate::error::{Result, VaireError};
+use crate::userconfig::UserConfig;
 
 /// The one seam every embedding provider implements.
 pub trait Embedder {
@@ -25,76 +26,52 @@ pub trait Embedder {
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
 
     fn dimensions(&self) -> usize;
+
+    /// A stable identity string for the provider — `provider[:model]:dims`, e.g.
+    /// `openai:text-embedding-3-small:1536`, `local:384`. Recorded as index meta
+    /// (`embed_provider`) at every build: the content-hash cache keys on section *text*
+    /// only, so this identity is what guards against mixing vectors from different
+    /// providers/models in one index (design.md §9).
+    fn identity(&self) -> String {
+        format!("unknown:{}", self.dimensions())
+    }
 }
 
-/// Build the configured embedder. `vaire_dir` (the corpus's `.vaire/`) is consulted for
-/// secrets like `OPENAI_API_KEY` via `.vaire/.env` when the provider needs them; pass
-/// `None` for providers that don't (local/command).
-pub fn from_config(config: &Config, vaire_dir: Option<&Path>) -> Result<Box<dyn Embedder>> {
-    let dims = config.embeddings.dimensions;
-    match config.embeddings.provider {
+/// Build the configured embedder from the global user config (M2). Secrets
+/// (`OPENAI_API_KEY`, `OPENAI_BASE_URL`) resolve via [`crate::userconfig::credential`] — an
+/// environment variable first, then `credentials.toml`.
+pub fn from_user_config(user: &UserConfig) -> Result<Box<dyn Embedder>> {
+    let emb = &user.embeddings;
+    let dims = emb.dimensions;
+    match emb.provider {
         EmbeddingProvider::Local => Ok(Box::new(LocalEmbedder { dims })),
         EmbeddingProvider::Command => Ok(Box::new(CommandEmbedder {
-            command: config.embeddings.command.clone(),
+            command: emb.command.clone(),
             dims,
         })),
         EmbeddingProvider::OpenAi => {
-            let api_key = resolve_secret("OPENAI_API_KEY", vaire_dir).ok_or_else(|| {
+            let api_key = crate::userconfig::credential("OPENAI_API_KEY").ok_or_else(|| {
                 VaireError::Config(
-                    "embeddings.provider = \"openai\" but OPENAI_API_KEY is not set \
-                     (in .vaire/.env or the environment)"
+                    "embeddings provider is \"openai\" but OPENAI_API_KEY is not set \
+                     (env var or credentials.toml — run `vaire configure embeddings`)"
                         .into(),
                 )
             })?;
-            let base_url = resolve_secret("OPENAI_BASE_URL", vaire_dir)
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let base_url = validate_base_url(
+                &crate::userconfig::credential("OPENAI_BASE_URL")
+                    .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+            )?;
             Ok(Box::new(OpenAiEmbedder {
                 api_key,
                 base_url,
-                model: config.embeddings.embedding_model.clone(),
+                model: emb.embedding_model.clone(),
                 dims,
+                agent: ureq::AgentBuilder::new()
+                    .timeout(Duration::from_secs(30))
+                    .build(),
             }))
         }
     }
-}
-
-/// Resolve a secret. An existing **environment variable wins**; otherwise the value is
-/// read from `<vaire_dir>/.env`. Returns `None` if found in neither.
-pub fn resolve_secret(key: &str, vaire_dir: Option<&Path>) -> Option<String> {
-    if let Ok(v) = std::env::var(key)
-        && !v.is_empty()
-    {
-        return Some(v);
-    }
-    let content = std::fs::read_to_string(vaire_dir?.join(".env")).ok()?;
-    parse_env(&content).remove(key)
-}
-
-/// Parse a `.env` file: `KEY=VALUE` per line, `#` comments, optional `export `, optional
-/// surrounding single/double quotes on the value.
-fn parse_env(content: &str) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        if let Some((k, v)) = line.split_once('=') {
-            let k = k.trim();
-            if k.is_empty() {
-                continue;
-            }
-            let v = v.trim();
-            let v = v
-                .strip_prefix('"')
-                .and_then(|s| s.strip_suffix('"'))
-                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
-                .unwrap_or(v);
-            map.insert(k.to_string(), v.to_string());
-        }
-    }
-    map
 }
 
 /// The built-in, in-process embedder (no network, no model file).
@@ -114,6 +91,9 @@ impl Embedder for LocalEmbedder {
     }
     fn dimensions(&self) -> usize {
         self.dims
+    }
+    fn identity(&self) -> String {
+        format!("local:{}", self.dims)
     }
 }
 
@@ -213,17 +193,41 @@ impl Embedder for CommandEmbedder {
     fn dimensions(&self) -> usize {
         self.dims
     }
+    fn identity(&self) -> String {
+        // The command string IS the model choice here — hash it (stable FNV-1a, not the
+        // std hasher, since identities persist in index meta across binary versions), so
+        // swapping the script behind `embeddings.command` changes the identity even when
+        // the dimensionality happens to match.
+        format!(
+            "command:{:016x}:{}",
+            fnv1a(self.command.as_bytes()),
+            self.dims
+        )
+    }
+}
+
+/// Stable 64-bit FNV-1a — identity strings are persisted and compared across builds, so
+/// the hash must never change between Rust/std versions.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// Embeds via the OpenAI embeddings API (network). Opt-in (`provider = "openai"`) — it
 /// means data egress per section, so it is never the default. The key comes from
-/// `OPENAI_API_KEY` (env or `.vaire/.env`); `OPENAI_BASE_URL` overrides the endpoint for
+/// `OPENAI_API_KEY` (env or `credentials.toml`); `OPENAI_BASE_URL` overrides the endpoint for
 /// proxies/Azure-style gateways.
 pub struct OpenAiEmbedder {
     api_key: String,
     base_url: String,
     model: String,
     dims: usize,
+    /// Retains the HTTP connection pool across batched requests (especially useful for MCP).
+    agent: ureq::Agent,
 }
 
 impl Embedder for OpenAiEmbedder {
@@ -252,19 +256,24 @@ impl Embedder for OpenAiEmbedder {
         let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
         let payload = serde_json::to_string(&body).expect("serialize embeddings request");
 
-        let response = ureq::post(&url)
+        let response = self
+            .agent
+            .post(&url)
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .set("Content-Type", "application/json")
             .send_string(&payload)
             .map_err(|e| match e {
                 ureq::Error::Status(code, resp) => VaireError::Config(format!(
                     "openai embeddings HTTP {code}: {}",
-                    resp.into_string().unwrap_or_default().trim()
+                    crate::output::style::plain(
+                        read_response_limited(resp.into_reader())
+                            .unwrap_or_else(|_| "<response body unavailable or too large>".into())
+                            .trim()
+                    )
                 )),
                 other => VaireError::Config(format!("openai embeddings request failed: {other}")),
             })?;
-        let text = response
-            .into_string()
+        let text = read_response_limited(response.into_reader())
             .map_err(|e| VaireError::Config(format!("openai embeddings: reading response: {e}")))?;
         let embedded = parse_embedding_response(&text, inputs.len())?;
         expand_with_empty_slots(texts, embedded, self.dims)
@@ -273,6 +282,51 @@ impl Embedder for OpenAiEmbedder {
     fn dimensions(&self) -> usize {
         self.dims
     }
+
+    fn identity(&self) -> String {
+        format!("openai:{}:{}", self.model, self.dims)
+    }
+}
+
+const MAX_EMBEDDING_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Only HTTPS endpoints are accepted, except explicit loopback development endpoints. This
+/// prevents accidentally sending a bearer key and corpus text in cleartext to a proxy.
+fn validate_base_url(value: &str) -> Result<String> {
+    let url = url::Url::parse(value)
+        .map_err(|e| VaireError::Config(format!("invalid OPENAI_BASE_URL: {e}")))?;
+    let loopback = match url.host() {
+        Some(url::Host::Domain("localhost")) => true,
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        _ => false,
+    };
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        return Err(VaireError::Config(
+            "OPENAI_BASE_URL must use https (http is allowed only for localhost)".into(),
+        ));
+    }
+    if url.host_str().is_none() {
+        return Err(VaireError::Config(
+            "OPENAI_BASE_URL must include a host".into(),
+        ));
+    }
+    Ok(value.trim_end_matches('/').to_string())
+}
+
+fn read_response_limited(mut reader: impl Read) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(MAX_EMBEDDING_RESPONSE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_EMBEDDING_RESPONSE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "response exceeds 10 MiB limit",
+        ));
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[derive(serde::Deserialize)]
@@ -330,24 +384,23 @@ mod tests {
     use super::*;
     use crate::config::EmbeddingConfig;
 
-    fn command_config(command: &str) -> Config {
-        Config {
+    fn command_user_config(command: &str) -> UserConfig {
+        UserConfig {
             embeddings: EmbeddingConfig {
                 provider: EmbeddingProvider::Command,
                 command: command.to_string(),
                 ..EmbeddingConfig::default()
             },
-            ..Config::default()
+            ..UserConfig::default()
         }
     }
 
     #[test]
     fn command_embedder_pipes_texts_and_parses_vectors() {
         // Reads (and ignores) the JSON on stdin, returns one vector per the two inputs.
-        let emb = from_config(
-            &command_config("cat >/dev/null; printf '[[1.0,0.0],[0.0,1.0]]'"),
-            None,
-        )
+        let emb = from_user_config(&command_user_config(
+            "cat >/dev/null; printf '[[1.0,0.0],[0.0,1.0]]'",
+        ))
         .unwrap();
         let out = emb
             .embed(&["alpha".to_string(), "beta".to_string()])
@@ -357,60 +410,33 @@ mod tests {
 
     #[test]
     fn command_embedder_rejects_wrong_vector_count() {
-        let emb = from_config(
-            &command_config("cat >/dev/null; printf '[[1.0,0.0]]'"),
-            None,
-        )
-        .unwrap();
+        let emb =
+            from_user_config(&command_user_config("cat >/dev/null; printf '[[1.0,0.0]]'")).unwrap();
         let err = emb.embed(&["a".to_string(), "b".to_string()]).unwrap_err();
         assert!(err.to_string().contains("returned 1 vectors for 2 texts"));
     }
 
     #[test]
     fn command_embedder_reports_command_failure() {
-        let emb = from_config(&command_config("exit 3"), None).unwrap();
+        let emb = from_user_config(&command_user_config("exit 3")).unwrap();
         assert!(emb.embed(&["a".to_string()]).is_err());
     }
 
     #[test]
-    fn parse_env_handles_comments_quotes_and_export() {
-        let env =
-            parse_env("# a comment\n\nexport FOO=bar\nKEY = \"quoted value\"\nQ='single'\nBAD\n");
-        assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
-        assert_eq!(env.get("KEY").map(String::as_str), Some("quoted value"));
-        assert_eq!(env.get("Q").map(String::as_str), Some("single"));
-        assert!(!env.contains_key("BAD"));
-    }
-
-    #[test]
-    fn secret_falls_back_to_dotenv_when_env_unset() {
-        let dir = tempfile::tempdir().unwrap();
-        let vaire = dir.path().join(".vaire");
-        std::fs::create_dir_all(&vaire).unwrap();
-        std::fs::write(vaire.join(".env"), "VAIRE_TEST_SECRET_XYZ=from-dotenv\n").unwrap();
-
-        // A uniquely-named key not present in the real environment.
-        assert_eq!(
-            resolve_secret("VAIRE_TEST_SECRET_XYZ", Some(&vaire)).as_deref(),
-            Some("from-dotenv")
-        );
-        assert_eq!(resolve_secret("VAIRE_TEST_MISSING_KEY", Some(&vaire)), None);
-    }
-
-    #[test]
     fn openai_missing_key_is_a_clear_error() {
-        // Only meaningful when the env has no key; skip otherwise to stay deterministic.
-        if std::env::var("OPENAI_API_KEY").is_ok() {
+        // Only meaningful when no key is configured anywhere; skip otherwise to stay
+        // deterministic (from_user_config reads the real credential source).
+        if crate::userconfig::credential("OPENAI_API_KEY").is_some() {
             return;
         }
-        let cfg = Config {
+        let cfg = UserConfig {
             embeddings: EmbeddingConfig {
                 provider: EmbeddingProvider::OpenAi,
                 ..EmbeddingConfig::default()
             },
-            ..Config::default()
+            ..UserConfig::default()
         };
-        let result = from_config(&cfg, None);
+        let result = from_user_config(&cfg);
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("OPENAI_API_KEY"));
     }
@@ -444,5 +470,36 @@ mod tests {
         let vectors = parse_embedding_response(body, 2).unwrap();
         assert_eq!(vectors, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
         assert!(parse_embedding_response(body, 3).is_err());
+    }
+
+    #[test]
+    fn embedding_url_requires_https_except_loopback() {
+        assert!(validate_base_url("https://api.example/v1").is_ok());
+        assert!(validate_base_url("http://localhost:11434/v1").is_ok());
+        assert!(validate_base_url("http://[::1]:11434/v1").is_ok());
+        assert!(validate_base_url("http://api.example/v1").is_err());
+        assert!(validate_base_url("not a URL").is_err());
+    }
+
+    #[test]
+    fn command_identity_tracks_the_command_not_just_dims() {
+        // Two different scripts with the same dims must NOT share an identity — the
+        // identity is what stops an index mixing vectors across a command swap.
+        let a = CommandEmbedder {
+            command: "model-a.sh".into(),
+            dims: 384,
+        };
+        let b = CommandEmbedder {
+            command: "model-b.sh".into(),
+            dims: 384,
+        };
+        assert_ne!(a.identity(), b.identity());
+
+        // Stable across instances (persisted in index meta, compared across runs).
+        let a2 = CommandEmbedder {
+            command: "model-a.sh".into(),
+            dims: 384,
+        };
+        assert_eq!(a.identity(), a2.identity());
     }
 }

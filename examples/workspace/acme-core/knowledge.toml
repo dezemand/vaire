@@ -1,0 +1,8 @@
+name    = "acme-core"
+version = "1.0.0"
+
+# The entity types this package DEFINES (design.md §4): org structure lives here.
+types = ["team", "person"]
+
+[dependencies]
+acme-web = "^1"
