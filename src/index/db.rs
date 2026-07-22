@@ -42,7 +42,8 @@ use crate::error::{Result, VaireError};
 /// regular `sections` table with a native FTS *index* (issue #2 M3).
 /// v3: package-aware index (issue #2 M4) — `nodes.package` (the owning package, from the
 /// manifest `name`) and `edges.to_package` (NULL = local; set for an `@pkg/` target).
-pub const SCHEMA_VERSION: u32 = 3;
+/// v4: lookup indexes for incremental replacement and section/embedding joins.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// The schema as individual statements, run in order on a fresh database. Kept inline
 /// (rather than a `.sql` asset) so the binary is self-contained. No `PRAGMA`s: WAL is
@@ -60,11 +61,13 @@ const SCHEMA_STMTS: &[&str] = &[
         superseded_by TEXT,                 -- nullable redirect target
         package       TEXT NOT NULL         -- the owning package (manifest `name`)
     )",
+    "CREATE INDEX IF NOT EXISTS nodes_path ON nodes(path)",
     // Every parsed (id, path) pair, WITHOUT a unique constraint, so duplicate composed IDs
     // survive indexing for `vaire check` to report (the duplicate-entity guard). `nodes`
     // keeps only the first occurrence (INSERT OR IGNORE); this keeps them all.
     "CREATE TABLE IF NOT EXISTS node_files (id TEXT NOT NULL, path TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS node_files_id ON node_files(id)",
+    "CREATE INDEX IF NOT EXISTS node_files_path ON node_files(path)",
     "CREATE TABLE IF NOT EXISTS edges (
         from_id     TEXT NOT NULL,
         to_id       TEXT NOT NULL,          -- the within-package address (no @pkg/ prefix)
@@ -75,6 +78,7 @@ const SCHEMA_STMTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS edges_to   ON edges(to_id)",
     "CREATE INDEX IF NOT EXISTS edges_from ON edges(from_id)",
+    "CREATE INDEX IF NOT EXISTS edges_source_file ON edges(source_file)",
     "CREATE TABLE IF NOT EXISTS unresolved (
         record_id   TEXT NOT NULL,
         type_guess  TEXT,                   -- nullable: [[?: ...]] has no type
@@ -82,6 +86,7 @@ const SCHEMA_STMTS: &[&str] = &[
         source_file TEXT NOT NULL,
         line        INTEGER NOT NULL
     )",
+    "CREATE INDEX IF NOT EXISTS unresolved_source_file ON unresolved(source_file)",
     // Prose sections: a regular table now (was an FTS5 virtual table). The full-text search
     // lives in a native FTS *index* over (heading, body), with heading weighted above body
     // for BM25 ranking (`fts_score`).
@@ -91,8 +96,7 @@ const SCHEMA_STMTS: &[&str] = &[
         line    INTEGER NOT NULL,
         body    TEXT NOT NULL
     )",
-    "CREATE INDEX IF NOT EXISTS sections_fts ON sections USING fts (heading, body) \
-     WITH (weights='heading=2.0,body=1.0')",
+    "CREATE INDEX IF NOT EXISTS sections_node_line ON sections(node_id, line)",
     // Per-section vectors. `vector` is a little-endian f32 blob — identical to Turso's own
     // Float32-dense layout — so `vector_distance_cos` reads it natively (no conversion).
     "CREATE TABLE IF NOT EXISTS embeddings (
@@ -102,6 +106,7 @@ const SCHEMA_STMTS: &[&str] = &[
         vector       BLOB NOT NULL
     )",
     "CREATE INDEX IF NOT EXISTS embeddings_hash ON embeddings(content_hash)",
+    "CREATE INDEX IF NOT EXISTS embeddings_node_line ON embeddings(node_id, section_line)",
     // Content-hash embedding cache (design.md §9): vectors keyed by section-text hash,
     // decoupled from any node/path so an unchanged section reuses its vector across
     // incremental reindexes. Survives delete_file; only `--full` (which recreates the db)
@@ -111,6 +116,12 @@ const SCHEMA_STMTS: &[&str] = &[
         vector       BLOB NOT NULL
     )",
 ];
+
+/// Kept separate from [`SCHEMA_STMTS`] so a full rebuild can load every section before
+/// Turso/Tantivy builds its derived search structure. Maintaining the FTS index for every
+/// individual insert is dramatically more expensive on a cold corpus.
+const FTS_INDEX_STMT: &str = "CREATE INDEX IF NOT EXISTS sections_fts ON sections USING fts (heading, body) \
+     WITH (weights='heading=2.0,body=1.0')";
 
 /// An open handle to the derived index: a Turso connection plus the runtime that drives it.
 pub struct Index {
@@ -133,6 +144,14 @@ impl Index {
 
     /// Create (or recreate) the index file and install the schema.
     pub fn create(path: &Path) -> Result<Index> {
+        let index = Self::create_for_bulk_load(path)?;
+        index.ensure_fts_index()?;
+        Ok(index)
+    }
+
+    /// Create the relational schema but defer its derived FTS index. Only the index builder
+    /// uses this variant, immediately creating the FTS index after its bulk load succeeds.
+    pub(crate) fn create_for_bulk_load(path: &Path) -> Result<Index> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -147,6 +166,12 @@ impl Index {
             [i64::from(SCHEMA_VERSION)],
         )?;
         Ok(index)
+    }
+
+    /// Ensure the native full-text index exists after a bulk insert.
+    pub(crate) fn ensure_fts_index(&self) -> Result<()> {
+        self.execute(FTS_INDEX_STMT, ())?;
+        Ok(())
     }
 
     /// Build the runtime, open the local Turso file, and connect. The experimental index

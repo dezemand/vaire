@@ -27,7 +27,7 @@ pub fn run(
 ) -> Result<IndexRunOutput> {
     let embedder = ctx.embedder()?;
     if re_embed {
-        let summary = build::reembed(&ctx.repo, embedder.as_ref())?;
+        let summary = build::reembed(&ctx.repo, embedder)?;
         return Ok(IndexRunOutput {
             summary,
             dependencies: Vec::new(),
@@ -40,11 +40,11 @@ pub fn run(
     } else {
         Mode::Incremental
     };
-    let summary = build::run(&ctx.repo, &ctx.config, embedder.as_ref(), mode)?;
+    let summary = build::run(&ctx.repo, &ctx.config, embedder, mode)?;
 
     let mut dependencies = Vec::new();
     if !no_deps && !ctx.config.dependencies.is_empty() {
-        dependencies = ensure_deps(ctx, embedder.as_ref())?;
+        dependencies = ensure_deps(ctx, embedder)?;
     }
 
     Ok(IndexRunOutput {

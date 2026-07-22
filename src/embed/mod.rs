@@ -63,6 +63,7 @@ pub fn from_user_config(user: &UserConfig) -> Result<Box<dyn Embedder>> {
                 base_url,
                 model: emb.embedding_model.clone(),
                 dims,
+                agent: ureq::Agent::new(),
             }))
         }
     }
@@ -220,6 +221,8 @@ pub struct OpenAiEmbedder {
     base_url: String,
     model: String,
     dims: usize,
+    /// Retains the HTTP connection pool across batched requests (especially useful for MCP).
+    agent: ureq::Agent,
 }
 
 impl Embedder for OpenAiEmbedder {
@@ -248,7 +251,9 @@ impl Embedder for OpenAiEmbedder {
         let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
         let payload = serde_json::to_string(&body).expect("serialize embeddings request");
 
-        let response = ureq::post(&url)
+        let response = self
+            .agent
+            .post(&url)
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .set("Content-Type", "application/json")
             .send_string(&payload)
