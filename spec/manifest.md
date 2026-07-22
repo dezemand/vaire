@@ -110,8 +110,9 @@ in place, preserving your formatting and comments (cli.md §4.2a). Dependency *r
 concern layered on top of this file; the manifest only declares the constraints.
 
 A reference to another package is written `@<name>/<type>:<id>` (design.md §6) and must name
-a declared dependency, linked at `.vaire/packages/<name>` (cli.md §6.5). `vaire check`
-enforces the full set (packages.md §8):
+a declared dependency, resolvable through the linked-package lookup — the referencing
+package's own `.vaire/packages/<name>`, the run-root itself, or the run-root's links
+(cli.md §6.5). `vaire check` enforces the full set (packages.md §8):
 
 | finding | severity | when |
 |---|---|---|

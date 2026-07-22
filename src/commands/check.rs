@@ -66,6 +66,8 @@ fn resolution_lints(
     // Which declared dependencies are unavailable — reported once each, their edges
     // skipped by the dangling pass (undeclared aliases stay `undeclared_import`, M4).
     let mut missing: std::collections::BTreeMap<String, String> = Default::default();
+    // Unavailable packages hit mid-tombstone-chain: note → via-context (deduped by note).
+    let mut chain_missing: std::collections::BTreeMap<String, String> = Default::default();
     for name in ctx.config.dependencies.keys() {
         if let Err(e) = ws.locate(&current, name) {
             missing.insert(name.clone(), e.to_string());
@@ -91,11 +93,13 @@ fn resolution_lints(
                 line: edge.line,
             }),
             // A tombstone chain reached an unavailable package mid-flight: fold into
-            // missing_dependency (keyed by message to dedup) rather than spamming.
+            // missing_dependency — keyed by the MESSAGE (which names the unavailable
+            // package), so N edges through the same broken chain report once; the
+            // via-context lives in the value.
             Err(VaireError::Dependency(note)) => {
-                missing
-                    .entry(format!("(via @{alias}/{to_id})"))
-                    .or_insert(note);
+                chain_missing
+                    .entry(note)
+                    .or_insert_with(|| format!("(via @{alias}/{to_id})"));
             }
             Err(e) => return Err(e),
         }
@@ -105,6 +109,11 @@ fn resolution_lints(
         report
             .violations
             .push(Violation::MissingDependency { package, note });
+    }
+    for (note, via) in chain_missing {
+        report
+            .violations
+            .push(Violation::MissingDependency { package: via, note });
     }
 
     // Unused + version-mismatch, per declared dependency.
