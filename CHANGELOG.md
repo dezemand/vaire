@@ -36,6 +36,13 @@ package boundaries, with no registry and no network.
   dependencies are surfaced under `skipped`, never silently dropped.
 - **`vaire deps`** — the resolved local dependency tree (live link inspection, no index
   needed); also an MCP tool.
+- **`vaire upgrade`** — self-update from GitHub releases, following the installer
+  scripts' contract (latest release → platform asset → atomic binary swap). Semver
+  gated: installs only when the release is higher than the running build, never
+  downgrades unless a version is pinned explicitly; refuses in package-manager-owned
+  locations and names that manager's own upgrade command instead. The installer
+  scripts got the same semantics (bare versions with `v` accepted, already-up-to-date
+  no-op).
 - **Resolution lints in `vaire check`** — dangling cross-package references,
   `undeclared_import`, `missing_dependency` (errors); `unused_dependency` and
   `dependency_version_mismatch` (warnings; enforcement is future work). Check runs the

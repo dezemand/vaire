@@ -10,8 +10,9 @@
     irm https://raw.githubusercontent.com/dezemand/vaire/main/install.ps1 | iex
 
 .PARAMETER Version
-    Tag to install (e.g. v0.1.0). Defaults to the latest release.
-    Override via the env var VAIRE_VERSION.
+    Version to install (e.g. 0.1.0; a leading v is accepted). Defaults to the
+    latest release — skipped when the installed vaire is already at or above it.
+    A pinned version always installs. Override via the env var VAIRE_VERSION.
 
 .PARAMETER InstallDir
     Where to put vaire.exe. Defaults to %LOCALAPPDATA%\Programs\vaire.
@@ -37,6 +38,7 @@ switch ($arch) {
 }
 
 # --- resolve version ---------------------------------------------------------
+$Pinned = [bool]$Version
 if (-not $Version) {
     Write-Host 'Resolving latest release...' -ForegroundColor DarkGray
     $rel = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest" `
@@ -44,14 +46,33 @@ if (-not $Version) {
     $Version = $rel.tag_name
     if (-not $Version) { throw 'Could not determine the latest release version. Set VAIRE_VERSION.' }
 }
+# Versions are bare (0.2.0); the v prefix exists only on the git tag (and the
+# asset/download paths built from it). VAIRE_VERSION is accepted either way.
+$Version = $Version -replace '^v', ''
+$Tag = "v$Version"
 
-$stem  = "$Bin-$Version-$target"
+$stem  = "$Bin-$Tag-$target"
 $asset = "$stem.zip"
-$url   = "https://github.com/$Repo/releases/download/$Version/$asset"
+$url   = "https://github.com/$Repo/releases/download/$Tag/$asset"
 
 # --- install dir -------------------------------------------------------------
 if (-not $InstallDir) {
     $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\vaire"
+}
+
+# --- skip when already up to date --------------------------------------------
+# Installing the latest is a no-op when the installed vaire is already at or above
+# it; a pinned version always installs (that is how an install is repaired).
+$exePath = Join-Path $InstallDir "$Bin.exe"
+if (-not $Pinned -and (Test-Path $exePath)) {
+    $installed = $null
+    try { if ((& $exePath --version 2>$null) -match '(\d+\.\d+\.\d+)') { $installed = $Matches[1] } } catch {}
+    $targetCore = $Version -replace '-.*', ''
+    if ($installed -and $targetCore -match '^\d+\.\d+\.\d+$' -and
+        [version]$installed -ge [version]$targetCore) {
+        Write-Host "$Bin $installed is already installed at $exePath (latest release: $Version) — nothing to do." -ForegroundColor Green
+        return
+    }
 }
 
 Write-Host "Installing $Bin $Version " -NoNewline

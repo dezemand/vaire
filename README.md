@@ -33,8 +33,10 @@ On Windows (PowerShell), installs `vaire.exe` and adds it to your user PATH:
 irm https://raw.githubusercontent.com/dezemand/vaire/main/install.ps1 | iex
 ```
 
-Both honor `VAIRE_VERSION` (a tag like `v0.1.0`) and `VAIRE_INSTALL_DIR` to override
-the version and target directory.
+Both honor `VAIRE_VERSION` (a version like `0.1.0`; a leading `v` is accepted) and
+`VAIRE_INSTALL_DIR` to override the version and target directory. Installing the
+latest is a no-op when the installed `vaire` is already at or above it; a pinned
+`VAIRE_VERSION` always installs.
 
 Each release publishes a `SHA256SUMS` asset, and both installers verify the archive
 against it before extracting — HTTPS authenticates the transport, not the artifact.
@@ -52,6 +54,14 @@ have no prebuilt binary yet:
 git clone https://github.com/dezemand/vaire.git && cd vaire
 cargo install --path .        # installs the `vaire` binary
 # or: cargo build --release   # → target/release/vaire
+```
+
+**Upgrading.** An installed binary updates itself to the latest release
+(`vaire upgrade --check` only reports; a cargo-installed binary is left to
+`cargo install`):
+
+```bash
+vaire upgrade
 ```
 
 ## Quickstart

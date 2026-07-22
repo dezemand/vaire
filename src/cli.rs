@@ -172,6 +172,18 @@ pub enum Command {
     /// Report index state.
     Status,
 
+    /// Self-update: download the release binary for this platform and replace this
+    /// executable (same contract as the installer script).
+    Upgrade {
+        /// Version to install (e.g. `0.3.0`; default: the latest release, only if newer.
+        /// An explicit version always installs, so `vaire upgrade <current>` repairs an
+        /// install).
+        version: Option<String>,
+        /// Only report whether a newer release exists; install nothing.
+        #[arg(long)]
+        check: bool,
+    },
+
     /// Configure global user settings. With no subcommand, opens an interactive prompt.
     Configure {
         #[command(subcommand)]
