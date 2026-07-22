@@ -43,7 +43,8 @@ use crate::error::{Result, VaireError};
 /// v3: package-aware index (issue #2 M4) — `nodes.package` (the owning package, from the
 /// manifest `name`) and `edges.to_package` (NULL = local; set for an `@pkg/` target).
 /// v4: lookup indexes for incremental replacement and section/embedding joins.
-pub const SCHEMA_VERSION: u32 = 4;
+/// v5: `nodes.alias_text` — name + aliases denormalized for alias matching.
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// The schema as individual statements, run in order on a fresh database. Kept inline
 /// (rather than a `.sql` asset) so the binary is self-contained. No `PRAGMA`s: WAL is
@@ -59,7 +60,11 @@ const SCHEMA_STMTS: &[&str] = &[
         path          TEXT NOT NULL,
         frontmatter   TEXT NOT NULL,        -- JSON
         superseded_by TEXT,                 -- nullable redirect target
-        package       TEXT NOT NULL         -- the owning package (manifest `name`)
+        package       TEXT NOT NULL,        -- the owning package (manifest `name`)
+        -- The effective display name plus every alias, lowercased and NUL-joined. Purely
+        -- derived from `frontmatter`, denormalized so alias matching does not have to
+        -- JSON-parse every node's whole frontmatter on every query (design.md §8).
+        alias_text    TEXT NOT NULL DEFAULT ''
     )",
     "CREATE INDEX IF NOT EXISTS nodes_path ON nodes(path)",
     // Every parsed (id, path) pair, WITHOUT a unique constraint, so duplicate composed IDs
@@ -109,8 +114,11 @@ const SCHEMA_STMTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS embeddings_node_line ON embeddings(node_id, section_line)",
     // Content-hash embedding cache (design.md §9): vectors keyed by section-text hash,
     // decoupled from any node/path so an unchanged section reuses its vector across
-    // incremental reindexes. Survives delete_file; only `--full` (which recreates the db)
-    // clears it. Without this, "rebuildable in seconds" breaks once embeddings exist.
+    // reindexes. Survives delete_file, and a full rebuild carries it over from the index
+    // it replaces (same embedder only) — otherwise every rebuild of a non-Git corpus, and
+    // every `--working-tree` run, would re-embed the whole corpus. `--re-embed` is the way
+    // to force fresh vectors. Without this, "rebuildable in seconds" breaks once
+    // embeddings exist.
     "CREATE TABLE IF NOT EXISTS embed_cache (
         content_hash BLOB PRIMARY KEY,
         vector       BLOB NOT NULL

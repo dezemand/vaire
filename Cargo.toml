@@ -56,9 +56,16 @@ ureq = "2"
 url = "2"
 directories = "6.0.0"
 
+# SHA-256 for verifying release downloads against the published SHA256SUMS
+# (`vaire upgrade`, mirroring install.sh/install.ps1). Note `embed::cache::hash_text` is
+# NOT usable here — it is a DefaultHasher stub for cache keys, not a cryptographic digest.
+sha2 = "0.10"
+
 # Interactive prompts for `vaire configure` (guided TUI-style wizard)
 inquire = "0.9"
 
 [dev-dependencies]
 # Throwaway git-repo corpora for integration tests
 tempfile = "3"
+# Compute expected digests when asserting on release-download verification
+sha2 = "0.10"

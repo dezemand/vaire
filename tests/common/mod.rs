@@ -49,6 +49,11 @@ impl Embedder for CountingEmbedder {
     fn dimensions(&self) -> usize {
         self.dims
     }
+    /// Distinct from `DummyEmbedder`'s identity, so tests can model a provider switch at
+    /// identical dimensions — the case the `length(vector)` filter in search cannot catch.
+    fn identity(&self) -> String {
+        format!("counting:{}", self.dims)
+    }
 }
 
 /// Point `VAIRE_CONFIG_HOME` at a per-process temp dir, once, before any fixture exists.
@@ -429,7 +434,7 @@ pub fn head(root: &Path) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
-fn git(root: &Path, args: &[&str]) {
+pub fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
         .arg("-C")
         .arg(root)

@@ -38,6 +38,15 @@ Both honor `VAIRE_VERSION` (a version like `0.1.0`; a leading `v` is accepted) a
 latest is a no-op when the installed `vaire` is already at or above it; a pinned
 `VAIRE_VERSION` always installs.
 
+Each release publishes a `SHA256SUMS` asset, and both installers verify the archive
+against it before extracting — HTTPS authenticates the transport, not the artifact.
+A mismatch aborts the install. Set `VAIRE_SKIP_CHECKSUM=1` to bypass the check, and
+verify a manual download with:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
 **From source (Rust 1.85+)** — also the path for Intel macOS or arm64 Linux, which
 have no prebuilt binary yet:
 

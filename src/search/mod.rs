@@ -53,6 +53,12 @@ const VECTOR_WEIGHT: f32 = 1.0;
 /// conservative until a real local model is plugged in (design.md §9). FTS + aliases
 /// carry precision regardless.
 const VECTOR_THRESHOLD: f32 = 0.9;
+
+/// Separator between the display name and each alias in `nodes.alias_text`.
+///
+/// U+001F (unit separator), deliberately not NUL: SQLite's `LIKE` stops at an embedded
+/// NUL, which would hide every alias but the first from the narrowing filter.
+pub const ALIAS_SEP: char = '\u{1f}';
 /// Cap anchors reported per file, so output stays readable.
 const MAX_ANCHORS: usize = 3;
 
@@ -196,33 +202,36 @@ fn alias_pass(
     tokens: &[String],
     acc: &mut std::collections::BTreeMap<String, Acc>,
 ) -> Result<()> {
-    let rows = index.query_rows("SELECT id, type, path, frontmatter FROM nodes", (), |r| {
-        Ok((
-            col_text(r, 0)?,
-            col_text(r, 1)?,
-            col_text(r, 2)?,
-            col_text(r, 3)?,
-        ))
-    })?;
+    // `alias_text` is the display name and every alias, already lowercased and NUL-joined
+    // at index time. Reading it instead of `frontmatter` avoids JSON-parsing every node's
+    // entire frontmatter on every query, and the engine discards non-matching rows before
+    // they cross the block_on boundary — a node matches only if some single name or alias
+    // contains every token, so requiring the rarest token narrows the scan safely.
+    let narrowing = tokens
+        .iter()
+        .max_by_key(|t| t.len())
+        .cloned()
+        .unwrap_or_default();
+    let rows = index.query_rows(
+        "SELECT id, type, path, alias_text FROM nodes WHERE alias_text LIKE ?1 ESCAPE '\\'",
+        [format!("%{}%", like_escape(&narrowing))],
+        |r| {
+            Ok((
+                col_text(r, 0)?,
+                col_text(r, 1)?,
+                col_text(r, 2)?,
+                col_text(r, 3)?,
+            ))
+        },
+    )?;
     // Nodes that alias-match but have no anchor yet need a fallback first-section anchor.
     // Collect them, then fetch all their first sections in one query (avoids an N+1 of
     // per-node round-trips through the block_on facade).
     let mut needs_anchor: Vec<String> = Vec::new();
-    for (id, node_type, path, fm) in rows {
-        let json: serde_json::Value = serde_json::from_str(&fm).unwrap_or(serde_json::Value::Null);
-        let mut candidates: Vec<String> = Vec::new();
-        if let Some(name) = json.get("name").and_then(|v| v.as_str()) {
-            candidates.push(name.to_lowercase());
-        }
-        if let Some(aliases) = json.get("aliases").and_then(|v| v.as_array()) {
-            for a in aliases {
-                if let Some(s) = a.as_str() {
-                    candidates.push(s.to_lowercase());
-                }
-            }
-        }
-        let matched = candidates
-            .iter()
+    for (id, node_type, path, alias_text) in rows {
+        // Every token must appear in the *same* name/alias, so split before testing.
+        let matched = alias_text
+            .split(ALIAS_SEP)
             .any(|c| tokens.iter().all(|t| c.contains(t.as_str())));
         if !matched {
             continue;
@@ -279,6 +288,14 @@ fn vector_pass(
     // the old brute-force cosine, which returned 0 similarity for mismatched lengths.
     let qlen = qblob.len() as i64;
 
+    // Filter by distance *in the engine*, and join the prose only for what survives.
+    // Selecting `s.body` alongside every embedding row copied the corpus's entire prose out
+    // of the database on every query, just to discard almost all of it at the threshold
+    // check below. `similarity = 1 - distance`, so `sim >= THRESHOLD` is
+    // `dist <= 1 - THRESHOLD`; a NaN distance (zero-magnitude vector) fails that comparison
+    // in SQL exactly as the `is_finite` guard rejects it here, so recall is unchanged.
+    let max_dist = (1.0 - VECTOR_THRESHOLD) as f64;
+
     let rows = index.query_rows(
         "SELECT e.node_id, e.section_line,
                 vector_distance_cos(e.vector, ?1) AS dist,
@@ -286,8 +303,9 @@ fn vector_pass(
          FROM embeddings e
          JOIN nodes n ON n.id = e.node_id
          JOIN sections s ON s.node_id = e.node_id AND s.line = e.section_line
-         WHERE length(e.vector) = ?2",
-        turso::params![qblob, qlen],
+         WHERE length(e.vector) = ?2
+           AND vector_distance_cos(e.vector, ?1) <= ?3",
+        turso::params![qblob, qlen, max_dist],
         |r| {
             Ok((
                 col_text(r, 0)?,
@@ -516,6 +534,22 @@ fn tokenize(query: &str) -> Vec<String> {
         .map(|t| t.to_lowercase())
         .filter(|t| seen.insert(t.clone()))
         .collect()
+}
+
+/// Escape the LIKE metacharacters for use with `ESCAPE '\'`.
+///
+/// [`tokenize`] already yields alphanumeric-only tokens, so nothing reaches this today
+/// that needs escaping — it is here so a future caller with a looser token source cannot
+/// turn a `_` or `%` in a query into a silent wildcard.
+fn like_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// How many times any query token occurs (case-insensitively) in `body`.

@@ -35,13 +35,29 @@ pub fn commits_ahead(repo_root: &Path, since: &str) -> Result<u32> {
 
 /// Files changed between `since` and HEAD — the input to an incremental reindex
 /// (cli.md §4.1). Paths are repo-root-relative.
-pub fn changed_files(repo_root: &Path, since: &str) -> Result<Vec<String>> {
+///
+/// `None` means Git could not answer (most often `since` is no longer reachable after a
+/// rebase/amend + gc, or a shallow clone). That is **not** the same as "nothing changed":
+/// treating it as an empty diff would index nothing, then advance the commit anchor to
+/// HEAD and strand every intervening edit in the index forever. The caller falls back to
+/// a full rebuild instead.
+pub fn changed_files(repo_root: &Path, since: &str) -> Result<Option<Vec<String>>> {
     require_commit_oid(since)?;
     let out = run(
         repo_root,
-        &["diff", "--name-only", "--end-of-options", since, "HEAD"],
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--end-of-options",
+            since,
+            "HEAD",
+        ],
     )?;
-    Ok(lines(&out))
+    if !out.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(nul_separated(&out)))
 }
 
 /// True for the full SHA-1/SHA-256 object IDs Git writes into index metadata.
@@ -61,9 +77,22 @@ fn require_commit_oid(value: &str) -> Result<()> {
 
 /// Every file tracked at HEAD, repo-root-relative — the candidate set for a full build
 /// over the *committed* tree (cli.md §4.1).
+///
+/// A failure here is an error, never an empty listing. Both callers read "no files at
+/// HEAD" as a fact about the corpus: `committed_matching` would index nothing and report
+/// success, and `partition_changed` — which classifies a changed path as *deleted* when it
+/// is absent from this set — would drop every changed file from the index instead of
+/// reindexing it.
 pub fn list_files_at_head(repo_root: &Path) -> Result<Vec<String>> {
-    let out = run(repo_root, &["ls-tree", "-r", "--name-only", "HEAD"])?;
-    Ok(lines(&out))
+    let out = run(repo_root, &["ls-tree", "-r", "--name-only", "-z", "HEAD"])?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(format!(
+            "git ls-tree failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+        .into());
+    }
+    Ok(nul_separated(&out))
 }
 
 /// Read the committed contents of `rel_path` at HEAD. `vaire index` indexes the
@@ -193,14 +222,21 @@ fn stdout_trimmed(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-fn lines(out: &Output) -> Vec<String> {
-    if !out.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
+/// Split NUL-delimited `-z` output into paths.
+///
+/// Every path-listing call passes `-z` on purpose. Git's default `core.quotepath=true`
+/// C-quotes any path with non-ASCII bytes on the newline-delimited forms — `café.md` comes
+/// back as `"caf\303\251.md"`, which then fails the include globs *and* `cat-file`, so the
+/// file is silently missing from the index. `-z` emits raw bytes and suppresses quoting.
+///
+/// Purely a parser: it does **not** inspect the exit status. Folding a failure in here as
+/// an empty list is what let a failed `git` command masquerade as a legitimately empty
+/// result — each caller must decide what a failure means for it, above.
+fn nul_separated(out: &Output) -> Vec<String> {
+    out.stdout
+        .split(|&b| b == 0)
+        .filter(|chunk| !chunk.is_empty())
+        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
         .collect()
 }
 
@@ -215,5 +251,22 @@ mod tests {
         assert!(!is_commit_oid("--output=/tmp/file"));
         assert!(!is_commit_oid(&"a".repeat(39)));
         assert!(!is_commit_oid(&"z".repeat(40)));
+    }
+
+    #[test]
+    fn a_failed_ls_tree_is_an_error_not_an_empty_tree() {
+        // Not a Git repository at all, so `git ls-tree HEAD` exits non-zero. Reporting an
+        // empty listing here is unsafe in both callers: a full build would index nothing
+        // and claim success, and `partition_changed` treats a changed path missing from
+        // this set as *deleted*, so it would drop every changed file from the index.
+        let dir = std::env::temp_dir().join(format!("vaire-nogit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = super::list_files_at_head(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            result.is_err(),
+            "expected an error, got {:?}",
+            result.map(|v| v.len())
+        );
     }
 }

@@ -135,6 +135,7 @@ pub fn run_from(src: &Source, version: Option<&str>, check: bool) -> Result<Upgr
     let scratch = Scratch::new()?;
     let archive = scratch.0.join(&asset);
     download(&agent, &url, &archive, &tag, &src.target)?;
+    verify_checksum(&agent, src, &tag, &asset, &archive)?;
     extract(&scratch.0, &archive)?;
 
     // The archive holds a top-level `vaire-<tag>-<triple>/` directory with the binary;
@@ -287,6 +288,88 @@ fn download(agent: &ureq::Agent, url: &str, dest: &Path, tag: &str, target: &str
         )));
     }
     Ok(())
+}
+
+/// Verify the downloaded archive against the release's published `SHA256SUMS`.
+///
+/// This runs before the archive is unpacked and swapped over the running executable.
+/// HTTPS authenticates the transport, not the artifact, so on its own it is no defence
+/// against a replaced release asset or a compromised publish token — and self-update is
+/// the path where that matters most, since it runs unattended against whatever the
+/// release currently holds.
+///
+/// A release with no `SHA256SUMS` (everything published before checksums existed) cannot
+/// be verified, so it proceeds — matching `install.sh`. A *present* file that lacks this
+/// asset, or disagrees with it, is a hard error.
+///
+/// That skip is a deliberate but *fail-open* concession, and worth closing once every
+/// supported release publishes sums: an adversary who can replace a release asset can
+/// usually also delete `SHA256SUMS`, which forces this path on an unattended self-update.
+/// The fix then is to require verification above some release floor rather than infer it
+/// from the file's presence.
+fn verify_checksum(
+    agent: &ureq::Agent,
+    src: &Source,
+    tag: &str,
+    asset: &str,
+    archive: &Path,
+) -> Result<()> {
+    let url = format!(
+        "{}/{REPO}/releases/download/{tag}/SHA256SUMS",
+        src.download_base
+    );
+    let sums = match agent.get(&url).call() {
+        Ok(response) => response
+            .into_string()
+            .map_err(|e| VaireError::Upgrade(format!("could not read SHA256SUMS: {e}")))?,
+        // No checksums published for this release — nothing to verify against.
+        Err(ureq::Error::Status(404, _)) => return Ok(()),
+        Err(ureq::Error::Status(code, _)) => {
+            return Err(VaireError::Upgrade(format!(
+                "could not fetch SHA256SUMS (HTTP {code}): {url}"
+            )));
+        }
+        Err(other) => {
+            return Err(VaireError::Upgrade(format!(
+                "could not fetch SHA256SUMS: {other}"
+            )));
+        }
+    };
+
+    // Exact filename match, not a substring: a sibling asset such as `<asset>.sig` would
+    // otherwise satisfy the lookup. `sha256sum` marks binary mode with a leading '*'.
+    let expected = sums
+        .lines()
+        .filter_map(|line| line.split_once(char::is_whitespace))
+        .find(|(_, name)| name.trim().trim_start_matches('*') == asset)
+        .map(|(digest, _)| digest.trim().to_ascii_lowercase())
+        .ok_or_else(|| {
+            VaireError::Upgrade(format!(
+                "release {tag} publishes SHA256SUMS but it has no entry for {asset}; \
+                 refusing to install an unverifiable download"
+            ))
+        })?;
+
+    let actual = sha256_file(archive)?;
+    if actual != expected {
+        return Err(VaireError::Upgrade(format!(
+            "checksum mismatch for {asset}\n  expected {expected}\n  actual   {actual}\n\
+             Refusing to install: this archive is not the one release {tag} published."
+        )));
+    }
+    Ok(())
+}
+
+/// Lowercase hex SHA-256 of a file, read in chunks so a large asset is never fully
+/// buffered in memory.
+fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|e| VaireError::Upgrade(format!("could not hash the download: {e}")))?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Unpack with the system `tar` — the exact tool `install.sh` requires, and on

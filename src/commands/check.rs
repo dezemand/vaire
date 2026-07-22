@@ -76,17 +76,44 @@ fn resolution_lints(
 
     // Dangling cross-package references: a declared, available alias whose target —
     // after tombstone-following in the OWNING package's context — does not exist.
+    //
+    // `cross_edges` yields one row per reference *occurrence*, so a corpus where many files
+    // cite the same few `@pkg/` targets re-resolved each one from scratch — a point query
+    // into the dependency's index (plus any tombstone hops) per occurrence. The outcome
+    // depends only on (alias, to_id), so memoize it; reporting still happens per edge, and
+    // the violation carries that edge's own from/path/line.
+    #[derive(Clone)]
+    enum Resolution {
+        Ok,
+        Dangling,
+        ChainMissing(String),
+    }
+    let mut resolved: std::collections::HashMap<(String, String), Resolution> = Default::default();
+
     for edge in index.cross_edges()? {
         let (alias, to_id) = (edge.to_package, edge.to_id);
         if !ctx.config.dependencies.contains_key(&alias) || missing.contains_key(&alias) {
             continue;
         }
-        let target: NodeId = format!("@{alias}/{to_id}")
-            .parse()
-            .unwrap_or_else(|_| NodeId::parse_stored(&to_id).with_package(alias.clone()));
-        match resolver::resolve(ws, Rc::clone(&current), &target) {
-            Ok(_) => {}
-            Err(VaireError::IdNotFound(_)) => report.violations.push(Violation::DanglingRef {
+        let outcome = match resolved.get(&(alias.clone(), to_id.clone())) {
+            Some(cached) => cached.clone(),
+            None => {
+                let target: NodeId = format!("@{alias}/{to_id}")
+                    .parse()
+                    .unwrap_or_else(|_| NodeId::parse_stored(&to_id).with_package(alias.clone()));
+                let outcome = match resolver::resolve(ws, Rc::clone(&current), &target) {
+                    Ok(_) => Resolution::Ok,
+                    Err(VaireError::IdNotFound(_)) => Resolution::Dangling,
+                    Err(VaireError::Dependency(note)) => Resolution::ChainMissing(note),
+                    Err(e) => return Err(e),
+                };
+                resolved.insert((alias.clone(), to_id.clone()), outcome.clone());
+                outcome
+            }
+        };
+        match outcome {
+            Resolution::Ok => {}
+            Resolution::Dangling => report.violations.push(Violation::DanglingRef {
                 from: edge.from_id,
                 to: format!("@{alias}/{to_id}"),
                 path: edge.source_file,
@@ -96,12 +123,11 @@ fn resolution_lints(
             // missing_dependency — keyed by the MESSAGE (which names the unavailable
             // package), so N edges through the same broken chain report once; the
             // via-context lives in the value.
-            Err(VaireError::Dependency(note)) => {
+            Resolution::ChainMissing(note) => {
                 chain_missing
                     .entry(note)
                     .or_insert_with(|| format!("(via @{alias}/{to_id})"));
             }
-            Err(e) => return Err(e),
         }
     }
 

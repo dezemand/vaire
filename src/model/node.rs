@@ -80,17 +80,13 @@ impl Node {
 /// The text of the *sole* level-1 (`# `) heading in `prose`, or `None` if there are zero
 /// or more than one (ambiguous). Fenced code blocks are ignored.
 fn sole_h1(prose: &str) -> Option<String> {
-    let mut in_fence = false;
+    let mut fences = crate::corpus::markdown::Fences::new();
     let mut found: Option<String> = None;
     for line in prose.lines() {
+        if fences.is_code(line) {
+            continue;
+        }
         let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence {
-            continue;
-        }
         if let Some(rest) = trimmed.strip_prefix("# ") {
             let title = rest.trim();
             if title.is_empty() {

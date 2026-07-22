@@ -21,7 +21,7 @@ use crate::corpus::scan::Scanner;
 use crate::corpus::section::Section;
 use crate::embed::{Embedder, cache};
 use crate::error::Result;
-use crate::index::db::{Index, col_blob, col_i64, col_text, col_u32};
+use crate::index::db::{Index, col_blob, col_text, col_u32};
 use crate::model::node::Node;
 use crate::model::reference::Reference;
 use crate::search::vector::{decode_vector, encode_vector};
@@ -92,36 +92,88 @@ pub fn run(
     // snapshot with a recorded commit. Crucially, this means a plain `vaire index` after
     // `--working-tree` is NOT incremental — it recreates from the committed tree, so the
     // index always restores to the last commit (it never inherits working-tree rows).
-    let (last_commit, prior_source, schema_ok) = if committed && !force_full && db_path.exists() {
-        let existing = Index::open(&db_path)?;
-        let last_commit = existing
-            .meta("last_indexed_commit")?
-            .filter(|commit| crate::git::is_commit_oid(commit));
-        (
-            last_commit,
-            existing.meta("index_source")?,
-            existing.schema_version() == Some(crate::index::db::SCHEMA_VERSION),
-        )
-    } else {
-        (None, None, false)
-    };
+    let (last_commit, prior_source, schema_ok, provider_ok) =
+        if committed && !force_full && db_path.exists() {
+            let existing = Index::open(&db_path)?;
+            let last_commit = existing
+                .meta("last_indexed_commit")?
+                .filter(|commit| crate::git::is_commit_oid(commit));
+            // A provider switch must not mix vector spaces. `dep_mode` enforced this for
+            // *dependencies* only, while the current package always went incremental — so
+            // changed sections were embedded by the new model, unchanged ones kept the old
+            // model's vectors (the cache keys on text alone), and the `embed_provider` meta
+            // was then re-stamped below with the new identity. That certified a mixed index
+            // as homogeneous and destroyed the only evidence that `--re-embed` was still
+            // owed. Equal-width spaces are the dangerous case: the `length(vector)` filter
+            // in search cannot see them, so ranking silently degrades.
+            let provider_ok = existing
+                .meta("embed_provider")?
+                .is_none_or(|prior| prior == embedder.identity());
+            (
+                last_commit,
+                existing.meta("index_source")?,
+                existing.schema_version() == Some(crate::index::db::SCHEMA_VERSION),
+                provider_ok,
+            )
+        } else {
+            (None, None, false, false)
+        };
     // Incremental requires a matching schema; a stale-schema index is fully rebuilt (which
     // recreates the db with the current schema + version).
-    let incremental =
-        schema_ok && last_commit.is_some() && prior_source.as_deref() == Some("committed");
+    let incremental = schema_ok
+        && provider_ok
+        && last_commit.is_some()
+        && prior_source.as_deref() == Some("committed");
 
-    let index = if incremental {
-        Index::open(&db_path)?
-    } else {
-        recreate(root, &db_path)?
+    // Resolve the changeset *before* touching the index file: if Git cannot diff from the
+    // recorded anchor (history rewritten and gc'd, shallow clone), there is no honest
+    // incremental answer, so the run downgrades to a full rebuild. Reporting success with
+    // an empty diff would strand every intervening edit — the anchor advances to HEAD
+    // below, so nothing would ever re-examine those commits.
+    let incremental_changes = match incremental {
+        true => partition_changed(root, &scanner, last_commit.as_deref().unwrap())?,
+        false => None,
+    };
+    let incremental = incremental_changes.is_some();
+
+    // A full rebuild is staged beside the real index and promoted by an atomic rename only
+    // once it is complete. Recreating in place meant any failure after the unlink — a 5xx
+    // from the embedding provider, a stalled request, ctrl-C — left a schema-valid but
+    // EMPTY index that `open_index` happily accepts, so `resolve` reported not-found and
+    // MCP `search` returned [] with isError:false, silently, until someone noticed.
+    let staged = (!incremental).then(|| staging_path(&db_path));
+    let index = match &staged {
+        None => Index::open(&db_path)?,
+        Some(path) => recreate(root, path)?,
     };
 
-    let (to_index, to_delete) = if incremental {
-        partition_changed(root, &scanner, last_commit.as_deref().unwrap())?
-    } else if committed {
-        (committed_matching(root, &scanner)?, Vec::new())
-    } else {
-        (working_matching(repo, &scanner)?, Vec::new())
+    // The content-hash embedding cache lives inside the index file, so a full rebuild used
+    // to discard it along with the old db — making every rebuild of a non-Git corpus (and
+    // every `--working-tree` run, the edit-iterate loop) re-embed the whole corpus, against
+    // design.md §9's promise that only changed sections are re-embedded. Keep the previous
+    // index open purely as a cache source; it is never written and is dropped before the
+    // promote below.
+    //
+    // The cache is keyed on section text alone, so it may only be carried across when the
+    // *same* embedder produced it — otherwise a rebuild triggered by a provider switch
+    // would hand the old model's vectors straight back.
+    let previous = match &staged {
+        None => None,
+        Some(_) if !db_path.exists() => None,
+        Some(_) => Index::open(&db_path).ok().filter(|old| {
+            old.schema_version() == Some(crate::index::db::SCHEMA_VERSION)
+                && old
+                    .meta("embed_provider")
+                    .ok()
+                    .flatten()
+                    .is_none_or(|prior| prior == embedder.identity())
+        }),
+    };
+
+    let (to_index, to_delete) = match incremental_changes {
+        Some(changes) => changes,
+        None if committed => (committed_matching(root, &scanner)?, Vec::new()),
+        None => (working_matching(repo, &scanner)?, Vec::new()),
     };
 
     // Classification (design.md §6): identification already happened syntactically in the
@@ -168,7 +220,10 @@ pub fn run(
             }
         }
     }
-    let vectors = prepare_embeddings(&index, &prepared, embedder, incremental)?;
+    // Read cached vectors from the live index when updating in place, or from the previous
+    // index when staging a rebuild. Either way an unchanged section keeps its vector.
+    let cache_source = previous.as_ref().unwrap_or(&index);
+    let vectors = prepare_embeddings(cache_source, &prepared, embedder)?;
 
     index.with_tx(|index| {
         for rel in &to_delete {
@@ -218,13 +273,67 @@ pub fn run(
     index.set_meta("package_name", &config.name)?;
     index.set_meta("embed_provider", &embedder.identity())?;
 
-    Ok(IndexSummary {
+    let summary = IndexSummary {
         nodes: count(&index, "SELECT count(*) FROM nodes")?,
         edges: count(&index, "SELECT count(*) FROM edges")?,
         sections_embedded: count(&index, "SELECT count(*) FROM embeddings")?,
         elapsed_ms: started.elapsed().as_millis(),
         commit: recorded,
-    })
+    };
+
+    // Everything succeeded — swap the finished index in. Both handles must be closed first
+    // so their WAL is checkpointed back into the file being renamed.
+    if let Some(staged) = staged {
+        drop(previous);
+        drop(index);
+        promote(&staged, &db_path)?;
+    }
+
+    Ok(summary)
+}
+
+/// Where a full rebuild is assembled before it replaces the live index.
+fn staging_path(db_path: &Path) -> std::path::PathBuf {
+    db_path.with_file_name("index.db.building")
+}
+
+/// Delete a database file and its WAL sidecars.
+///
+/// A missing file is fine; any other failure is reported. Ignoring errors here let a
+/// rebuild continue against the *old* file when the unlink failed (e.g. a root-owned
+/// `.vaire/`), where `CREATE ... IF NOT EXISTS` no-ops and the schema version is re-stamped
+/// — quietly keeping ghost rows and branding an old-shaped db with the current version.
+fn remove_db_files(path: &Path) -> Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let sidecar = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+        match std::fs::remove_file(&sidecar) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Replace the live index with a completed staged build.
+///
+/// The WAL sidecar moves with the database: if a checkpoint has not folded it back into
+/// the main file, renaming that file alone would leave the committed rows behind — the
+/// promoted index would open with no schema version at all. WAL contents are positional,
+/// not path-bound, so moving the set together lets the next open recover normally.
+fn promote(staged: &Path, db_path: &Path) -> Result<()> {
+    remove_db_files(db_path)?;
+    std::fs::rename(staged, db_path)?;
+    for suffix in ["-wal", "-shm"] {
+        let from = format!("{}{suffix}", staged.display());
+        let to = format!("{}{suffix}", db_path.display());
+        match std::fs::rename(&from, &to) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
 }
 
 /// How many sections to embed per provider call during a re-embed.
@@ -234,11 +343,11 @@ const REEMBED_BATCH: usize = 128;
 /// cached vectors are retained; misses are de-duplicated by content hash and passed to the
 /// provider in the same bounded batches used by `--re-embed`.
 fn prepare_embeddings(
-    index: &Index,
+    cache_source: &Index,
     prepared: &[PreparedNode],
     embedder: &dyn Embedder,
-    reuse_cache: bool,
 ) -> Result<HashMap<cache::ContentHash, Vec<f32>>> {
+    let index = cache_source;
     let mut vectors = HashMap::new();
     let mut misses: Vec<(cache::ContentHash, String)> = Vec::new();
     let mut seen = HashSet::new();
@@ -249,7 +358,7 @@ fn prepare_embeddings(
             if !seen.insert(hash) {
                 continue;
             }
-            if reuse_cache && let Some(vector) = cache_get(index, &hash)? {
+            if let Some(vector) = cache_get(index, &hash)? {
                 vectors.insert(hash, vector);
             } else {
                 misses.push((hash, section.body));
@@ -344,10 +453,7 @@ pub fn reembed(repo: &Repo, embedder: &dyn Embedder) -> Result<IndexSummary> {
 /// in that package's repo.
 fn recreate(root: &Path, db_path: &Path) -> Result<Index> {
     let vaire_dir = Repo::prepare_derived_dir(root)?;
-    for suffix in ["", "-wal", "-shm"] {
-        let p = format!("{}{suffix}", db_path.display());
-        let _ = std::fs::remove_file(p);
-    }
+    remove_db_files(db_path)?;
     Repo::ensure_derived_gitignore(&vaire_dir)?;
     Index::create_for_bulk_load(db_path)
 }
@@ -368,7 +474,11 @@ fn committed_matching(root: &Path, scanner: &Scanner) -> Result<Vec<String>> {
 /// see [`resolve_scoped_edges`].
 fn apply_scoping(node: &mut Node, scope_field: &str) {
     if let Some(container) = node.frontmatter.get(scope_field).and_then(|v| v.as_str()) {
-        node.id.scope = Some(container.to_string());
+        // Same forgiving strip the edge collector applies, so `project: "[[project:atlas]]"`
+        // scopes to `project:atlas` instead of baking the brackets into the node's own id —
+        // an id no reference could address, and one that disagreed with the edge derived
+        // from that very field.
+        node.id.scope = Some(frontmatter::strip_wikilink_brackets(container).to_string());
     }
     let from = node.id.clone();
     for edge in &mut node.edges {
@@ -382,38 +492,28 @@ fn apply_scoping(node: &mut Node, scope_field: &str) {
 /// rewritten to that composed id; otherwise the bare (global) target stands. Existence-based,
 /// so it needs no type list and never scopes a reference that lacks a scoped sibling.
 fn resolve_scoped_edges(index: &Index) -> Result<()> {
-    let candidates: Vec<(i64, String, String)> = index.query_rows(
-        // Local edges only: scope-first resolution finds a sibling in *this* package;
-        // a cross-package target (to_package set) is resolved across the workspace in M5.
-        "SELECT rowid, from_id, to_id FROM edges
-         WHERE from_id LIKE '%/%' AND to_id NOT LIKE '%/%' AND to_package IS NULL",
+    // One set-based statement. This used to full-scan `edges` (the leading-wildcard LIKE
+    // cannot use an index), then fire a separate `SELECT 1 FROM nodes WHERE id = ?` for
+    // every candidate row and a separate UPDATE for every rewrite — each its own trip
+    // through the block_on facade. Targets that never have a scoped sibling were re-probed
+    // one query at a time on every build, forever.
+    //
+    // `rtrim(from_id, replace(from_id, '/', ''))` is the SQL spelling of "everything up to
+    // and including the last '/'": the second argument is the set of characters to strip,
+    // i.e. every character of from_id except '/', so trailing non-'/' characters come off
+    // and the scope prefix (with its separator) remains.
+    index.execute(
+        "UPDATE edges
+            SET to_id = rtrim(from_id, replace(from_id, '/', '')) || to_id
+          WHERE from_id LIKE '%/%'
+            AND to_id NOT LIKE '%/%'
+            AND to_package IS NULL
+            AND EXISTS (
+                SELECT 1 FROM nodes n
+                 WHERE n.id = rtrim(from_id, replace(from_id, '/', '')) || to_id
+            )",
         (),
-        |r| Ok((col_i64(r, 0)?, col_text(r, 1)?, col_text(r, 2)?)),
     )?;
-
-    let mut rewrites: Vec<(i64, String)> = Vec::new();
-    for (rowid, from_id, to_id) in candidates {
-        // The referrer's scope is everything before the last '/'.
-        if let Some((scope, _)) = from_id.rsplit_once('/') {
-            let candidate = format!("{scope}/{to_id}");
-            let exists = index
-                .query_opt(
-                    "SELECT 1 FROM nodes WHERE id = ?1",
-                    [candidate.as_str()],
-                    |_| Ok(()),
-                )?
-                .is_some();
-            if exists {
-                rewrites.push((rowid, candidate));
-            }
-        }
-    }
-    for (rowid, to_id) in rewrites {
-        index.execute(
-            "UPDATE edges SET to_id = ?1 WHERE rowid = ?2",
-            turso::params![to_id.as_str(), rowid],
-        )?;
-    }
     Ok(())
 }
 
@@ -428,16 +528,21 @@ fn working_matching(repo: &Repo, scanner: &Scanner) -> Result<Vec<String>> {
 
 /// Split the files changed since `last` into (to-reindex, to-delete). A changed path
 /// still present at HEAD is reindexed; one absent from HEAD is deleted.
+/// `None` when Git cannot diff from `last` (unreachable after a rewrite, shallow clone).
+/// The caller must rebuild fully rather than treat it as an empty changeset.
 fn partition_changed(
     root: &Path,
     scanner: &Scanner,
     last: &str,
-) -> Result<(Vec<String>, Vec<String>)> {
+) -> Result<Option<(Vec<String>, Vec<String>)>> {
+    let Some(changed) = crate::git::changed_files(root, last)? else {
+        return Ok(None);
+    };
     let head_set: std::collections::HashSet<String> =
         crate::git::list_files_at_head(root)?.into_iter().collect();
     let mut to_index = Vec::new();
     let mut to_delete = Vec::new();
-    for rel in crate::git::changed_files(root, last)? {
+    for rel in changed {
         if !scanner.is_match(Path::new(&rel)) {
             continue;
         }
@@ -447,7 +552,7 @@ fn partition_changed(
             to_delete.push(rel);
         }
     }
-    Ok((to_index, to_delete))
+    Ok(Some((to_index, to_delete)))
 }
 
 /// Insert one node and all its derived rows. `package` is the owning package (the manifest
@@ -476,9 +581,20 @@ fn index_node(
     }
     let fm_json = fm_value.to_string();
 
+    // Denormalized match text for `alias_pass`: display name + aliases, lowercased once
+    // here instead of re-derived (and re-JSON-parsed) for every node on every query.
+    // Separated by U+001F (unit separator), never NUL: SQLite's LIKE treats an embedded
+    // NUL as end-of-string, so aliases after the first would be invisible to the
+    // narrowing filter in `alias_pass` and silently stop matching.
+    let mut alias_text = node.display_name().to_lowercase();
+    for alias in node.aliases() {
+        alias_text.push(crate::search::ALIAS_SEP);
+        alias_text.push_str(&alias.to_lowercase());
+    }
+
     index.execute(
-        "INSERT OR IGNORE INTO nodes(id, type, path, frontmatter, superseded_by, package)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR IGNORE INTO nodes(id, type, path, frontmatter, superseded_by, package, alias_text)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         turso::params![
             id.as_str(),
             node.node_type().to_string(),
@@ -486,6 +602,7 @@ fn index_node(
             fm_json.as_str(),
             node.superseded_by().map(|s| s.to_string()),
             package,
+            alias_text.as_str(),
         ],
     )?;
     index.execute(
