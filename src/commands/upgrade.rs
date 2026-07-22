@@ -331,7 +331,11 @@ fn replace_exe(new_bin: &Path, exe: &Path) -> Result<()> {
         swap(&staged, exe)
     };
     stage(()).map_err(|e| {
-        let _ = fs::remove_file(&staged);
+        // Clean up the staged copy — unless the exe slot ended up empty (Windows
+        // double-failure), where staged is the only new binary left on disk.
+        if exe.exists() {
+            let _ = fs::remove_file(&staged);
+        }
         VaireError::Upgrade(format!(
             "cannot replace {} ({e}); check write access to {}",
             exe.display(),
@@ -355,7 +359,19 @@ fn swap(staged: &Path, exe: &Path) -> std::io::Result<()> {
     let _ = fs::remove_file(&old);
     fs::rename(exe, &old)?;
     if let Err(e) = fs::rename(staged, exe) {
-        let _ = fs::rename(&old, exe); // roll the live binary back
+        // Roll the live binary back; if even that fails, say exactly where the
+        // previous binary survives instead of reporting only the first error.
+        if fs::rename(&old, exe).is_err() {
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "{e}; rollback also failed — no binary is installed at {}, the \
+                     previous one is preserved at {}",
+                    exe.display(),
+                    old.display()
+                ),
+            ));
+        }
         return Err(e);
     }
     let _ = fs::remove_file(&old);

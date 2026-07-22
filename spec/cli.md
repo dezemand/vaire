@@ -682,6 +682,19 @@ vaire upgrade [<version>] [--check] [--json]
   the install directory) exit `1` with kind `upgrade`; the platform-asset message
   points at `cargo install --path .` as the fallback, like `install.sh` does.
 
+JSON (`installed` and `note` appear only when set):
+
+```json
+{
+  "current": "0.2.0",
+  "latest": "0.3.0",
+  "target": "aarch64-apple-darwin",
+  "up_to_date": false,
+  "checked_only": false,
+  "installed": "/home/user/.local/bin/vaire"
+}
+```
+
 ## 5. MCP server
 
 ```
