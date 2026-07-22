@@ -387,7 +387,7 @@ pub struct DepIndexed {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// The package directory this run linked the dependency to, when the ensure pass
-    /// satisfied it from the local-packages root (cli.md §6.3); absent when the link
+    /// satisfied it from the local-packages root (cli.md §6.6); absent when the link
     /// already existed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linked: Option<String>,
@@ -518,7 +518,7 @@ pub struct AddOutput {
     /// package directory discovery found under the local-packages root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linked: Option<String>,
-    /// The link was materialized by discovery (cli.md §6.3) rather than by `--link`.
+    /// The link was materialized by discovery (cli.md §6.6) rather than by `--link`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub discovered: bool,
     /// Why the dependency is declared but not linked — nothing found under the

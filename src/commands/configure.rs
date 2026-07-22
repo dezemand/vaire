@@ -72,7 +72,7 @@ pub fn run(home: &Path, opts: ConfigureOpts) -> Result<ConfigureOutput> {
 }
 
 /// `vaire configure local-packages [<path>] [--unset]` — set, clear, or show the
-/// local-packages root (cli.md §6.3). The path is stored **canonical**, so a link
+/// local-packages root (cli.md §6.4). The path is stored **canonical**, so a link
 /// materialized from it is stable even if the caller passed a relative or symlinked path.
 pub fn run_local_packages(home: &Path, path: Option<&str>, unset: bool) -> Result<ConfigureOutput> {
     let mut cfg = UserConfig::load_from(home)?;

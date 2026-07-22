@@ -26,7 +26,7 @@ pub struct UserConfig {
     pub packages: PackagesConfig,
 }
 
-/// Where packages live on **this machine** (cli.md §6.3) — a consumer setting, never part
+/// Where packages live on **this machine** (cli.md §6.6) — a consumer setting, never part
 /// of a package manifest: the same dependency is one clone here and another there.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]

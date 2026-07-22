@@ -1,5 +1,5 @@
 //! Satisfying declared dependencies from the packages you already have locally
-//! (cli.md §6.3).
+//! (cli.md §6.6).
 //!
 //! A manifest declares *what* a package depends on; where that dependency lives on this
 //! machine is a consumer setting. With `local-packages` configured, the maintain commands
