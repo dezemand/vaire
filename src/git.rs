@@ -5,8 +5,9 @@
 //! every index state corresponds to exactly one commit — so the index records which
 //! commit it was built from and `status` compares that against HEAD.
 
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use crate::error::Result;
 
@@ -55,6 +56,89 @@ pub fn show_at_head(repo_root: &Path, rel_path: &str) -> Result<Option<String>> 
         return Ok(None);
     }
     Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+}
+
+/// Read many committed files through one long-lived Git process, preserving the supplied
+/// path order. `git cat-file --batch` avoids paying process startup, repository discovery,
+/// and pack setup once per Markdown file during a full index build.
+pub fn show_many_at_head(repo_root: &Path, rel_paths: &[String]) -> Result<Vec<Option<String>>> {
+    if rel_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let input = rel_paths
+        .iter()
+        .map(|path| format!("HEAD:{path}\n"))
+        .collect::<String>();
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut out = Vec::with_capacity(rel_paths.len());
+    for _ in rel_paths {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "git cat-file ended before returning every requested path",
+            )
+            .into());
+        }
+        let header = header.trim_end();
+        if header.ends_with(" missing") {
+            out.push(None);
+            continue;
+        }
+        let size = header
+            .split_whitespace()
+            .last()
+            .and_then(|part| part.parse::<usize>().ok())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unexpected git cat-file header: {header}"),
+                )
+            })?;
+        let mut bytes = vec![0; size];
+        reader.read_exact(&mut bytes)?;
+        let mut newline = [0; 1];
+        reader.read_exact(&mut newline)?;
+        if newline != [b'\n'] {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "git cat-file object was not newline terminated",
+            )
+            .into());
+        }
+        out.push(Some(String::from_utf8_lossy(&bytes).into_owned()));
+    }
+
+    writer
+        .join()
+        .map_err(|_| std::io::Error::other("git cat-file input writer panicked"))??;
+    let status = child.wait()?;
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("piped stderr")
+        .read_to_string(&mut stderr)?;
+    if !status.success() {
+        return Err(
+            std::io::Error::other(format!("git cat-file failed: {}", stderr.trim())).into(),
+        );
+    }
+    Ok(out)
 }
 
 fn run(repo_root: &Path, args: &[&str]) -> Result<Output> {

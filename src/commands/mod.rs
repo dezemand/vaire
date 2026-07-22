@@ -35,6 +35,9 @@ pub struct Ctx {
     /// The linked-package view (cli.md §6.5), built lazily on first cross-package need —
     /// a standalone package never constructs it.
     workspace: std::cell::OnceCell<crate::workspace::Workspace>,
+    /// The embedding provider can own an HTTP connection pool or command configuration;
+    /// retain it for the invocation (and all MCP requests) rather than recreating it per call.
+    embedder: std::cell::OnceCell<Box<dyn crate::embed::Embedder>>,
 }
 
 impl Ctx {
@@ -48,6 +51,7 @@ impl Ctx {
             repo,
             config,
             workspace: std::cell::OnceCell::new(),
+            embedder: std::cell::OnceCell::new(),
         })
     }
 
@@ -79,8 +83,12 @@ impl Ctx {
 
     /// Build the embedder from the global user config (M2); providers that need secrets
     /// (e.g. OpenAI) resolve them from the environment or `credentials.toml`.
-    pub fn embedder(&self) -> Result<Box<dyn crate::embed::Embedder>> {
-        let user = crate::userconfig::UserConfig::load()?;
-        crate::embed::from_user_config(&user)
+    pub fn embedder(&self) -> Result<&dyn crate::embed::Embedder> {
+        if self.embedder.get().is_none() {
+            let user = crate::userconfig::UserConfig::load()?;
+            let embedder = crate::embed::from_user_config(&user)?;
+            let _ = self.embedder.set(embedder);
+        }
+        Ok(self.embedder.get().expect("embedder initialized").as_ref())
     }
 }

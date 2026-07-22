@@ -28,7 +28,7 @@ pub fn run(
     };
     let ws = ctx.workspace()?;
     let embedder = ctx.embedder()?;
-    let (hits, skipped) = search::search_workspace(ws, embedder.as_ref(), query, &opts, local)?;
+    let (hits, skipped) = search::search_workspace(ws, embedder, query, &opts, local)?;
 
     let run_root = ws.current().root.clone();
     // With an explicit --scope, every result is in that scope, so the prefix is implied:

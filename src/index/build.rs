@@ -4,12 +4,13 @@
 //! so every index state corresponds to exactly one commit. Two modes:
 //!
 //! - **incremental** (default): `git diff` the last-indexed commit → changed files →
-//!   re-parse only those. (The content-hash embedding cache that makes this cheap when
-//!   embeddings exist is step 4; for now changed sections are re-embedded directly.)
+//!   re-parse only those. The content-hash embedding cache retains unchanged section vectors,
+//!   while all misses from the invocation share bounded provider batches.
 //! - **`--full`**: drop and recreate `index.db`, re-parse everything.
 //!
 //! This is the command a `post-commit` git hook calls.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -43,6 +44,13 @@ pub enum Mode {
     /// Opt-in (cli.md §4.1 `--working-tree`); the recorded commit is `null` since the
     /// index no longer corresponds to a commit. Default remains commit-as-publish.
     WorkingTree,
+}
+
+/// Parsed content ready for insertion. Parsing and embedding happen before the write
+/// transaction so a remote embedding provider never holds the index lock.
+struct PreparedNode {
+    node: Node,
+    prose_start: u32,
 }
 
 /// Build or rebuild the index (cli.md §4.1).
@@ -123,37 +131,68 @@ pub fn run(
     let configured: std::collections::HashSet<&str> =
         config.types.iter().map(String::as_str).collect();
 
+    // Fetch committed blobs in one Git session before the write transaction. Besides avoiding
+    // one process per file, this keeps the transaction short rather than holding it across I/O.
+    let mut committed_contents = committed
+        .then(|| crate::git::show_many_at_head(root, &to_index))
+        .transpose()?;
+
+    // Gather every node before taking the write lock. This lets cache misses share embedding
+    // batches across the corpus instead of limiting one provider request to one file.
+    let mut prepared = Vec::new();
+    for (position, rel) in to_index.iter().enumerate() {
+        let content = if committed {
+            committed_contents
+                .as_mut()
+                .expect("committed content fetched")[position]
+                .take()
+        } else {
+            std::fs::read_to_string(root.join(rel)).ok()
+        };
+        if let Some(content) = content
+            && let Some(doc) = frontmatter::split(&content)
+        {
+            let prose_start = doc.prose_start_line;
+            if let Some(mut node) = frontmatter::to_node(rel, doc) {
+                node.edges.retain(|e| match &e.origin {
+                    crate::model::edge::RefOrigin::Inline => true,
+                    crate::model::edge::RefOrigin::Frontmatter(_) => {
+                        e.to.package().is_some() || configured.contains(e.to.node_type.as_str())
+                    }
+                });
+                apply_scoping(&mut node, &config.scope_field);
+                prepared.push(PreparedNode { node, prose_start });
+            }
+        }
+    }
+    let vectors = prepare_embeddings(&index, &prepared, embedder, incremental)?;
+
     index.with_tx(|index| {
         for rel in &to_delete {
             delete_file(index, rel)?;
         }
         for rel in &to_index {
             delete_file(index, rel)?; // idempotent: clear any prior rows for this path
-            let content = if committed {
-                crate::git::show_at_head(root, rel)?
-            } else {
-                std::fs::read_to_string(root.join(rel)).ok()
-            };
-            if let Some(content) = content
-                && let Some(doc) = frontmatter::split(&content)
-            {
-                let prose_start = doc.prose_start_line;
-                if let Some(mut node) = frontmatter::to_node(rel, doc) {
-                    node.edges.retain(|e| match &e.origin {
-                        crate::model::edge::RefOrigin::Inline => true,
-                        crate::model::edge::RefOrigin::Frontmatter(_) => {
-                            e.to.package().is_some() || configured.contains(e.to.node_type.as_str())
-                        }
-                    });
-                    apply_scoping(&mut node, &config.scope_field);
-                    index_node(index, &node, &config.name, prose_start, embedder)?;
-                }
-            }
+        }
+        for prepared in &prepared {
+            index_node(
+                index,
+                &prepared.node,
+                &config.name,
+                prepared.prose_start,
+                &vectors,
+            )?;
         }
         // Now that every node is present, resolve relative scoped references scope-first.
         resolve_scoped_edges(index)?;
         Ok(())
     })?;
+
+    // A recreated index intentionally deferred FTS construction until every section was
+    // present. Incremental runs open an existing index, whose FTS structure already exists.
+    if !incremental {
+        index.ensure_fts_index()?;
+    }
 
     // A working-tree index does not correspond to a commit, so record null. The
     // `index_source` marker makes "plain index restores the last commit" an explicit
@@ -187,6 +226,51 @@ pub fn run(
 
 /// How many sections to embed per provider call during a re-embed.
 const REEMBED_BATCH: usize = 128;
+
+/// Resolve vectors for every section in one indexing invocation. On incremental updates,
+/// cached vectors are retained; misses are de-duplicated by content hash and passed to the
+/// provider in the same bounded batches used by `--re-embed`.
+fn prepare_embeddings(
+    index: &Index,
+    prepared: &[PreparedNode],
+    embedder: &dyn Embedder,
+    reuse_cache: bool,
+) -> Result<HashMap<cache::ContentHash, Vec<f32>>> {
+    let mut vectors = HashMap::new();
+    let mut misses: Vec<(cache::ContentHash, String)> = Vec::new();
+    let mut seen = HashSet::new();
+
+    for prepared in prepared {
+        for section in Section::split(&prepared.node.prose, prepared.prose_start) {
+            let hash = cache::hash_text(&section.body);
+            if !seen.insert(hash) {
+                continue;
+            }
+            if reuse_cache && let Some(vector) = cache_get(index, &hash)? {
+                vectors.insert(hash, vector);
+            } else {
+                misses.push((hash, section.body));
+            }
+        }
+    }
+
+    for chunk in misses.chunks(REEMBED_BATCH) {
+        let bodies: Vec<String> = chunk.iter().map(|(_, body)| body.clone()).collect();
+        let embedded = embedder.embed(&bodies)?;
+        if embedded.len() != chunk.len() {
+            return Err(crate::error::VaireError::Config(format!(
+                "embedder returned {} vectors for {} sections",
+                embedded.len(),
+                chunk.len()
+            )));
+        }
+        for ((hash, _), vector) in chunk.iter().zip(embedded) {
+            vectors.insert(*hash, vector);
+        }
+    }
+
+    Ok(vectors)
+}
 
 /// Re-embed every section in the existing index with the current provider, bypassing the
 /// content-hash cache (`vaire index --re-embed`, cli.md §4.1).
@@ -263,7 +347,7 @@ fn recreate(db_path: &Path) -> Result<Index> {
         std::fs::create_dir_all(vaire_dir)?;
         Repo::ensure_derived_gitignore(vaire_dir)?;
     }
-    Index::create(db_path)
+    Index::create_for_bulk_load(db_path)
 }
 
 /// All files tracked at HEAD that match the include/exclude globs.
@@ -372,7 +456,7 @@ fn index_node(
     node: &Node,
     package: &str,
     prose_start: u32,
-    embedder: &dyn Embedder,
+    vectors: &HashMap<cache::ContentHash, Vec<f32>>,
 ) -> Result<()> {
     let id = node.id.to_string();
 
@@ -445,35 +529,16 @@ fn index_node(
         }
     }
 
-    // Sections → FTS + per-section embeddings (the file is the returned unit). Each
-    // section's vector comes from the content-hash cache when its text is unchanged;
-    // only cache misses are embedded (design.md §9).
+    // Sections → FTS + per-section embeddings (the file is the returned unit). Vectors
+    // were prepared across the whole corpus before this transaction began.
     let sections = Section::split(&node.prose, prose_start);
     let hashes: Vec<[u8; 32]> = sections.iter().map(|s| cache::hash_text(&s.body)).collect();
 
-    // Resolve vectors: cache hit, or queue for a single batched embed call.
-    let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(sections.len());
-    let mut misses: Vec<usize> = Vec::new();
-    for (i, hash) in hashes.iter().enumerate() {
-        match cache_get(index, hash)? {
-            Some(v) => vectors.push(Some(v)),
-            None => {
-                vectors.push(None);
-                misses.push(i);
-            }
-        }
-    }
-    if !misses.is_empty() {
-        let bodies: Vec<String> = misses.iter().map(|&i| sections[i].body.clone()).collect();
-        let embedded = embedder.embed(&bodies)?;
-        for (&i, vector) in misses.iter().zip(embedded) {
-            cache_put(index, &hashes[i], &vector)?;
-            vectors[i] = Some(vector);
-        }
-    }
-
     for (i, section) in sections.iter().enumerate() {
-        let vector = vectors[i].as_ref().expect("every section has a vector");
+        let vector = vectors
+            .get(&hashes[i])
+            .expect("every section vector was prepared before insertion");
+        cache_put(index, &hashes[i], vector)?;
         index.execute(
             "INSERT INTO sections(node_id, heading, line, body) VALUES(?1, ?2, ?3, ?4)",
             turso::params![

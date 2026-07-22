@@ -31,14 +31,14 @@ pub fn run(
     // uncommitted edits (the index then reflects the working tree, not the last commit).
     if working_tree {
         let embedder = ctx.embedder()?;
-        build::run(&ctx.repo, &ctx.config, embedder.as_ref(), Mode::WorkingTree)?;
+        build::run(&ctx.repo, &ctx.config, embedder, Mode::WorkingTree)?;
     }
     // Ensure linked dependencies are indexed before judging references into them
     // (check is a maintain command — building derived caches is in its charter, like
     // `--working-tree` above).
     if !no_deps && !ctx.config.dependencies.is_empty() {
         let embedder = ctx.embedder()?;
-        crate::commands::index::ensure_deps(ctx, embedder.as_ref())?;
+        crate::commands::index::ensure_deps(ctx, embedder)?;
     }
 
     let index = ctx.open_index()?;

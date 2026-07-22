@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use common::{Corpus, CountingEmbedder, head};
 
 use vaire::commands;
+use vaire::embed::Embedder;
+use vaire::error::Result as VaireResult;
 use vaire::index::build::Mode;
 use vaire::index::check::{Violation, Warning};
 
@@ -278,6 +280,46 @@ fn incremental_reindex_reembeds_only_changed_sections() {
 
     // Preamble + Alpha are content-hash cache hits; only Beta is re-embedded.
     assert_eq!(counter.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn full_build_batches_embeddings_across_files() {
+    struct BatchCountingEmbedder {
+        calls: Arc<AtomicUsize>,
+        texts: Arc<AtomicUsize>,
+    }
+
+    impl Embedder for BatchCountingEmbedder {
+        fn embed(&self, inputs: &[String]) -> VaireResult<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.texts.fetch_add(inputs.len(), Ordering::Relaxed);
+            Ok(inputs.iter().map(|_| vec![0.0; 8]).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            8
+        }
+    }
+
+    let c = Corpus::empty();
+    for id in ["one", "two", "three"] {
+        c.add(
+            &format!("knowledge/{id}.md"),
+            &format!("---\nid: {id}\ntype: method\n---\n# {id}\n"),
+        );
+    }
+    c.commit();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let texts = Arc::new(AtomicUsize::new(0));
+    let embedder = BatchCountingEmbedder {
+        calls: calls.clone(),
+        texts: texts.clone(),
+    };
+    c.build_with(&embedder, Mode::Full);
+
+    assert_eq!(texts.load(Ordering::Relaxed), 3);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
 #[test]
