@@ -113,7 +113,7 @@ pub fn show_many_at_head(repo_root: &Path, rel_paths: &[String]) -> Result<Vec<O
         reader.read_exact(&mut bytes)?;
         let mut newline = [0; 1];
         reader.read_exact(&mut newline)?;
-        if newline != [b'\n'] {
+        if newline != *b"\n" {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "git cat-file object was not newline terminated",
