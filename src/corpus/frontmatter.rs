@@ -40,8 +40,13 @@ pub struct Document {
 /// leading `---` fence with a matching close, or the block is not a YAML mapping — in
 /// which case the file is not a node and is ignored (frontmatter-driven discovery).
 pub fn split(contents: &str) -> Option<Document> {
+    // A UTF-8 BOM is not whitespace, so `trim()` leaves it attached to the opening fence
+    // and the file silently stops being a node. Windows editors (Notepad) write one by
+    // default, and Vairë ships a Windows installer. Dropping it costs nothing: it sits on
+    // line 1, so every line number below is unaffected.
+    let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
     let mut lines = contents.lines();
-    if lines.next()?.trim() != "---" {
+    if !is_fence(lines.next()?) {
         return None;
     }
 
@@ -52,7 +57,7 @@ pub fn split(contents: &str) -> Option<Document> {
     let mut line_no = 1u32;
     for line in lines {
         line_no += 1;
-        if line.trim() == "---" {
+        if is_fence(line) {
             closing = Some(line_no);
             break;
         }
@@ -93,11 +98,38 @@ pub fn split(contents: &str) -> Option<Document> {
     })
 }
 
+/// A frontmatter delimiter: exactly `---` at column 0.
+///
+/// The delimiter must start the line (the Jekyll-style convention every editor assumes).
+/// Matching a *trimmed* line instead would let an indented `---` close the block — and an
+/// indented `---` is precisely what a horizontal rule inside a YAML block scalar looks
+/// like, since block-scalar content is indented. That truncated the frontmatter and leaked
+/// the remaining keys into the prose body.
+fn is_fence(line: &str) -> bool {
+    line.trim_end() == "---"
+}
+
+/// A YAML scalar rendered as a string.
+///
+/// Frontmatter is hand-authored, and an unquoted scalar that merely *looks* numeric
+/// arrives as `Value::Number`, not `Value::String` — so `as_str()` returns `None`. Since
+/// design.md §6 defines `id := [a-z0-9][a-z0-9-]*`, an all-digit slug like `2026` is
+/// spec-valid; requiring quotes silently dropped the entire file from the index.
+fn scalar_string(value: &serde_yaml::Value) -> Option<String> {
+    match value {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 /// Compose a node's address from its frontmatter: `type:id`. Returns `None` unless both
 /// a non-empty `type:` and a non-empty `id:` slug are present (design.md §4, §9).
 pub fn node_id(frontmatter: &BTreeMap<String, serde_yaml::Value>) -> Option<NodeId> {
     let ty = frontmatter.get("type")?.as_str()?.trim();
-    let slug = frontmatter.get("id")?.as_str()?.trim();
+    let slug = scalar_string(frontmatter.get("id")?)?;
+    let slug = slug.trim();
     if ty.is_empty() || slug.is_empty() {
         return None;
     }
@@ -282,5 +314,50 @@ references: [method:event-sourcing, system:ingest-api]
 
         // The one unresolved reference is captured, not turned into an edge.
         assert_eq!(node.unresolved.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod robustness_tests {
+    use super::*;
+
+    #[test]
+    fn utf8_bom_does_not_hide_the_frontmatter_fence() {
+        // Notepad-style BOM: U+FEFF is not whitespace, so it used to defeat the opening
+        // `---` check and the file silently stopped being a node.
+        let doc = split("\u{feff}---\nid: bom\ntype: person\n---\n# Bom\n")
+            .expect("BOM'd file is still a node");
+        let id = node_id(&doc.frontmatter).expect("id parses");
+        assert_eq!(id.to_string(), "person:bom");
+        assert_eq!(doc.prose.trim(), "# Bom");
+    }
+
+    #[test]
+    fn unquoted_numeric_id_is_a_valid_slug() {
+        // design.md §6: id := [a-z0-9][a-z0-9-]* — all digits is valid. YAML parses an
+        // unquoted `2026` as a number, and `as_str()` used to drop the whole file.
+        let doc = split("---\nid: 2026\ntype: year\n---\n# 2026\n").unwrap();
+        let id = node_id(&doc.frontmatter).expect("numeric id parses");
+        assert_eq!(id.to_string(), "year:2026");
+    }
+
+    #[test]
+    fn indented_dashes_inside_a_block_scalar_do_not_close_frontmatter() {
+        // Block-scalar content is indented, so a horizontal rule inside one looks exactly
+        // like an indented `---`. Closing on it truncated the block and leaked the
+        // remaining keys into the prose.
+        let doc = split("---\nid: x\ntype: note\ndescription: |\n  ---\n  more\nname: Foo\n---\nbody\n")
+            .expect("block scalar survives");
+        assert_eq!(
+            doc.frontmatter.get("name").and_then(|v| v.as_str()),
+            Some("Foo"),
+            "keys after the block scalar must stay in the frontmatter"
+        );
+        assert_eq!(doc.prose.trim(), "body");
+    }
+
+    #[test]
+    fn fence_still_tolerates_trailing_whitespace() {
+        assert!(split("---\nid: a\ntype: b\n--- \n# hi\n").is_some());
     }
 }

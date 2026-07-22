@@ -92,16 +92,11 @@ fn render_prose(
     owner: &Rc<PackageHandle>,
 ) -> String {
     let mut out = String::new();
-    let mut in_fence = false;
+    let mut fences = crate::corpus::markdown::Fences::new();
     for line in prose.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        }
-        if in_fence {
+        // Code passes through verbatim — a `[[...]]` inside an example is text to show,
+        // not a reference to re-render.
+        if fences.is_code(line) {
             out.push_str(line);
         } else {
             out.push_str(&render_line(line, source_path, source_scope, ws, owner));

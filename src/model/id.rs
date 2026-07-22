@@ -121,20 +121,26 @@ impl NodeId {
     /// *reference* can say, not what the corpus may declare; `vaire check` surfaces the
     /// gap (`unreferenceable_id`).
     ///
-    /// Panics on a string without a `:` — the index only ever stores composed
-    /// `type:slug` ids, so that would be an internal invariant violation, not bad input.
+    /// **Total**: a declared id is data, so this never panics. A scope prefix is only
+    /// recognised when what follows it is itself a `type:slug` pair — otherwise the `/`
+    /// belongs to the slug (`id: a/b` under `type: doc` stores `doc:a/b`, which is
+    /// unreferenceable but must still round-trip; `vaire check` reports it as
+    /// `unreferenceable_id`). A string with no `:` at all parses as a bare slug with an
+    /// empty type, which [`Display`](fmt::Display) renders back verbatim.
     pub fn parse_stored(s: &str) -> NodeId {
         let (package, rest) = match s.strip_prefix('@').and_then(|a| a.split_once('/')) {
             Some((pkg, rest)) => (Some(pkg.to_string()), rest),
             None => (None, s),
         };
+        // Only split a scope off when the trailing segment is a well-formed `type:slug`.
+        // `doc:a/b` has trailing segment `b` (no ':'), so the '/' is part of the slug.
         let (scope, node_part) = match rest.rsplit_once('/') {
-            Some((prefix, last)) if !prefix.is_empty() => (Some(prefix.to_string()), last),
+            Some((prefix, last)) if !prefix.is_empty() && last.contains(':') => {
+                (Some(prefix.to_string()), last)
+            }
             _ => (None, rest),
         };
-        let (ty, slug) = node_part
-            .split_once(':')
-            .expect("stored ids are composed type:slug");
+        let (ty, slug) = node_part.split_once(':').unwrap_or(("", node_part));
         NodeId {
             node_type: NodeType::new(ty),
             slug: slug.to_string(),
@@ -149,9 +155,16 @@ impl fmt::Display for NodeId {
         if let Some(package) = &self.package {
             write!(f, "@{package}/")?;
         }
+        // An empty type only arises from a stored id that carried no ':' at all
+        // (see [`NodeId::parse_stored`]); render it verbatim so the id round-trips.
+        let node = if self.node_type.as_str().is_empty() {
+            self.slug.clone()
+        } else {
+            format!("{}:{}", self.node_type, self.slug)
+        };
         match &self.scope {
-            Some(scope) => write!(f, "{}/{}:{}", scope, self.node_type, self.slug),
-            None => write!(f, "{}:{}", self.node_type, self.slug),
+            Some(scope) => write!(f, "{scope}/{node}"),
+            None => write!(f, "{node}"),
         }
     }
 }
@@ -378,6 +391,30 @@ mod tests {
         let scoped = NodeId::parse_stored("project:atlas/record:Kick.Off");
         assert_eq!(scoped.scope(), Some("project:atlas"));
         assert_eq!(scoped.to_string(), "project:atlas/record:Kick.Off");
+    }
+
+    #[test]
+    fn parse_stored_is_total_for_slugs_containing_slashes() {
+        // `id: a/b` under `type: doc` stores `doc:a/b`. The trailing '/'-segment is not a
+        // `type:slug` pair, so the '/' belongs to the slug — and this must not panic:
+        // it used to abort `vaire search` (exit 101) and kill the MCP server mid-session.
+        let id = NodeId::parse_stored("doc:a/b");
+        assert_eq!(id.node_type().as_str(), "doc");
+        assert_eq!(id.slug, "a/b");
+        assert_eq!(id.scope(), None);
+        assert_eq!(id.to_string(), "doc:a/b");
+
+        // A slash-bearing slug under a scope is genuinely ambiguous (the grammar cannot
+        // tell `project:atlas` + `doc:a/b` from `project:atlas/doc:a` + `b`). Scope
+        // detection is best-effort there; round-tripping is the guarantee that matters,
+        // since such an id is unreferenceable either way.
+        let scoped = NodeId::parse_stored("project:atlas/doc:a/b");
+        assert_eq!(scoped.to_string(), "project:atlas/doc:a/b");
+
+        // Degenerate: no ':' anywhere still parses and renders verbatim.
+        let bare = NodeId::parse_stored("nocolon");
+        assert_eq!(bare.slug, "nocolon");
+        assert_eq!(bare.to_string(), "nocolon");
     }
 
     #[test]

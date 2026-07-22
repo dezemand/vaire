@@ -429,7 +429,7 @@ pub fn head(root: &Path) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
-fn git(root: &Path, args: &[&str]) {
+pub fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
         .arg("-C")
         .arg(root)

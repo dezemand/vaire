@@ -481,3 +481,58 @@ fn check_working_tree_validates_uncommitted_edits() {
             .any(|v| matches!(v, Violation::DanglingRef { to, .. } if to == "system:ghost"))
     );
 }
+
+// ---- Git plumbing robustness (src/git.rs) ----------------------------------
+
+#[test]
+fn index_includes_files_with_non_ascii_names() {
+    // Git's default core.quotepath=true C-quotes non-ASCII paths on the newline-delimited
+    // plumbing forms ("caf\303\251.md"), which then misses the include globs and fails
+    // `cat-file` — the file vanished from the index with no error. The path listings pass
+    // `-z`, so raw bytes come back instead.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/café.md",
+        "---\nid: cafe\ntype: place\nname: Café\n---\n# Café\n",
+    );
+    c.add(
+        "knowledge/ascii.md",
+        "---\nid: ascii\ntype: place\nname: Ascii\n---\n# Ascii\n",
+    );
+    c.commit().build();
+
+    assert_eq!(node_name(&c, "place:cafe"), "Café");
+    assert_eq!(node_name(&c, "place:ascii"), "Ascii");
+}
+
+#[test]
+fn unreachable_anchor_commit_rebuilds_instead_of_freezing_the_index() {
+    // A `git diff` Git cannot answer (anchor rewritten away and gc'd) used to look
+    // identical to an empty diff: the build indexed nothing, reported success, and
+    // advanced last_indexed_commit to HEAD — stranding every intervening edit forever.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/jane.md",
+        "---\nid: jane\ntype: person\nname: Jane\n---\n# Jane\n",
+    );
+    c.commit().build();
+
+    // Rewrite history so the recorded anchor becomes unreachable.
+    c.add(
+        "knowledge/jane.md",
+        "---\nid: jane\ntype: person\nname: Jane Amended\n---\n# Jane\n",
+    );
+    c.add(
+        "knowledge/bob.md",
+        "---\nid: bob\ntype: person\nname: Bob\n---\n# Bob\n",
+    );
+    common::git(c.root(), &["add", "-A"]);
+    common::git(c.root(), &["commit", "-q", "--amend", "-m", "rewritten"]);
+    common::git(c.root(), &["reflog", "expire", "--expire=now", "--all"]);
+    common::git(c.root(), &["gc", "--prune=now", "-q"]);
+
+    // A plain (incremental) reindex must fall back to a full rebuild and pick both up.
+    c.build_with(&common::DummyEmbedder { dims: 8 }, Mode::Incremental);
+    assert_eq!(node_name(&c, "person:bob"), "Bob");
+    assert_eq!(node_name(&c, "person:jane"), "Jane Amended");
+}

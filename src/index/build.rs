@@ -110,18 +110,27 @@ pub fn run(
     let incremental =
         schema_ok && last_commit.is_some() && prior_source.as_deref() == Some("committed");
 
+    // Resolve the changeset *before* touching the index file: if Git cannot diff from the
+    // recorded anchor (history rewritten and gc'd, shallow clone), there is no honest
+    // incremental answer, so the run downgrades to a full rebuild. Reporting success with
+    // an empty diff would strand every intervening edit — the anchor advances to HEAD
+    // below, so nothing would ever re-examine those commits.
+    let incremental_changes = match incremental {
+        true => partition_changed(root, &scanner, last_commit.as_deref().unwrap())?,
+        false => None,
+    };
+    let incremental = incremental_changes.is_some();
+
     let index = if incremental {
         Index::open(&db_path)?
     } else {
         recreate(root, &db_path)?
     };
 
-    let (to_index, to_delete) = if incremental {
-        partition_changed(root, &scanner, last_commit.as_deref().unwrap())?
-    } else if committed {
-        (committed_matching(root, &scanner)?, Vec::new())
-    } else {
-        (working_matching(repo, &scanner)?, Vec::new())
+    let (to_index, to_delete) = match incremental_changes {
+        Some(changes) => changes,
+        None if committed => (committed_matching(root, &scanner)?, Vec::new()),
+        None => (working_matching(repo, &scanner)?, Vec::new()),
     };
 
     // Classification (design.md §6): identification already happened syntactically in the
@@ -428,16 +437,21 @@ fn working_matching(repo: &Repo, scanner: &Scanner) -> Result<Vec<String>> {
 
 /// Split the files changed since `last` into (to-reindex, to-delete). A changed path
 /// still present at HEAD is reindexed; one absent from HEAD is deleted.
+/// `None` when Git cannot diff from `last` (unreachable after a rewrite, shallow clone).
+/// The caller must rebuild fully rather than treat it as an empty changeset.
 fn partition_changed(
     root: &Path,
     scanner: &Scanner,
     last: &str,
-) -> Result<(Vec<String>, Vec<String>)> {
+) -> Result<Option<(Vec<String>, Vec<String>)>> {
+    let Some(changed) = crate::git::changed_files(root, last)? else {
+        return Ok(None);
+    };
     let head_set: std::collections::HashSet<String> =
         crate::git::list_files_at_head(root)?.into_iter().collect();
     let mut to_index = Vec::new();
     let mut to_delete = Vec::new();
-    for rel in crate::git::changed_files(root, last)? {
+    for rel in changed {
         if !scanner.is_match(Path::new(&rel)) {
             continue;
         }
@@ -447,7 +461,7 @@ fn partition_changed(
             to_delete.push(rel);
         }
     }
-    Ok((to_index, to_delete))
+    Ok(Some((to_index, to_delete)))
 }
 
 /// Insert one node and all its derived rows. `package` is the owning package (the manifest
