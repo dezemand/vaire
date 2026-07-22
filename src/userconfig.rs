@@ -90,9 +90,18 @@ pub fn credential_from(key: &str, home: &Path) -> Option<String> {
     let table: toml::Table = match toml::from_str(&text) {
         Ok(t) => t,
         Err(e) => {
+            // Report the location only — never the error's rendered snippet. `toml`
+            // echoes the offending source line, and in this file that line is a secret:
+            // an unterminated string on the key line printed the whole API key to stderr,
+            // which routinely lands in CI logs.
+            let where_ = match e.span() {
+                Some(span) => format!(" at byte {}", span.start),
+                None => String::new(),
+            };
             eprintln!(
-                "warning: {}: {e} (ignoring credentials file)",
-                path.display()
+                "warning: {}{}: malformed TOML (ignoring credentials file)",
+                path.display(),
+                where_
             );
             return None;
         }

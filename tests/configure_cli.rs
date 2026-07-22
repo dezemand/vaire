@@ -68,3 +68,36 @@ fn configure_embeddings_rejects_unknown_provider() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("nonsense"), "stderr: {stderr}");
 }
+
+#[test]
+fn malformed_credentials_file_never_echoes_the_secret() {
+    // `toml`'s Display renders the offending source line. In credentials.toml that line
+    // holds the API key, so an unterminated string (a plausible hand-edit) printed the
+    // whole key to stderr — and stderr routinely lands in CI logs.
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("credentials.toml"),
+        "OPENAI_API_KEY = \"sk-proj-SUPERSECRETVALUE123\n",
+    )
+    .unwrap();
+    // Point the embedder at openai so resolving the credential is actually attempted.
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[embeddings]\nprovider = \"openai\"\nembedding_model = \"text-embedding-3-small\"\ndimensions = 1536\n",
+    )
+    .unwrap();
+
+    let out = vaire()
+        .env("VAIRE_CONFIG_HOME", home.path())
+        .env_remove("OPENAI_API_KEY")
+        .args(["configure", "show"])
+        .output()
+        .expect("vaire runs");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stderr.contains("SUPERSECRETVALUE") && !stdout.contains("SUPERSECRETVALUE"),
+        "the API key leaked:\nstderr: {stderr}\nstdout: {stdout}"
+    );
+}

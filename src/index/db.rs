@@ -109,8 +109,11 @@ const SCHEMA_STMTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS embeddings_node_line ON embeddings(node_id, section_line)",
     // Content-hash embedding cache (design.md §9): vectors keyed by section-text hash,
     // decoupled from any node/path so an unchanged section reuses its vector across
-    // incremental reindexes. Survives delete_file; only `--full` (which recreates the db)
-    // clears it. Without this, "rebuildable in seconds" breaks once embeddings exist.
+    // reindexes. Survives delete_file, and a full rebuild carries it over from the index
+    // it replaces (same embedder only) — otherwise every rebuild of a non-Git corpus, and
+    // every `--working-tree` run, would re-embed the whole corpus. `--re-embed` is the way
+    // to force fresh vectors. Without this, "rebuildable in seconds" breaks once
+    // embeddings exist.
     "CREATE TABLE IF NOT EXISTS embed_cache (
         content_hash BLOB PRIMARY KEY,
         vector       BLOB NOT NULL

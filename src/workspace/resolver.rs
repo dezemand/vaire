@@ -261,6 +261,13 @@ pub fn refs(
             }
         }
         frontier = next;
+        // The reachable set is exhausted — every further hop would re-walk an empty
+        // frontier. Without this the loop still spins `depth` times, so an unbounded
+        // `depth` (the MCP `refs` tool passes the client's value straight through) burned
+        // ~11s of CPU on a 60-node corpus and stalled the single-threaded server.
+        if frontier.is_empty() {
+            break;
+        }
     }
 
     if let Some(t) = type_filter {

@@ -536,3 +536,114 @@ fn unreachable_anchor_commit_rebuilds_instead_of_freezing_the_index() {
     assert_eq!(node_name(&c, "person:bob"), "Bob");
     assert_eq!(node_name(&c, "person:jane"), "Jane Amended");
 }
+
+// ---- rebuild durability + embed-cache reuse (src/index/build.rs) -----------
+
+/// Fails on any embed call — stands in for a provider 5xx or a stalled request part-way
+/// through a rebuild.
+struct FailingEmbedder;
+
+impl Embedder for FailingEmbedder {
+    fn embed(&self, _texts: &[String]) -> VaireResult<Vec<Vec<f32>>> {
+        Err(vaire::error::VaireError::Config("provider exploded".into()))
+    }
+    fn dimensions(&self) -> usize {
+        8
+    }
+}
+
+#[test]
+fn a_failed_full_rebuild_leaves_the_previous_index_queryable() {
+    // The rebuild used to unlink index.db and stamp a fresh schema before parsing or
+    // embedding, so any failure after that point left a schema-VALID but empty index:
+    // open_index accepted it, resolve reported not-found, and MCP search returned [] with
+    // isError:false. Staging the rebuild and promoting by rename keeps the old index.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/jane.md",
+        "---\nid: jane\ntype: person\nname: Jane\n---\n# Jane\n",
+    )
+    .commit()
+    .build();
+    assert_eq!(node_name(&c, "person:jane"), "Jane");
+
+    // New prose the cache has never seen, so the rebuild must actually call the provider.
+    c.add(
+        "knowledge/bob.md",
+        "---\nid: bob\ntype: person\nname: Bob\n---\n# Bob\n\nunseen prose\n",
+    )
+    .commit();
+
+    let config = vaire::config::Config::load(&c.root().join("knowledge.toml")).unwrap();
+    let err = vaire::index::build::run(&c.repo(), &config, &FailingEmbedder, Mode::Full);
+    assert!(err.is_err(), "the build must surface the provider failure");
+
+    // The previous index is untouched and still answers queries.
+    assert_eq!(node_name(&c, "person:jane"), "Jane");
+}
+
+#[test]
+fn a_full_rebuild_reuses_cached_vectors_for_unchanged_sections() {
+    // The content-hash cache lives inside index.db, so recreating the file discarded it —
+    // every rebuild of a non-Git corpus, and every --working-tree run, re-embedded the
+    // whole corpus. design.md §9 promises only changed sections are re-embedded.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/n.md",
+        "---\nid: n\ntype: method\nname: N\n---\n# N\n\n## Alpha\n\nalpha\n\n## Beta\n\nbeta\n",
+    )
+    .commit();
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let emb = CountingEmbedder {
+        dims: 8,
+        embedded: counter.clone(),
+    };
+
+    c.build_with(&emb, Mode::Full);
+    assert_eq!(counter.swap(0, Ordering::Relaxed), 3, "cold build embeds all");
+
+    // A second full rebuild re-reads every file but must reuse the cached vectors.
+    c.build_with(&emb, Mode::Full);
+    assert_eq!(
+        counter.load(Ordering::Relaxed),
+        0,
+        "unchanged sections must come from the cache the rebuild carried over"
+    );
+}
+
+#[test]
+fn switching_provider_rebuilds_instead_of_mixing_vector_spaces() {
+    // dep_mode forced a full rebuild when a *dependency's* provider changed, but the
+    // current package always went incremental: changed sections got the new model's
+    // vectors, unchanged ones kept the old model's (the cache keys on text alone), and
+    // embed_provider was then re-stamped with the new identity — certifying a mixed index
+    // as homogeneous. Equal-width spaces are the dangerous case, since the length filter
+    // in search cannot detect them.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/n.md",
+        "---\nid: n\ntype: method\nname: N\n---\n# N\n\n## Alpha\n\nalpha\n",
+    )
+    .commit()
+    .build_with(&common::DummyEmbedder { dims: 8 }, Mode::Full);
+
+    // A different embedder identity at the SAME dimensions.
+    let counter = Arc::new(AtomicUsize::new(0));
+    let switched = CountingEmbedder {
+        dims: 8,
+        embedded: counter.clone(),
+    };
+    assert_ne!(
+        switched.identity(),
+        common::DummyEmbedder { dims: 8 }.identity(),
+        "the two embedders must differ for this test to mean anything"
+    );
+
+    // A plain incremental run with no file changes must still re-embed everything.
+    c.build_with(&switched, Mode::Incremental);
+    assert!(
+        counter.load(Ordering::Relaxed) > 0,
+        "a provider switch must re-embed, not reuse the previous model's vectors"
+    );
+}

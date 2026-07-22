@@ -49,6 +49,11 @@ impl Embedder for CountingEmbedder {
     fn dimensions(&self) -> usize {
         self.dims
     }
+    /// Distinct from `DummyEmbedder`'s identity, so tests can model a provider switch at
+    /// identical dimensions — the case the `length(vector)` filter in search cannot catch.
+    fn identity(&self) -> String {
+        format!("counting:{}", self.dims)
+    }
 }
 
 /// Point `VAIRE_CONFIG_HOME` at a per-process temp dir, once, before any fixture exists.
