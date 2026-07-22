@@ -21,7 +21,7 @@ use crate::corpus::scan::Scanner;
 use crate::corpus::section::Section;
 use crate::embed::{Embedder, cache};
 use crate::error::Result;
-use crate::index::db::{Index, col_blob, col_i64, col_text, col_u32};
+use crate::index::db::{Index, col_blob, col_text, col_u32};
 use crate::model::node::Node;
 use crate::model::reference::Reference;
 use crate::search::vector::{decode_vector, encode_vector};
@@ -474,7 +474,11 @@ fn committed_matching(root: &Path, scanner: &Scanner) -> Result<Vec<String>> {
 /// see [`resolve_scoped_edges`].
 fn apply_scoping(node: &mut Node, scope_field: &str) {
     if let Some(container) = node.frontmatter.get(scope_field).and_then(|v| v.as_str()) {
-        node.id.scope = Some(container.to_string());
+        // Same forgiving strip the edge collector applies, so `project: "[[project:atlas]]"`
+        // scopes to `project:atlas` instead of baking the brackets into the node's own id —
+        // an id no reference could address, and one that disagreed with the edge derived
+        // from that very field.
+        node.id.scope = Some(frontmatter::strip_wikilink_brackets(container).to_string());
     }
     let from = node.id.clone();
     for edge in &mut node.edges {
@@ -488,38 +492,28 @@ fn apply_scoping(node: &mut Node, scope_field: &str) {
 /// rewritten to that composed id; otherwise the bare (global) target stands. Existence-based,
 /// so it needs no type list and never scopes a reference that lacks a scoped sibling.
 fn resolve_scoped_edges(index: &Index) -> Result<()> {
-    let candidates: Vec<(i64, String, String)> = index.query_rows(
-        // Local edges only: scope-first resolution finds a sibling in *this* package;
-        // a cross-package target (to_package set) is resolved across the workspace in M5.
-        "SELECT rowid, from_id, to_id FROM edges
-         WHERE from_id LIKE '%/%' AND to_id NOT LIKE '%/%' AND to_package IS NULL",
+    // One set-based statement. This used to full-scan `edges` (the leading-wildcard LIKE
+    // cannot use an index), then fire a separate `SELECT 1 FROM nodes WHERE id = ?` for
+    // every candidate row and a separate UPDATE for every rewrite — each its own trip
+    // through the block_on facade. Targets that never have a scoped sibling were re-probed
+    // one query at a time on every build, forever.
+    //
+    // `rtrim(from_id, replace(from_id, '/', ''))` is the SQL spelling of "everything up to
+    // and including the last '/'": the second argument is the set of characters to strip,
+    // i.e. every character of from_id except '/', so trailing non-'/' characters come off
+    // and the scope prefix (with its separator) remains.
+    index.execute(
+        "UPDATE edges
+            SET to_id = rtrim(from_id, replace(from_id, '/', '')) || to_id
+          WHERE from_id LIKE '%/%'
+            AND to_id NOT LIKE '%/%'
+            AND to_package IS NULL
+            AND EXISTS (
+                SELECT 1 FROM nodes n
+                 WHERE n.id = rtrim(from_id, replace(from_id, '/', '')) || to_id
+            )",
         (),
-        |r| Ok((col_i64(r, 0)?, col_text(r, 1)?, col_text(r, 2)?)),
     )?;
-
-    let mut rewrites: Vec<(i64, String)> = Vec::new();
-    for (rowid, from_id, to_id) in candidates {
-        // The referrer's scope is everything before the last '/'.
-        if let Some((scope, _)) = from_id.rsplit_once('/') {
-            let candidate = format!("{scope}/{to_id}");
-            let exists = index
-                .query_opt(
-                    "SELECT 1 FROM nodes WHERE id = ?1",
-                    [candidate.as_str()],
-                    |_| Ok(()),
-                )?
-                .is_some();
-            if exists {
-                rewrites.push((rowid, candidate));
-            }
-        }
-    }
-    for (rowid, to_id) in rewrites {
-        index.execute(
-            "UPDATE edges SET to_id = ?1 WHERE rowid = ?2",
-            turso::params![to_id.as_str(), rowid],
-        )?;
-    }
     Ok(())
 }
 

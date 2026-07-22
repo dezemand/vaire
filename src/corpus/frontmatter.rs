@@ -109,6 +109,22 @@ fn is_fence(line: &str) -> bool {
     line.trim_end() == "---"
 }
 
+/// Strip stray inline-style `[[ ]]` from a frontmatter value.
+///
+/// Frontmatter references are bare (`owner: person:jane`), but writing them as wikilinks is
+/// the documented common trap, so design.md §5 says Vairë strips the brackets forgivingly.
+/// Every consumer of a frontmatter reference must apply this — `scope` included, or a node
+/// scoped by `project: "[[project:atlas]]"` gets the literal brackets baked into its own id
+/// while the edge derived from the same field has them stripped.
+pub fn strip_wikilink_brackets(value: &str) -> &str {
+    let inner = value.trim();
+    inner
+        .strip_prefix("[[")
+        .and_then(|x| x.strip_suffix("]]"))
+        .map(str::trim)
+        .unwrap_or(inner)
+}
+
 /// A YAML scalar rendered as a string.
 ///
 /// Frontmatter is hand-authored, and an unquoted scalar that merely *looks* numeric
@@ -203,13 +219,7 @@ fn collect_frontmatter_refs(
         }
         let line = frontmatter_lines.get(key).copied().unwrap_or(0);
         let mut handle = |s: &str| {
-            // Frontmatter references are bare; tolerate stray inline-style `[[ ]]`.
-            let inner = s.trim();
-            let inner = inner
-                .strip_prefix("[[")
-                .and_then(|x| x.strip_suffix("]]"))
-                .map(str::trim)
-                .unwrap_or(inner);
+            let inner = strip_wikilink_brackets(s);
             match Reference::parse_inner(inner) {
                 Some(Reference::Resolved { target, .. }) => edges.push(Edge {
                     from: from.clone(),

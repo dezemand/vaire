@@ -647,3 +647,29 @@ fn switching_provider_rebuilds_instead_of_mixing_vector_spaces() {
         "a provider switch must re-embed, not reuse the previous model's vectors"
     );
 }
+
+#[test]
+fn a_bracketed_scope_value_is_stripped_like_any_frontmatter_reference() {
+    // design.md §5: Vairë strips stray `[[ ]]` from frontmatter values forgivingly. The
+    // edge collector did; apply_scoping did not — so `project: "[[project:atlas]]"` baked
+    // the brackets into the node's own id, producing an address no reference could name
+    // and one that disagreed with the edge derived from that same field.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/atlas.md",
+        "---\nid: atlas\ntype: project\nname: Atlas\n---\n# Atlas\n",
+    )
+    .add(
+        "knowledge/standup.md",
+        "---\nid: standup\ntype: record\nname: Standup\nscope: \"[[project:atlas]]\"\n---\n# Standup\n",
+    )
+    .commit()
+    .build();
+
+    // The scoped node is addressable at the stripped scope.
+    assert_eq!(
+        node_name(&c, "project:atlas/record:standup"),
+        "Standup",
+        "the scope must be `project:atlas`, not `[[project:atlas]]`"
+    );
+}
