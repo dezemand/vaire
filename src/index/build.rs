@@ -587,9 +587,20 @@ fn index_node(
     }
     let fm_json = fm_value.to_string();
 
+    // Denormalized match text for `alias_pass`: display name + aliases, lowercased once
+    // here instead of re-derived (and re-JSON-parsed) for every node on every query.
+    // Separated by U+001F (unit separator), never NUL: SQLite's LIKE treats an embedded
+    // NUL as end-of-string, so aliases after the first would be invisible to the
+    // narrowing filter in `alias_pass` and silently stop matching.
+    let mut alias_text = node.display_name().to_lowercase();
+    for alias in node.aliases() {
+        alias_text.push(crate::search::ALIAS_SEP);
+        alias_text.push_str(&alias.to_lowercase());
+    }
+
     index.execute(
-        "INSERT OR IGNORE INTO nodes(id, type, path, frontmatter, superseded_by, package)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR IGNORE INTO nodes(id, type, path, frontmatter, superseded_by, package, alias_text)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         turso::params![
             id.as_str(),
             node.node_type().to_string(),
@@ -597,6 +608,7 @@ fn index_node(
             fm_json.as_str(),
             node.superseded_by().map(|s| s.to_string()),
             package,
+            alias_text.as_str(),
         ],
     )?;
     index.execute(

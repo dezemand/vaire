@@ -43,7 +43,8 @@ use crate::error::{Result, VaireError};
 /// v3: package-aware index (issue #2 M4) — `nodes.package` (the owning package, from the
 /// manifest `name`) and `edges.to_package` (NULL = local; set for an `@pkg/` target).
 /// v4: lookup indexes for incremental replacement and section/embedding joins.
-pub const SCHEMA_VERSION: u32 = 4;
+/// v5: `nodes.alias_text` — name + aliases denormalized for alias matching.
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// The schema as individual statements, run in order on a fresh database. Kept inline
 /// (rather than a `.sql` asset) so the binary is self-contained. No `PRAGMA`s: WAL is
@@ -59,7 +60,11 @@ const SCHEMA_STMTS: &[&str] = &[
         path          TEXT NOT NULL,
         frontmatter   TEXT NOT NULL,        -- JSON
         superseded_by TEXT,                 -- nullable redirect target
-        package       TEXT NOT NULL         -- the owning package (manifest `name`)
+        package       TEXT NOT NULL,        -- the owning package (manifest `name`)
+        -- The effective display name plus every alias, lowercased and NUL-joined. Purely
+        -- derived from `frontmatter`, denormalized so alias matching does not have to
+        -- JSON-parse every node's whole frontmatter on every query (design.md §8).
+        alias_text    TEXT NOT NULL DEFAULT ''
     )",
     "CREATE INDEX IF NOT EXISTS nodes_path ON nodes(path)",
     // Every parsed (id, path) pair, WITHOUT a unique constraint, so duplicate composed IDs

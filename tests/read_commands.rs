@@ -211,3 +211,27 @@ fn unresolved_type_filter_matches_guess_only() {
     assert_eq!(out.count, 1);
     assert_eq!(out.unresolved[0].type_guess.as_deref(), Some("person"));
 }
+
+#[test]
+fn search_matches_any_alias_not_just_the_first() {
+    // `alias_text` denormalizes name + aliases so alias matching need not JSON-parse every
+    // node's frontmatter per query. The separator must not be NUL: SQLite's LIKE stops at
+    // an embedded NUL, which made every alias after the display name invisible to the
+    // narrowing filter — silently dropping the alias score with no test noticing.
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/hr.md",
+        "---\nid: hr\ntype: department\nname: Human Resources\naliases: [HR, People Ops]\n---\n# Human Resources\n\nOwns onboarding.\n",
+    )
+    .commit()
+    .build();
+
+    for query in ["human resources", "hr", "people ops"] {
+        let out = commands::search::run(&c.ctx(), query, None, None, None, false).unwrap();
+        assert!(
+            out.results.iter().any(|r| r.id == "department:hr"),
+            "query {query:?} must match via name or alias: {:?}",
+            out.results
+        );
+    }
+}
