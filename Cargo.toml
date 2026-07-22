@@ -2,7 +2,7 @@
 name = "vaire"
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Derived reference-graph index over a Markdown knowledge corpus, with a CLI and an MCP server"
 authors = ["Maarten van Ittersum"]
 license = "MIT"

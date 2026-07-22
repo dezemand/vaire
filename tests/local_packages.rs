@@ -185,6 +185,25 @@ fn without_a_configured_root_nothing_is_discovered() {
 }
 
 #[test]
+fn a_fully_linked_package_never_consults_the_root() {
+    let ws = Ws::new();
+    ws.add_package("acme-web", &["service"], &[]);
+    ws.add_package_named("know/acme-core", "acme-core", &["team"], &[]);
+    ws.link_to("acme-web", "acme-core", "know/acme-core");
+
+    // The root does not even exist. Nothing is missing, so it is never looked at — the
+    // steady state must not pay for a filesystem walk on every `vaire index`.
+    let out = satisfy(&ws, "acme-web", Some(&ws.dir.path().join("nowhere")));
+
+    assert!(out.linked.is_empty());
+    assert!(out.notes.is_empty());
+    assert!(
+        out.warnings.is_empty(),
+        "an unusable root is not even validated when nothing needs it: {out:?}"
+    );
+}
+
+#[test]
 fn satisfy_name_links_just_the_one_dependency() {
     let ws = Ws::new();
     ws.add_package("acme-web", &["service"], &[("acme-core", "^1")]);

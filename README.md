@@ -59,7 +59,7 @@ verify a manual download with:
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 
-**From source (Rust 1.85+)** — also the path for Intel macOS or arm64 Linux, which
+**From source (Rust 1.88+)** — also the path for Intel macOS or arm64 Linux, which
 have no prebuilt binary yet:
 
 ```bash

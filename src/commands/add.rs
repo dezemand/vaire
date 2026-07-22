@@ -84,17 +84,25 @@ pub fn run(
     let mut discovered = false;
     let mut note = None;
     if linked.is_none() {
-        let user = crate::userconfig::UserConfig::load()?;
-        let satisfied = discover::satisfy_name(&root, &name, user.packages.local.as_deref());
-        if let Some(dep) = satisfied.linked.first() {
-            linked = Some(dep.target.clone());
-            discovered = true;
-        } else {
-            note = satisfied
-                .notes
-                .get(&name)
-                .cloned()
-                .or_else(|| satisfied.warnings.first().cloned());
+        // The manifest is already written, so nothing past this point may fail the run —
+        // including an unreadable user config, which becomes a note like any other reason
+        // the dependency could not be wired.
+        match crate::userconfig::UserConfig::load() {
+            Ok(user) => {
+                let satisfied =
+                    discover::satisfy_name(&root, &name, user.packages.local.as_deref());
+                if let Some(dep) = satisfied.linked.first() {
+                    linked = Some(dep.target.clone());
+                    discovered = true;
+                } else {
+                    note = satisfied
+                        .notes
+                        .get(&name)
+                        .cloned()
+                        .or_else(|| satisfied.warnings.first().cloned());
+                }
+            }
+            Err(e) => note = Some(format!("could not read the user config: {e}")),
         }
     }
 

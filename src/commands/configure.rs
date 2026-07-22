@@ -169,17 +169,21 @@ pub fn run_interactive(home: &Path) -> Result<ConfigureOutput> {
     }
 }
 
-/// The local-packages branch of the interactive flow: one prompt, seeded with the current
-/// root. An empty answer clears the setting.
+/// The local-packages branch of the interactive flow: one prompt. An empty answer clears
+/// the setting, so the current value is shown as help rather than as a *default* — with a
+/// default, submitting an empty line returns that default and unsetting is impossible.
+/// Keeping the current value is Esc (which writes nothing at all).
 fn configure_local_packages_interactively(
     home: &Path,
     cfg: &UserConfig,
 ) -> Result<ConfigureOutput> {
-    let current = display_local(cfg).unwrap_or_default();
+    let help = match display_local(cfg) {
+        Some(current) => format!("currently {current} — blank clears it, Esc keeps it"),
+        None => "not set; blank leaves it unset".to_string(),
+    };
     let Some(answer) = cancellable(
-        Text::new("Local packages directory (blank to unset)")
-            .with_default(&current)
-            .with_help_message("where your local packages live; searched by declared name")
+        Text::new("Local packages directory")
+            .with_help_message(&help)
             .prompt(),
     )?
     else {

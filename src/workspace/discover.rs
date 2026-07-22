@@ -39,12 +39,20 @@ const MAX_DEPTH: usize = 4;
 /// separately; these are the heavy build/vendor trees that never contain a package.
 const SKIP: &[&str] = &["node_modules", "target", "vendor", "dist", "build", "venv"];
 
+/// How many directories one scan may visit. `MAX_DEPTH` bounds how *deep* the walk goes
+/// but not how *wide*, so a root pointed at something enormous (a home directory) would
+/// otherwise walk it all. Reaching this means the root is too broad to be useful, which
+/// is worth saying rather than silently paying for.
+const MAX_VISITED: usize = 10_000;
+
 /// The packages found under the local-packages root, indexed by their **declared** name.
 pub struct Scan {
     by_name: BTreeMap<String, Vec<PathBuf>>,
     /// Directories holding an unreadable `knowledge.toml` — surfaced so a malformed
     /// manifest doesn't look like an absent package.
     pub unreadable: Vec<String>,
+    /// The walk hit [`MAX_VISITED`] and stopped early, so a "not found" may be wrong.
+    pub truncated: bool,
 }
 
 /// The outcome of looking one name up in a [`Scan`].
@@ -64,8 +72,13 @@ pub fn scan(root: &Path) -> Scan {
     let mut unreadable = Vec::new();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
     let mut stack = vec![(root.to_path_buf(), 0usize)];
+    let mut truncated = false;
 
     while let Some((dir, depth)) = stack.pop() {
+        if seen.len() >= MAX_VISITED {
+            truncated = true;
+            break;
+        }
         let Ok(dir) = std::fs::canonicalize(&dir) else {
             continue;
         };
@@ -107,6 +120,7 @@ pub fn scan(root: &Path) -> Scan {
     Scan {
         by_name,
         unreadable,
+        truncated,
     }
 }
 
@@ -149,26 +163,16 @@ pub struct Satisfied {
 /// become visible once it is linked, so linking `acme-core` in one pass reveals whatever
 /// *it* depends on for the next. Nothing here is fatal — an unsatisfiable name keeps the
 /// caller's existing "not linked" reporting, with a note explaining what the root held.
+///
+/// The root is scanned **lazily**, on the first name that actually needs looking up: the
+/// steady state (every dependency already linked) is the common case and must not pay for
+/// a filesystem walk on every `vaire index`.
 pub fn satisfy(repo: &Repo, config: &Config, local_root: Option<&Path>) -> Satisfied {
     let mut out = Satisfied::default();
     let Some(root) = local_root else {
         return out;
     };
-    if !root.is_dir() {
-        out.warnings.push(format!(
-            "local-packages root {} does not exist — set it with `vaire configure local-packages <path>`",
-            root.display()
-        ));
-        return out;
-    }
-
-    let scan = scan(root);
-    for note in &scan.unreadable {
-        out.warnings.push(format!(
-            "skipped a package under {}: {note}",
-            root.display()
-        ));
-    }
+    let mut scanned: Option<Scan> = None;
 
     loop {
         let Ok(ws) = Workspace::new(repo, config) else {
@@ -183,7 +187,42 @@ pub fn satisfy(repo: &Repo, config: &Config, local_root: Option<&Path>) -> Satis
             if out.notes.contains_key(name) {
                 continue; // already decided this run; the scan will not change
             }
-            match satisfy_one(repo.root(), name, &scan, root) {
+            // Cheap check first: an entry that is already there (a real directory, or a
+            // link whose target resolves) is nobody's business here, and must not trigger
+            // a scan. `satisfy_one` re-checks — this only decides whether to walk.
+            if link::entry_state(&Repo::packages_dir_at(repo.root()).join(name))
+                == EntryState::Present
+            {
+                continue;
+            }
+            let scan = match &scanned {
+                Some(scan) => scan,
+                None => {
+                    // First name that genuinely needs the root: validate and walk it once.
+                    if !root.is_dir() {
+                        out.warnings.push(format!(
+                            "local-packages root {} does not exist — set it with `vaire configure local-packages <path>`",
+                            root.display()
+                        ));
+                        return out;
+                    }
+                    let scan = scan(root);
+                    for note in &scan.unreadable {
+                        out.warnings.push(format!(
+                            "skipped a package under {}: {note}",
+                            root.display()
+                        ));
+                    }
+                    if scan.truncated {
+                        out.warnings.push(format!(
+                            "stopped after {MAX_VISITED} directories under {} — narrow the local-packages root",
+                            root.display()
+                        ));
+                    }
+                    scanned.insert(scan)
+                }
+            };
+            match satisfy_one(repo.root(), name, scan, root) {
                 Outcome::Linked(dep) => {
                     out.linked.push(dep);
                     progress = true;
@@ -208,6 +247,10 @@ pub fn satisfy_name(pkg_root: &Path, name: &str, local_root: Option<&Path>) -> S
     let Some(root) = local_root else {
         return out;
     };
+    // Same laziness as `satisfy`: an entry that is already there needs no walk.
+    if link::entry_state(&Repo::packages_dir_at(pkg_root).join(name)) == EntryState::Present {
+        return out;
+    }
     if !root.is_dir() {
         out.warnings.push(format!(
             "local-packages root {} does not exist",
@@ -215,7 +258,14 @@ pub fn satisfy_name(pkg_root: &Path, name: &str, local_root: Option<&Path>) -> S
         ));
         return out;
     }
-    match satisfy_one(pkg_root, name, &scan(root), root) {
+    let scan = scan(root);
+    if scan.truncated {
+        out.warnings.push(format!(
+            "stopped after {MAX_VISITED} directories under {} — narrow the local-packages root",
+            root.display()
+        ));
+    }
+    match satisfy_one(pkg_root, name, &scan, root) {
         Outcome::Linked(dep) => out.linked.push(dep),
         Outcome::Note(note) => {
             out.notes.insert(name.to_string(), note);
