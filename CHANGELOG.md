@@ -25,9 +25,17 @@ package boundaries, with no registry and no network.
   recorded in the index (`nodes.package`, `edges.to_package`) and resolved through the
   *referencing* package's own `[dependencies]`, including `superseded_by` tombstones that
   hop packages.
+- **Local packages** — `vaire configure local-packages <dir>` records where your packages
+  live on this machine, and declared dependencies are then satisfied from there
+  automatically: a fresh clone is `vaire index`, with no per-checkout wiring step.
+  Packages are matched by the name their manifest **declares**, at any depth, so a
+  knowledge base nested inside a bigger repo is found like any other; an ambiguous name is
+  reported rather than guessed between, an explicit link always wins, and a broken link
+  heals. Where a package lives stays a machine setting — the committed manifest never
+  carries a path.
 - **Linked packages** — a dependency lives at `.vaire/packages/<name>` (npm-style
   symlink, per-checkout, never committed); `vaire add <pkg>[@^N] --link <path>` declares
-  and wires it. The index stays **federated**: every package keeps its own
+  and wires it explicitly. The index stays **federated**: every package keeps its own
   `.vaire/index.db`, so ids never collide and a dependency's embeddings are computed once
   for all consumers. `vaire index` refreshes the linked closure (`--no-deps` skips).
 - **All read commands cross packages** — `resolve`, `render`, `backlinks`, `refs`,

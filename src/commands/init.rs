@@ -82,10 +82,10 @@ fn migrate_legacy(legacy_text: &str, name: &str) -> Result<String> {
     // Legacy `scoped_types` was a behaviour gate; scoping is now data-driven and the list is a
     // lint policy. Preserve a non-empty list as the whitelist (its "only these types" intent);
     // an empty/absent list becomes the default (permit all), so drop it.
-    if let Some(scoped) = table.remove("scoped_types") {
-        if scoped.as_array().is_some_and(|a| !a.is_empty()) {
-            table.insert("scoped_types_whitelist".to_string(), scoped);
-        }
+    if let Some(scoped) = table.remove("scoped_types")
+        && scoped.as_array().is_some_and(|a| !a.is_empty())
+    {
+        table.insert("scoped_types_whitelist".to_string(), scoped);
     }
     // name/version are emitted explicitly at the top; drop any stray copies.
     table.remove("name");

@@ -14,9 +14,21 @@ never written back to the corpus.
 > **Status:** early (0.2). The CLI and on-disk shapes are settling; expect changes.
 
 Since 0.2, a corpus is a **knowledge package** (`knowledge.toml`), and packages can
-reference each other: link a dependency (`vaire add acme-core --link ../acme-core`) and
+reference each other: declare a dependency (`vaire add acme-core`) and
 `@acme-core/team:platform` resolves, searches, and lints across the boundary — locally,
 no registry needed. See [`examples/workspace/`](examples/workspace/).
+
+Tell Vairë where you keep your packages once, and declared dependencies wire themselves
+up — a fresh clone is just `vaire index`:
+
+```bash
+vaire configure local-packages ~/Documents/Knowledge
+```
+
+Packages are matched by the name their manifest **declares**, at any depth, so a knowledge
+base living inside a bigger repo is found like any other. Two packages declaring the same
+name are reported rather than guessed between, and `vaire add <pkg> --link <path>` still
+wires anything explicitly (it always wins).
 
 ## Install
 
@@ -47,7 +59,7 @@ verify a manual download with:
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 
-**From source (Rust 1.85+)** — also the path for Intel macOS or arm64 Linux, which
+**From source (Rust 1.88+)** — also the path for Intel macOS or arm64 Linux, which
 have no prebuilt binary yet:
 
 ```bash

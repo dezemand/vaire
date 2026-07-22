@@ -19,10 +19,12 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, value};
 
-use crate::config::{Config, is_caret_major, is_slug};
+use crate::config::{is_caret_major, is_slug};
 use crate::corpus::repo::Repo;
 use crate::error::{Result, VaireError};
 use crate::output::AddOutput;
+use crate::workspace::discover;
+use crate::workspace::link::{self, LinkError, LinkPlan};
 
 /// Add (or update) a dependency. `spec` is `<name>` or `<name>@<constraint>` (e.g.
 /// `acme-core`, `acme-core@^2`); `link` is the `--link <path>` target, resolved against
@@ -73,7 +75,36 @@ pub fn run(
 
     std::fs::write(&manifest, doc.to_string())?;
 
-    let linked = link_plan.map(commit_link).transpose()?;
+    let mut linked = link_plan.map(link::commit).transpose()?;
+
+    // No explicit `--link`: satisfy the dependency from the local-packages root, exactly
+    // as the ensure pass would. Declaring is what this command does; wiring is a
+    // convenience on top, so nothing here can fail the run — a name that cannot be found
+    // (or is ambiguous) comes back as a note.
+    let mut discovered = false;
+    let mut note = None;
+    if linked.is_none() {
+        // The manifest is already written, so nothing past this point may fail the run —
+        // including an unreadable user config, which becomes a note like any other reason
+        // the dependency could not be wired.
+        match crate::userconfig::UserConfig::load() {
+            Ok(user) => {
+                let satisfied =
+                    discover::satisfy_name(&root, &name, user.packages.local.as_deref());
+                if let Some(dep) = satisfied.linked.first() {
+                    linked = Some(dep.target.clone());
+                    discovered = true;
+                } else {
+                    note = satisfied
+                        .notes
+                        .get(&name)
+                        .cloned()
+                        .or_else(|| satisfied.warnings.first().cloned());
+                }
+            }
+            Err(e) => note = Some(format!("could not read the user config: {e}")),
+        }
+    }
 
     Ok(AddOutput {
         name,
@@ -81,101 +112,18 @@ pub fn run(
         config_path: manifest.display().to_string(),
         updated,
         linked,
+        discovered,
+        note,
     })
 }
 
-/// A fully-validated link, ready to commit: everything that can be *rejected* has been.
-struct LinkPlan {
-    entry: PathBuf,
-    /// The symlink target as it will be stored (relative to the packages dir when the
-    /// paths share a prefix — portable if the checkout and target move together).
-    stored: PathBuf,
-}
-
-/// Validate and stage a `--link`: canonicalize the target, require a package declaring
-/// `name` (identity is declared, never path-derived), prepare `.vaire/packages/` (with
-/// the derived-dir gitignore), and refuse a **real directory** at the entry (it may be
-/// installed content). All failures are usage errors (exit 2) — nothing written yet
-/// except derived dirs.
+/// Stage an explicit `--link`: shared validation ([`crate::workspace::link::plan`]) with
+/// this command's phrasing — every failure is a usage error (exit 2) naming the flag.
 fn plan_link(root: &Path, name: &str, path: &Path) -> Result<LinkPlan> {
-    let target = std::fs::canonicalize(path)
-        .map_err(|e| VaireError::Usage(format!("--link {}: {e}", path.display())))?;
-    let target_manifest = target.join("knowledge.toml");
-    if !target_manifest.is_file() {
-        return Err(VaireError::Usage(format!(
-            "--link {}: not a package (no knowledge.toml)",
-            path.display()
-        )));
-    }
-    let config = Config::load(&target_manifest)
-        .map_err(|e| VaireError::Usage(format!("--link {}: {e}", path.display())))?;
-    if config.name != name {
-        return Err(VaireError::Usage(format!(
-            "--link {}: that package declares name '{}', not '{name}' — identity is declared, never path-derived",
-            path.display(),
-            config.name
-        )));
-    }
-
-    let packages = Repo::prepare_packages_dir(root)?;
-    Repo::ensure_derived_gitignore(&Repo::prepare_derived_dir(root)?)?;
-    // Canonicalize so the relative computation sees the same prefix shape as the
-    // (already canonical) target — e.g. macOS's /var → /private/var.
-    let entry = packages.join(name);
-    if let Ok(meta) = std::fs::symlink_metadata(&entry)
-        && !meta.file_type().is_symlink()
-    {
-        return Err(VaireError::Usage(format!(
-            "{} exists and is a real directory (not a link) — refusing to replace it",
-            entry.display()
-        )));
-    }
-
-    let stored =
-        crate::workspace::relative_to(&target, &packages).unwrap_or_else(|| target.clone());
-    Ok(LinkPlan { entry, stored })
-}
-
-/// Commit a staged link: create the symlink at a temporary name, then rename over the
-/// entry — atomically replacing an existing symlink, so a reader never observes the
-/// entry missing.
-fn commit_link(plan: LinkPlan) -> Result<String> {
-    let tmp = plan.entry.with_file_name(format!(
-        ".{}.tmp-{}",
-        plan.entry.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
-    let _ = remove_symlink(&tmp);
-    symlink_dir(&plan.stored, &tmp)?;
-    // Windows cannot rename over an existing directory symlink; clear it first there.
-    #[cfg(windows)]
-    let _ = remove_symlink(&plan.entry);
-    if let Err(e) = std::fs::rename(&tmp, &plan.entry) {
-        let _ = remove_symlink(&tmp);
-        return Err(e.into());
-    }
-    Ok(plan.stored.display().to_string())
-}
-
-#[cfg(unix)]
-fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
-}
-
-#[cfg(windows)]
-fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_dir(target, link)
-}
-
-#[cfg(unix)]
-fn remove_symlink(link: &Path) -> std::io::Result<()> {
-    std::fs::remove_file(link)
-}
-
-/// Windows directory symlinks are directory entries — `remove_file` cannot delete them.
-#[cfg(windows)]
-fn remove_symlink(link: &Path) -> std::io::Result<()> {
-    std::fs::remove_dir(link)
+    link::plan(root, name, path).map_err(|e| match e {
+        LinkError::Target(m) => VaireError::Usage(format!("--link {}: {m}", path.display())),
+        LinkError::Entry(m) => VaireError::Usage(m),
+    })
 }
 
 /// Parse `<name>[@<constraint>]`; default constraint `^1`. Validates the name slug and the

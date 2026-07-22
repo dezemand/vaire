@@ -445,8 +445,10 @@ vaire index [--full] [--working-tree] [--re-embed] [--no-deps]
   top of a working-tree index, so it cannot inherit uncommitted rows. (Internally the index
   records whether it is a `committed` or `working-tree` snapshot; incremental requires a
   prior committed one.)
-- **Linked dependencies** (§6.5): after the current package builds, each package in the
-  linked closure gets its own index built/refreshed — with *its* manifest, repo, and
+- **Linked dependencies** (§6.5): a declared dependency that is not linked yet is first
+  satisfied from the local-packages root when one is configured (§6.6) — reported as a
+  `linked → <path>` line. Then each package in the linked closure gets its own index
+  built/refreshed — with *its* manifest, repo, and
   commit anchor, written into *its* `.vaire/` (the federated model, design.md §9;
   incremental per dependency; a dependency embedded by a different provider is fully
   rebuilt so no index mixes vector spaces). One output line per dependency; an unlinked
@@ -549,19 +551,24 @@ comments** (the manifest is authored, not generated). `^MAJOR` is the only legal
 constraint in place — idempotent. A malformed name or constraint is a usage error (exit `2`),
 caught before the manifest is touched. Needs the package root but not the index.
 
-`--link <path>` additionally creates (or replaces) the **`.vaire/packages/<name>`**
-symlink pointing at `<path>` (§6.5) — the local answer to "where does this dependency
-live". The target must be a package whose `knowledge.toml` declares that same `name`
-(usage error otherwise — identity is declared, never path-derived; a bad `--link` leaves
-the manifest untouched). Without `--link` the dependency is declared but unlinked — a
-first-class state: resolution errors name the exact `--link` command to run, and `vaire
-index` reports it as a warning row. The manifest never carries the path: the committed
-contract stays machine-independent, the link is per-checkout state under gitignored
-`.vaire/`. With `--link`, the JSON gains `"linked": "<stored target>"`:
+Declaring is the whole job; **wiring is a convenience on top** and never fails the
+command. Without `--link`, the dependency is satisfied from the local-packages root if it
+can be found there (§6.6) — the JSON then carries `"discovered": true`. If it cannot (no
+root configured, nothing declaring that name, or an ambiguous name), the dependency is
+declared but unlinked — a first-class state, reported as a `note` — and `vaire index` will
+try again.
+
+`--link <path>` instead wires it explicitly, creating (or replacing) the
+**`.vaire/packages/<name>`** symlink pointing at `<path>` (§6.5). The target must be a
+package whose `knowledge.toml` declares that same `name` (usage error otherwise — identity
+is declared, never path-derived; a bad `--link` leaves the manifest untouched). An explicit
+link always wins over discovery. The manifest never carries the path either way: the
+committed contract stays machine-independent, the link is per-checkout state under
+gitignored `.vaire/`.
 
 ```json
 { "name": "acme-core", "constraint": "^1", "config_path": "knowledge.toml", "updated": false,
-  "linked": "../../../acme-core" }
+  "linked": "/Users/you/Documents/Knowledge/acme-core", "discovered": true }
 ```
 
 ### 4.3 `vaire status`
@@ -875,15 +882,30 @@ vaire configure                       # interactive: pick a section, then guided
 vaire configure embeddings [--provider local|command|openai] [--model <m>]
                            [--dimensions <n>] [--command <cmd>]
                            [--api-key-stdin] [--api-url <url>]
+vaire configure local-packages [<path>] [--unset]
 ```
 
-- Bare `vaire configure` opens an interactive prompt (currently one section, **Embeddings**;
-  the section menu is there so future settings slot in without changing the UX). Cancelling
-  (Esc / Ctrl-C) exits cleanly and writes nothing.
+- Bare `vaire configure` opens an interactive prompt (sections: **Embeddings**, **Local
+  packages**). Cancelling (Esc / Ctrl-C) exits cleanly and writes nothing.
 - `vaire configure embeddings` sets the same settings non-interactively.
-- Non-secret settings (embedding provider, model, dimensions, command) → `config.toml`.
+- `vaire configure local-packages <path>` records where your local packages live (§6.6);
+  with no argument it reports the current setting, `--unset` clears it. The path is stored
+  canonical, and must exist (a typo is rejected here rather than surfacing later as a
+  dependency that cannot be found).
+- Non-secret settings (embedding provider, model, dimensions, command, local-packages
+  root) → `config.toml`.
 - Credentials (`--api-key-stdin`, `--api-url`) → `credentials.toml` (§6.3).
 - Only the flags you pass are changed; the rest are preserved.
+
+```toml
+# <config-home>/config.toml
+[embeddings]
+provider = "local"
+dimensions = 384
+
+[packages]
+local = "/Users/you/Documents/Knowledge"
+```
 
 The **config home** is `VAIRE_CONFIG_HOME` if set, else the platform config directory for
 `vaire` (`~/.config/vaire` on Linux, `~/Library/Application Support/vaire` on macOS,
@@ -919,6 +941,50 @@ same entries as links into a shared local cache resolved through a lockfile, cha
 nothing about how references resolve. Linked-dependency indexes live inside each linked
 package's own `.vaire/` (design.md §9, federated index) — `vaire index` refreshes them
 through the link; reads never build.
+
+### 6.6 Local packages — satisfying a declared dependency
+
+A manifest declares *what* a package depends on. **Where** that dependency lives is a
+property of this machine — one clone here, another there — so it is a user setting, never
+a manifest key. Point Vairë at the directory your packages live in:
+
+```bash
+vaire configure local-packages ~/Documents/Knowledge     # §6.4
+```
+
+With that set, a declared dependency with no `.vaire/packages/<name>` entry is satisfied
+automatically: the root is searched for a package **declaring** that name, and the link
+(§6.5) is materialized. A fresh clone needs no wiring step —
+
+```bash
+git clone git@github.com:acme/acme-web && cd acme-web
+vaire index          # links every declared dependency it can find, then builds
+```
+
+The rules:
+
+- **Matching is by declared name, at any depth.** Directory names are irrelevant, so a
+  knowledge base that is one component of a larger repo
+  (`~/Documents/Knowledge/platform-docs/docs/kb` declaring `acme-handbook`) is found like
+  any other package. The walk skips dotted directories and the usual build/vendor trees,
+  does not descend into a directory that is already a package, and is depth-capped.
+- **Ambiguity is reported, never guessed.** If two packages under the root declare one
+  name (a fork beside its original), the dependency stays unsatisfied and both paths are
+  named — link the one you want explicitly.
+- **Only gaps are filled.** An existing, resolvable entry is never rewritten, so an
+  explicit `--link` always wins. A *broken* entry is re-discovered, healing a package that
+  moved or was renamed.
+- **Links land in the run-root's `.vaire/packages/`**, never inside a dependency's
+  directory — a transitive dependency is resolved from there by the run-root fallback
+  (§6.5).
+- **Only commands that already write links discover**: `vaire add`, and the ensure pass of
+  `vaire index` / `vaire check`. A read command can never materialize a link.
+- Nothing here is fatal. An unsatisfiable name keeps its ordinary "not linked" reporting,
+  with a note saying what the root held. Unset (the default), no discovery happens at all.
+
+This is also the v0.3 seam: `vaire install` will populate the same entries from a fetched
+cache, and the same by-declared-name search is what locates a package inside a repository
+fetched from a registry or git remote.
 
 ## 7. Exit codes
 

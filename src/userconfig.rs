@@ -17,11 +17,26 @@ use serde::{Deserialize, Serialize};
 use crate::config::EmbeddingConfig;
 use crate::error::{Result, VaireError};
 
-/// The global user config. Currently just embeddings; `[registry]` auth lands later.
+/// The global user config: embeddings and where local packages live; `[registry]` auth
+/// lands later.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct UserConfig {
     pub embeddings: EmbeddingConfig,
+    pub packages: PackagesConfig,
+}
+
+/// Where packages live on **this machine** (cli.md §6.6) — a consumer setting, never part
+/// of a package manifest: the same dependency is one clone here and another there.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct PackagesConfig {
+    /// The local-packages root: a directory holding packages you have locally. Maintain
+    /// commands satisfy a declared dependency by finding the package **declaring** that
+    /// name underneath it (at any depth — a knowledge base inside a bigger repo counts)
+    /// and materializing the `.vaire/packages/<name>` link. `None` disables discovery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local: Option<PathBuf>,
 }
 
 impl UserConfig {
