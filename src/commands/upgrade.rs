@@ -301,6 +301,12 @@ fn download(agent: &ureq::Agent, url: &str, dest: &Path, tag: &str, target: &str
 /// A release with no `SHA256SUMS` (everything published before checksums existed) cannot
 /// be verified, so it proceeds — matching `install.sh`. A *present* file that lacks this
 /// asset, or disagrees with it, is a hard error.
+///
+/// That skip is a deliberate but *fail-open* concession, and worth closing once every
+/// supported release publishes sums: an adversary who can replace a release asset can
+/// usually also delete `SHA256SUMS`, which forces this path on an unattended self-update.
+/// The fix then is to require verification above some release floor rather than infer it
+/// from the file's presence.
 fn verify_checksum(
     agent: &ureq::Agent,
     src: &Source,
