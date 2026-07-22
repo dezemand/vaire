@@ -209,9 +209,10 @@ pub enum ConfigureSection {
         /// Command to run for the `command` provider.
         #[arg(long)]
         command: Option<String>,
-        /// API key for the provider. Stored in credentials.toml (owner-only), never the config file.
-        #[arg(long = "api-key")]
-        api_key: Option<String>,
+        /// Read an API key from standard input and store it in credentials.toml. This avoids
+        /// exposing it in shell history or process arguments.
+        #[arg(long = "api-key-stdin")]
+        api_key_stdin: bool,
         /// API base URL override. Stored in credentials.toml.
         #[arg(long = "api-url")]
         api_url: Option<String>,

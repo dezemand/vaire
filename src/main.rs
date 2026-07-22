@@ -4,6 +4,7 @@
 //! command, render its output (human or `--json`), and map the outcome to one of the
 //! documented exit codes (cli.md §7). All real work lives in the `vaire` library crate.
 
+use std::io::Read;
 use std::process::ExitCode as ProcExitCode;
 
 use vaire::cli::{Cli, Command, ConfigureSection};
@@ -54,7 +55,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 model,
                 dimensions,
                 command,
-                api_key,
+                api_key_stdin,
                 api_url,
             }) => {
                 let opts = commands::configure::ConfigureOpts {
@@ -62,7 +63,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                     model: model.clone(),
                     dimensions: *dimensions,
                     command: command.clone(),
-                    api_key: api_key.clone(),
+                    api_key: (*api_key_stdin).then(read_api_key_from_stdin).transpose()?,
                     api_url: api_url.clone(),
                 };
                 commands::configure::run(&home, opts)?
@@ -198,6 +199,20 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     }
 
     Ok(ExitCode::Success)
+}
+
+/// Read a non-empty API key without ever placing it in argv. A trailing newline is accepted
+/// for `printf ... | vaire configure embeddings --api-key-stdin` ergonomics.
+fn read_api_key_from_stdin() -> Result<String> {
+    let mut key = String::new();
+    std::io::stdin().read_to_string(&mut key)?;
+    let key = key.trim_end_matches(['\r', '\n']);
+    if key.is_empty() {
+        return Err(VaireError::Usage(
+            "--api-key-stdin requires a non-empty key on standard input".into(),
+        ));
+    }
+    Ok(key.to_string())
 }
 
 /// Write a command result to stdout — JSON or human text (cli.md §2.3).

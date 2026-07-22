@@ -801,8 +801,10 @@ Providers that need credentials (currently `openai`) resolve them with the prece
 §6.4):
 
 - `OPENAI_API_KEY` — required for `provider = "openai"`. Set it in the shell environment, or
-  via `vaire configure embeddings --api-key sk-…` (which writes `credentials.toml`).
+  pipe it to `vaire configure embeddings --api-key-stdin` (which writes
+  `credentials.toml` without putting the key in shell history or process arguments).
 - `OPENAI_BASE_URL` — optional; overrides the API endpoint (proxies / Azure-style gateways).
+  It must use HTTPS, except for an explicit loopback development endpoint.
 
 `credentials.toml` is a TOML `KEY = "value"` table written with `600` permissions (owner
 read/write only) on Unix. It lives in the user config home, never in a corpus, so secrets are
@@ -818,7 +820,7 @@ command has two forms:
 vaire configure                       # interactive: pick a section, then guided prompts
 vaire configure embeddings [--provider local|command|openai] [--model <m>]
                            [--dimensions <n>] [--command <cmd>]
-                           [--api-key <key>] [--api-url <url>]
+                           [--api-key-stdin] [--api-url <url>]
 ```
 
 - Bare `vaire configure` opens an interactive prompt (currently one section, **Embeddings**;
@@ -826,7 +828,7 @@ vaire configure embeddings [--provider local|command|openai] [--model <m>]
   (Esc / Ctrl-C) exits cleanly and writes nothing.
 - `vaire configure embeddings` sets the same settings non-interactively.
 - Non-secret settings (embedding provider, model, dimensions, command) → `config.toml`.
-- Secrets (`--api-key`, `--api-url`) → `credentials.toml` (§6.3).
+- Credentials (`--api-key-stdin`, `--api-url`) → `credentials.toml` (§6.3).
 - Only the flags you pass are changed; the rest are preserved.
 
 The **config home** is `VAIRE_CONFIG_HOME` if set, else the platform config directory for

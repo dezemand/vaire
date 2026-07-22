@@ -1,7 +1,7 @@
 //! `vaire configure` — set machine/consumer settings in the global user config (M2).
 //!
 //! Two surfaces over the same apply logic:
-//!   * `vaire configure embeddings [--provider … --api-key …]` — non-interactive; [`run`].
+//!   * `vaire configure embeddings [--provider … --api-key-stdin]` — non-interactive; [`run`].
 //!   * `vaire configure` (no section) — an interactive, guided prompt; [`run_interactive`].
 //!
 //! Machine/consumer settings (how *you* embed; later, registry auth) live in the per-user
@@ -218,7 +218,7 @@ fn cancellable<T>(r: std::result::Result<T, InquireError>) -> Result<Option<T>> 
         Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(None),
         Err(InquireError::NotTTY) => Err(VaireError::Usage(
             "`vaire configure` needs an interactive terminal; \
-             use `vaire configure embeddings --provider … --api-key …` instead"
+             use `vaire configure embeddings --provider … --api-key-stdin` instead"
                 .into(),
         )),
         Err(e) => Err(VaireError::Usage(format!("interactive prompt failed: {e}"))),

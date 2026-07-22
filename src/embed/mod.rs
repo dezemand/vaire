@@ -11,8 +11,9 @@
 
 pub mod cache;
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use crate::config::EmbeddingProvider;
 use crate::error::{Result, VaireError};
@@ -56,14 +57,18 @@ pub fn from_user_config(user: &UserConfig) -> Result<Box<dyn Embedder>> {
                         .into(),
                 )
             })?;
-            let base_url = crate::userconfig::credential("OPENAI_BASE_URL")
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let base_url = validate_base_url(
+                &crate::userconfig::credential("OPENAI_BASE_URL")
+                    .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+            )?;
             Ok(Box::new(OpenAiEmbedder {
                 api_key,
                 base_url,
                 model: emb.embedding_model.clone(),
                 dims,
-                agent: ureq::Agent::new(),
+                agent: ureq::AgentBuilder::new()
+                    .timeout(Duration::from_secs(30))
+                    .build(),
             }))
         }
     }
@@ -260,12 +265,13 @@ impl Embedder for OpenAiEmbedder {
             .map_err(|e| match e {
                 ureq::Error::Status(code, resp) => VaireError::Config(format!(
                     "openai embeddings HTTP {code}: {}",
-                    resp.into_string().unwrap_or_default().trim()
+                    read_response_limited(resp.into_reader())
+                        .unwrap_or_else(|_| "<response body unavailable or too large>".into())
+                        .trim()
                 )),
                 other => VaireError::Config(format!("openai embeddings request failed: {other}")),
             })?;
-        let text = response
-            .into_string()
+        let text = read_response_limited(response.into_reader())
             .map_err(|e| VaireError::Config(format!("openai embeddings: reading response: {e}")))?;
         let embedded = parse_embedding_response(&text, inputs.len())?;
         expand_with_empty_slots(texts, embedded, self.dims)
@@ -278,6 +284,42 @@ impl Embedder for OpenAiEmbedder {
     fn identity(&self) -> String {
         format!("openai:{}:{}", self.model, self.dims)
     }
+}
+
+const MAX_EMBEDDING_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Only HTTPS endpoints are accepted, except explicit loopback development endpoints. This
+/// prevents accidentally sending a bearer key and corpus text in cleartext to a proxy.
+fn validate_base_url(value: &str) -> Result<String> {
+    let url = url::Url::parse(value)
+        .map_err(|e| VaireError::Config(format!("invalid OPENAI_BASE_URL: {e}")))?;
+    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        return Err(VaireError::Config(
+            "OPENAI_BASE_URL must use https (http is allowed only for localhost)".into(),
+        ));
+    }
+    if url.host_str().is_none() {
+        return Err(VaireError::Config(
+            "OPENAI_BASE_URL must include a host".into(),
+        ));
+    }
+    Ok(value.trim_end_matches('/').to_string())
+}
+
+fn read_response_limited(mut reader: impl Read) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(MAX_EMBEDDING_RESPONSE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_EMBEDDING_RESPONSE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "response exceeds 10 MiB limit",
+        ));
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[derive(serde::Deserialize)]
@@ -419,6 +461,14 @@ mod tests {
         let vectors = parse_embedding_response(body, 2).unwrap();
         assert_eq!(vectors, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
         assert!(parse_embedding_response(body, 3).is_err());
+    }
+
+    #[test]
+    fn embedding_url_requires_https_except_loopback() {
+        assert!(validate_base_url("https://api.example/v1").is_ok());
+        assert!(validate_base_url("http://localhost:11434/v1").is_ok());
+        assert!(validate_base_url("http://api.example/v1").is_err());
+        assert!(validate_base_url("not a URL").is_err());
     }
 
     #[test]
