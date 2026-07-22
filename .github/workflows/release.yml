@@ -94,6 +94,15 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # Publish digests alongside the archives so the installers (and anyone auditing a
+      # download by hand) can verify what they fetched. Without this there is nothing to
+      # check a replaced release asset against.
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:

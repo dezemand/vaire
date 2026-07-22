@@ -97,6 +97,38 @@ tmp="$(mktemp -d 2>/dev/null || mktemp -d -t vaire)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 dl "$url" "$tmp/$asset" || die "download failed: $url"
+
+# --- verify ------------------------------------------------------------------
+# The release publishes SHA256SUMS next to the archives. Verify before extracting:
+# HTTPS authenticates the transport, not the artifact, so on its own it is no defence
+# against a replaced release asset. Set VAIRE_SKIP_CHECKSUM=1 to bypass deliberately.
+if [ "${VAIRE_SKIP_CHECKSUM:-0}" = "1" ]; then
+  info "  skipping checksum verification (VAIRE_SKIP_CHECKSUM=1)"
+else
+  sums_url="https://github.com/${REPO}/releases/download/${version}/SHA256SUMS"
+  if dl "$sums_url" "$tmp/SHA256SUMS" 2>/dev/null; then
+    # Exact filename match on field 2 (stripping sha256sum's binary-mode '*' marker), not a
+    # substring search — a sibling asset like "<asset>.sig" would otherwise also match.
+    expected="$(awk -v a="$asset" '{ sub(/^\*/, "", $2); if ($2 == a) { print $1; exit } }' "$tmp/SHA256SUMS")"
+    [ -n "$expected" ] || die "no checksum for $asset in SHA256SUMS"
+    if command -v sha256sum >/dev/null 2>&1; then
+      actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+      actual="$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
+    else
+      die "need sha256sum or shasum to verify the download (or set VAIRE_SKIP_CHECKSUM=1)"
+    fi
+    [ "$actual" = "$expected" ] || die "checksum mismatch for $asset
+  expected $expected
+  actual   $actual
+Refusing to install. This archive is not the one this release published."
+    info "  checksum ok"
+  else
+    # Releases published before SHA256SUMS existed have nothing to verify against.
+    info "  no SHA256SUMS published for $version — skipping verification"
+  fi
+fi
+
 tar -xzf "$tmp/$asset" -C "$tmp" || die "failed to extract $asset"
 
 # Archive contains a top-level directory ($stem) holding the binary.
