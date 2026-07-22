@@ -20,6 +20,7 @@ pub mod search;
 pub mod status;
 pub mod suggest;
 pub mod unresolved;
+pub mod upgrade;
 
 use std::path::PathBuf;
 

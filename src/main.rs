@@ -74,6 +74,12 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         return Ok(ExitCode::Success);
     }
 
+    // `upgrade` operates on the binary itself — corpus-independent, no discovery.
+    if let Command::Upgrade { version, check } = &cli.command {
+        emit(&commands::upgrade::run(version.as_deref(), *check)?, json);
+        return Ok(ExitCode::Success);
+    }
+
     // `add` edits the manifest's [dependencies] (and with --link, the package links);
     // it needs the package root but not the index, so it runs before `Ctx` is built
     // (like `init`/`configure`).
@@ -193,7 +199,11 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Deps => {
             emit(&commands::deps::run(&ctx)?, json);
         }
-        Command::Init { .. } | Command::Mcp | Command::Configure { .. } | Command::Add { .. } => {
+        Command::Init { .. }
+        | Command::Mcp
+        | Command::Configure { .. }
+        | Command::Add { .. }
+        | Command::Upgrade { .. } => {
             unreachable!("handled above")
         }
     }

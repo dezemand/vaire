@@ -559,6 +559,59 @@ impl Output for ConfigureOutput {
     }
 }
 
+// ---- upgrade (cli.md §4.5) --------------------------------------------------
+
+/// `vaire upgrade`: what release was resolved and what happened to the binary.
+#[derive(Debug, Serialize)]
+pub struct UpgradeOutput {
+    /// The running version (bare, e.g. `0.2.0`).
+    pub current: String,
+    /// The release version resolved or pinned (bare, e.g. `0.3.0` — the `v` prefix
+    /// exists only on the underlying git tag).
+    pub latest: String,
+    /// The release target triple this binary matches.
+    pub target: String,
+    pub up_to_date: bool,
+    /// `--check`: nothing was downloaded or written.
+    pub checked_only: bool,
+    /// Path the new binary was installed to (absent when nothing was installed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Output for UpgradeOutput {
+    fn render_human(&self) -> String {
+        let mut s = if let Some(path) = &self.installed {
+            format!(
+                "{} upgraded vaire {} → {} {}\n  installed: {}",
+                green("✓"),
+                self.current,
+                self.latest,
+                dim(&format!("({})", self.target)),
+                path,
+            )
+        } else if self.up_to_date {
+            format!(
+                "vaire {} is up to date {}",
+                self.current,
+                dim(&format!("(latest release: {})", self.latest)),
+            )
+        } else {
+            format!(
+                "vaire {} → {} available. Run `vaire upgrade` to install.",
+                self.current,
+                bold(&self.latest),
+            )
+        };
+        if let Some(note) = &self.note {
+            s.push_str(&format!("\n  {}", dim(&plain(note))));
+        }
+        s
+    }
+}
+
 // ---- render (rendered Markdown) --------------------------------------------
 
 /// `vaire render <id>`: the node's Markdown with frontmatter kept and wikilinks
