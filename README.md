@@ -89,8 +89,10 @@ vaire suggest "the logistics team"       # descriptor → ranked existing IDs
 ```
 
 While drafting, `vaire index --working-tree` indexes uncommitted edits so you can validate
-before committing. There's a runnable corpus in [`example/`](example/) — `cd example &&
-vaire --repo . index` and poke around.
+before committing. There are two runnable examples in [`examples/`](examples/) — a single
+package in [`examples/corpus/`](examples/corpus/) (`cd examples/corpus && vaire --repo .
+index` and poke around), and a three-package workspace in
+[`examples/workspace/`](examples/workspace/).
 
 ## The model
 

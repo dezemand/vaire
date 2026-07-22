@@ -1,22 +1,24 @@
-# Example corpus
+# Example corpus — one package, the model end to end
 
-A small, self-consistent knowledge corpus demonstrating the Vairë model
-([spec/design.md](../spec/design.md), [spec/cli.md](../spec/cli.md)). This file has no
-`id:`/`type:`, so it is **not** a node — it is just documentation.
+A small, self-consistent knowledge package demonstrating the Vairë model
+([spec/design.md](../../spec/design.md), [spec/cli.md](../../spec/cli.md)). This file has
+no `id:`/`type:`, so it is **not** a node — it is just documentation.
+
+For packages that reference *each other*, see [`../workspace/`](../workspace/).
 
 ## What's here
 
 ```
-.vaire/config.toml                     committed config (type vocabulary, globs, embeddings)
+knowledge.toml                            the package manifest (name, types, include/exclude)
 knowledge/entities/
-  people/{jane-doe,amir-khan}.md        person:…
+  people/{jane-doe,amir-khan}.md          person:…
   departments/{platform,logistics,hr}.md  department:…
-  methods/event-sourcing.md            method:…
-  systems/ingest-api.md                system:…
-  events/2026-kickoff.md               event:…
+  methods/event-sourcing.md               method:…
+  systems/ingest-api.md                   system:…
+  events/2026-kickoff.md                  event:…
 projects/atlas/2026_q2/
-  README.md                            project:atlas-2026-q2  (the project entity itself)
-  STATUS.md                            record:…
+  README.md                               project:atlas-2026-q2  (the project entity itself)
+  STATUS.md                               record:…
   decisions/2026-06-08-ingest-decision.md
   meeting-notes/2026-06-10-broker-sync.md
 ```
@@ -37,13 +39,13 @@ projects/atlas/2026_q2/
 
 ## Try it
 
-`vaire` finds the corpus root by walking up to a `.vaire/` directory (this folder has one),
-so you can index it in place. Run from this directory:
+A package is discovered by walking up to the nearest `knowledge.toml` (this folder has
+one), so you can index it in place. Run from this directory:
 
 ```bash
 vaire --repo . index                          # build .vaire/index.db
 vaire --repo . status
-vaire --repo . check                          # clean: no duplicate/dangling, no orphans
+vaire --repo . check
 vaire --repo . resolve department:hr          # → Human Resources
 vaire --repo . backlinks system:ingest-api    # who points at the Ingest API
 vaire --repo . refs record:2026-06-10-broker-sync --depth 2
@@ -52,5 +54,11 @@ vaire --repo . unresolved                     # the two [[?…]] loose ends
 
 Since this folder is not its own Git repo, `vaire` indexes the working tree directly and
 records `commit: null`. (Inside a real Git corpus, it would index the committed tree —
-commit-as-publish.) Everything resolves, so `vaire check` is clean; `vaire unresolved`
-reports exactly the two descriptors above.
+commit-as-publish.)
+
+**What `check` reports:** no violations — nothing duplicated, dangling, or orphaned — plus
+a set of `drift` **warnings**. Drift means a reference is linked inline in prose without
+being mirrored in that node's frontmatter edge list, which is exactly what the narrative
+text here does. It stays a warning because prose legitimately references more than the
+structured edges do; `--strict` promotes it to a failure if you want that policy.
+`vaire unresolved` reports exactly the two descriptors above.
