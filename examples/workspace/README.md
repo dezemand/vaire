@@ -6,9 +6,11 @@ Three packages referencing each other (cli.md §6.5, design.md §9): **acme-core
 (`wiki: "@acme-shared/wiki:home"`) so `vaire check` has something to catch, and a
 cross-package tombstone (`service:legacy` → `@acme-core/team:platform`).
 
-## Setup
+Each package's `knowledge.toml` already *declares* its dependencies — that part is
+committed. Where those dependencies live is per-checkout state under gitignored `.vaire/`,
+so that is the one thing to wire up here.
 
-Links are per-checkout state (never committed), so wire them up once:
+## Setup
 
 ```sh
 cd examples/workspace/acme-web
@@ -16,6 +18,11 @@ vaire add acme-core   --link ../acme-core
 vaire add acme-shared --link ../acme-shared
 vaire index                                  # builds this package + the linked closure
 ```
+
+`--link` names the sibling directories explicitly, which works with no configuration at
+all. If you keep your packages under a local-packages root (cli.md §6.6), copying the
+three directories there instead means `vaire index` alone wires and builds everything —
+the dependencies are already declared, so nothing else is needed.
 
 ## The v0.2.0 acceptance transcript (issue #2)
 

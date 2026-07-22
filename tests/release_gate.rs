@@ -102,6 +102,37 @@ fn the_shipped_example_workspace_is_usable() {
     );
 }
 
+/// The committed `examples/corpus/` must work as its README claims: index in place, no
+/// violations, drift warnings and exactly the two documented loose ends. The single-package
+/// counterpart to the workspace gate above — a shipped example that no longer does what its
+/// README says is a broken promise, not a stale doc.
+#[test]
+fn the_shipped_example_corpus_is_usable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/corpus");
+    copy_tree(&src, tmp.path());
+
+    let ctx = vaire::commands::Ctx::new(Some(tmp.path().to_path_buf()), None).unwrap();
+    commands::index::run(&ctx, false, false, false, false).unwrap();
+
+    let resolved = commands::resolve::run(&ctx, "department:hr").unwrap();
+    assert_eq!(resolved.frontmatter["name"], "Human Resources");
+
+    let (report, failed) = commands::check::run(&ctx, false, false, false).unwrap();
+    assert!(!failed, "no violations: {:?}", report.violations);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, vaire::index::check::Warning::Drift { .. })),
+        "the README documents drift warnings from the narrative inline links"
+    );
+
+    // The README names both loose ends; `vaire unresolved` must still be exactly those.
+    let unresolved = commands::unresolved::run(&ctx, None, None, false).unwrap();
+    assert_eq!(unresolved.count, 2, "{:?}", unresolved.unresolved);
+}
+
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {

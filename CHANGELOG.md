@@ -57,7 +57,10 @@ package boundaries, with no registry and no network.
   dependency ensure pass first, so it works from a cold clone.
 - **`vaire status`** — per-dependency rows: index freshness, commit lag, embedding
   provider (with an explicit note when vector search silently skips a mismatched dep).
-- `examples/workspace/` — a runnable three-package workspace exercising all of the above.
+- `examples/` — both runnable examples in one place: `corpus/` (the single-package model,
+  moved from the top-level `example/`) and `workspace/` (a three-package workspace
+  exercising all of the above). Each is built by a release-gate test, so a shipped example
+  cannot rot silently.
 
 ### Changed
 - **Index engine: `rusqlite`/FTS5 → Turso Database** (the Rust rewrite of SQLite), as a
