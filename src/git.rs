@@ -45,7 +45,14 @@ pub fn changed_files(repo_root: &Path, since: &str) -> Result<Option<Vec<String>
     require_commit_oid(since)?;
     let out = run(
         repo_root,
-        &["diff", "--name-only", "-z", "--end-of-options", since, "HEAD"],
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--end-of-options",
+            since,
+            "HEAD",
+        ],
     )?;
     if !out.status.success() {
         return Ok(None);

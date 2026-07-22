@@ -174,7 +174,10 @@ mod tests {
     fn masks_inline_code_spans_preserving_shape() {
         let line = "write `[[person:jane]]` here";
         let masked = mask_code_spans(line);
-        assert!(!masked.contains("[["), "the wikilink must not survive masking");
+        assert!(
+            !masked.contains("[["),
+            "the wikilink must not survive masking"
+        );
         assert!(masked.starts_with("write "));
         assert!(masked.ends_with(" here"));
         assert_eq!(masked.chars().count(), line.chars().count());

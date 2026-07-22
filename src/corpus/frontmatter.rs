@@ -356,8 +356,9 @@ mod robustness_tests {
         // Block-scalar content is indented, so a horizontal rule inside one looks exactly
         // like an indented `---`. Closing on it truncated the block and leaked the
         // remaining keys into the prose.
-        let doc = split("---\nid: x\ntype: note\ndescription: |\n  ---\n  more\nname: Foo\n---\nbody\n")
-            .expect("block scalar survives");
+        let doc =
+            split("---\nid: x\ntype: note\ndescription: |\n  ---\n  more\nname: Foo\n---\nbody\n")
+                .expect("block scalar survives");
         assert_eq!(
             doc.frontmatter.get("name").and_then(|v| v.as_str()),
             Some("Foo"),

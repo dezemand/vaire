@@ -601,7 +601,11 @@ fn a_full_rebuild_reuses_cached_vectors_for_unchanged_sections() {
     };
 
     c.build_with(&emb, Mode::Full);
-    assert_eq!(counter.swap(0, Ordering::Relaxed), 3, "cold build embeds all");
+    assert_eq!(
+        counter.swap(0, Ordering::Relaxed),
+        3,
+        "cold build embeds all"
+    );
 
     // A second full rebuild re-reads every file but must reuse the cached vectors.
     c.build_with(&emb, Mode::Full);

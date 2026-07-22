@@ -333,9 +333,9 @@ fn published_checksums_without_an_entry_for_this_asset_are_refused() {
     let src = source(&mock, dir.path(), "0.2.0");
 
     let err = upgrade::run_from(&src, None, false).expect_err("must refuse");
-    assert!(
-        err.to_string().contains("no entry for"),
-        "got: {err}"
+    assert!(err.to_string().contains("no entry for"), "got: {err}");
+    assert_eq!(
+        std::fs::read_to_string(&src.exe_path).unwrap(),
+        "old-binary"
     );
-    assert_eq!(std::fs::read_to_string(&src.exe_path).unwrap(), "old-binary");
 }
