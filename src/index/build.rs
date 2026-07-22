@@ -535,9 +535,12 @@ fn index_node(
     let hashes: Vec<[u8; 32]> = sections.iter().map(|s| cache::hash_text(&s.body)).collect();
 
     for (i, section) in sections.iter().enumerate() {
-        let vector = vectors
-            .get(&hashes[i])
-            .expect("every section vector was prepared before insertion");
+        let vector = vectors.get(&hashes[i]).ok_or_else(|| {
+            crate::error::VaireError::Config(format!(
+                "no prepared embedding vector for section at {}:{}",
+                node.path, section.line
+            ))
+        })?;
         cache_put(index, &hashes[i], vector)?;
         index.execute(
             "INSERT INTO sections(node_id, heading, line, body) VALUES(?1, ?2, ?3, ?4)",

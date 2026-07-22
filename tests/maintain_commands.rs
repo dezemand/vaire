@@ -302,10 +302,15 @@ fn full_build_batches_embeddings_across_files() {
     }
 
     let c = Corpus::empty();
-    for id in ["one", "two", "three"] {
+    for (id, body) in [
+        ("one", "first body"),
+        ("two", "second body"),
+        ("three", "third body"),
+        ("four", "first body"),
+    ] {
         c.add(
             &format!("knowledge/{id}.md"),
-            &format!("---\nid: {id}\ntype: method\n---\n# {id}\n"),
+            &format!("---\nid: {id}\ntype: method\n---\n# Shared\n\n{body}\n"),
         );
     }
     c.commit();
@@ -318,6 +323,8 @@ fn full_build_batches_embeddings_across_files() {
     };
     c.build_with(&embedder, Mode::Full);
 
+    // The fourth file reuses the first file's section body, so all three unique
+    // sections are embedded in one cross-file batch.
     assert_eq!(texts.load(Ordering::Relaxed), 3);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
