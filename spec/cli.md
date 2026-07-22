@@ -409,7 +409,8 @@ JSON is the nested tree: `{ "name", "version", "dependencies": [{ "name", "const
 ## 4. Maintain commands
 
 Not exposed over MCP. These read the working tree and write `.vaire/`; they never write the
-corpus files.
+corpus files. (`upgrade` is the exception with a different footprint: it touches only the
+`vaire` binary itself.)
 
 ### 4.1 `vaire index`
 
@@ -642,6 +643,41 @@ vaire init [path]
 - Exit `2` if the directory is already a corpus (`knowledge.toml` exists) — `init`
   never clobbers an existing manifest.
 
+### 4.5 `vaire upgrade`
+
+Self-update: replace the running binary with a released one. Corpus-independent (no
+discovery — it operates on the executable, not a package), and follows the **same
+contract as the installer scripts**: resolve the tag from the GitHub releases API,
+download the `vaire-<tag>-<target-triple>` asset for the triple this binary was
+compiled for, extract it with the system `tar`, and atomically swap it over the
+current executable.
+
+```
+vaire upgrade [<version>] [--check] [--json]
+```
+
+- Without arguments: resolve the latest release and install it if it is **newer**.
+  Same version → "up to date", exit `0`. A build *ahead* of the newest release (e.g.
+  built from source before the tag is cut) is never downgraded.
+- `<version>` (e.g. `v0.3.0`; the `v` is optional) pins the release to install — and an
+  explicit version **always** installs, even the currently running one, which is how a
+  corrupted install is repaired in place. Downgrading is allowed only this way,
+  explicitly.
+- `--check` reports what would happen (current vs latest, for this target triple) and
+  installs nothing.
+- The swap is atomic: the new binary is staged next to the executable (same
+  filesystem) and `rename`d over it, so the install is never half-written. On Windows
+  the running `.exe` is moved aside first (a leftover `vaire.exe.old` may remain until
+  the next upgrade removes it).
+- **Package-manager guard:** when the binary lives in a location a package manager
+  owns (`~/.cargo/bin`, a Homebrew Cellar, the Nix store), `upgrade` refuses and
+  prints that manager's own upgrade command. Vairë is not distributed through any
+  package manager yet; when it is, upgrades are that manager's job and this guard is
+  the seam that keeps self-update from fighting it.
+- Failures (API unreachable, no prebuilt asset for this platform, no write access to
+  the install directory) exit `1` with kind `upgrade`; the platform-asset message
+  points at `cargo install --path .` as the fallback, like `install.sh` does.
+
 ## 5. MCP server
 
 ```
@@ -660,6 +696,7 @@ MCP tools, one-to-one:
 | `search` | `vaire search <query>` |
 | `suggest` | `vaire suggest <descriptor>` |
 | `unresolved` | `vaire unresolved` |
+| `deps` | `vaire deps` |
 
 - Tool input schemas mirror each command's args and flags; tool results are the command's
   `--json` shape (§3) verbatim. There is no second serialization to maintain.

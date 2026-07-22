@@ -45,6 +45,14 @@ cargo install --path .        # installs the `vaire` binary
 # or: cargo build --release   # → target/release/vaire
 ```
 
+**Upgrading.** An installed binary updates itself to the latest release
+(`vaire upgrade --check` only reports; a cargo-installed binary is left to
+`cargo install`):
+
+```bash
+vaire upgrade
+```
+
 ## Quickstart
 
 ```bash
