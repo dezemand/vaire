@@ -46,6 +46,7 @@ pub enum ErrorKind {
     IdNotFound,
     CheckViolations,
     Dependency,
+    Upgrade,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +81,12 @@ pub enum VaireError {
     /// exact fix (usually a `vaire add <name> --link <path>` or `vaire index`).
     #[error("dependency error: {0}")]
     Dependency(String),
+
+    /// `vaire upgrade` could not complete — API/download failure, no release asset
+    /// for this platform, or the binary is managed by a package manager (the message
+    /// then names that manager's own upgrade command). Exit `1`.
+    #[error("upgrade error: {0}")]
+    Upgrade(String),
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -119,6 +126,7 @@ impl VaireError {
             VaireError::IdNotFound(_) => ErrorKind::IdNotFound,
             VaireError::CheckViolations(_) => ErrorKind::CheckViolations,
             VaireError::Dependency(_) => ErrorKind::Dependency,
+            VaireError::Upgrade(_) => ErrorKind::Upgrade,
             _ => ErrorKind::Generic,
         }
     }
