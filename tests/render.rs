@@ -65,3 +65,21 @@ fn render_unknown_id_is_exit_5() {
     let err = commands::render::run(&c.ctx(), "person:nobody").unwrap_err();
     assert_eq!(err.exit_code(), ExitCode::IdNotFound);
 }
+
+#[test]
+fn render_rejects_an_index_path_outside_the_package() {
+    let c = Corpus::empty();
+    c.add("knowledge/a.md", "---\nid: a\ntype: method\n---\n# A\n")
+        .commit()
+        .build();
+    let index = vaire::index::Index::open(&c.repo().index_db()).unwrap();
+    index
+        .execute(
+            "UPDATE nodes SET path = ?1 WHERE id = ?2",
+            ["../../outside.md", "method:a"],
+        )
+        .unwrap();
+
+    let err = commands::render::run(&c.ctx(), "method:a").unwrap_err();
+    assert_eq!(err.exit_code(), ExitCode::IndexCorrupt);
+}

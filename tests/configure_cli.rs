@@ -2,7 +2,7 @@
 //!
 //! The interactive `vaire configure` (no section) needs a TTY, so it is not exercised here;
 //! its apply logic is the same `configure::run` covered in `tests/configure.rs`. This file
-//! guards the CLI surface: the `embeddings` subcommand and the renamed `--api-key`/`--api-url`
+//! guards the CLI surface: the `embeddings` subcommand and the `--api-key-stdin`/`--api-url`
 //! flags reach the config home via `VAIRE_CONFIG_HOME`.
 
 use std::process::Command;
@@ -15,7 +15,7 @@ fn vaire() -> Command {
 fn configure_embeddings_writes_config_and_credentials() {
     let home = tempfile::tempdir().unwrap();
 
-    let status = vaire()
+    let mut child = vaire()
         .env("VAIRE_CONFIG_HOME", home.path())
         // Ensure no ambient key leaks in and masks the file we assert on.
         .env_remove("OPENAI_API_KEY")
@@ -28,13 +28,21 @@ fn configure_embeddings_writes_config_and_credentials() {
             "text-embedding-3-large",
             "--dimensions",
             "1024",
-            "--api-key",
-            "sk-cli-test",
+            "--api-key-stdin",
             "--api-url",
             "https://proxy.example/v1",
         ])
-        .status()
+        .stdin(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"sk-cli-test\n")
+        .unwrap();
+    let status = child.wait().unwrap();
     assert!(status.success());
 
     let config = std::fs::read_to_string(home.path().join("config.toml")).unwrap();

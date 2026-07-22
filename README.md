@@ -127,8 +127,8 @@ stored in the user config (see `spec/cli.md` §6.3):
 - `provider = "local"` — built-in, no network, no model file.
 - `provider = "command"` — shell out to any local model (JSON texts in, JSON vectors out).
 - `provider = "openai"` — the OpenAI embeddings API; reads `OPENAI_API_KEY` from the
-  environment or `credentials.toml` (`vaire configure embeddings --api-key …`). Sends corpus
-  text to OpenAI (data egress).
+  environment or `credentials.toml` (`printf '%s' "$OPENAI_API_KEY" | vaire configure
+  embeddings --api-key-stdin`). Sends corpus text to OpenAI (data egress).
 
 After switching models, `vaire index --re-embed` refreshes vectors without re-parsing.
 

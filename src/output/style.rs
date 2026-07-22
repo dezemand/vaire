@@ -9,6 +9,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static COLOR: AtomicBool = AtomicBool::new(false);
 
+/// Escape terminal control sequences in corpus-derived values while keeping ordinary text
+/// readable. Newlines are preserved for rendered Markdown; tabs are harmless whitespace.
+pub fn plain(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' | '\t' => out.push(c),
+            c if c.is_control() => out.extend(c.escape_default()),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Like [`plain`], but also represents whitespace controls visibly so callers that promise a
+/// one-line field cannot be split by corpus-controlled text.
+pub fn inline_text(s: &str) -> String {
+    plain(s).replace('\n', "\\n").replace('\t', "\\t")
+}
+
 /// Decide whether to colorize from the `--no-color` flag, the environment, and the tty.
 pub fn auto(no_color_flag: bool) -> bool {
     !no_color_flag && std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
@@ -23,10 +43,11 @@ fn on() -> bool {
 }
 
 fn wrap(code: &str, s: &str) -> String {
+    let s = plain(s);
     if on() {
         format!("\x1b[{code}m{s}\x1b[0m")
     } else {
-        s.to_string()
+        s
     }
 }
 
@@ -47,4 +68,19 @@ pub fn red(s: &str) -> String {
 }
 pub fn yellow(s: &str) -> String {
     wrap("33", s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{inline_text, plain};
+
+    #[test]
+    fn plain_escapes_terminal_controls() {
+        assert_eq!(
+            plain("ok\x1b]52;clipboard\x07"),
+            "ok\\u{1b}]52;clipboard\\u{7}"
+        );
+        assert_eq!(plain("line\n\tindent"), "line\n\tindent");
+        assert_eq!(inline_text("line\n\tindent"), "line\\n\\tindent");
+    }
 }

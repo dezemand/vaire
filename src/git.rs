@@ -24,6 +24,7 @@ pub fn head(repo_root: &Path) -> Result<Option<String>> {
 /// `status`'s `commits_behind_head` (cli.md §4.3). Best-effort: an unknown `since`
 /// (e.g. history rewritten) reports `0` rather than erroring.
 pub fn commits_ahead(repo_root: &Path, since: &str) -> Result<u32> {
+    require_commit_oid(since)?;
     let range = format!("{since}..HEAD");
     let out = run(repo_root, &["rev-list", "--count", &range])?;
     if !out.status.success() {
@@ -35,8 +36,27 @@ pub fn commits_ahead(repo_root: &Path, since: &str) -> Result<u32> {
 /// Files changed between `since` and HEAD — the input to an incremental reindex
 /// (cli.md §4.1). Paths are repo-root-relative.
 pub fn changed_files(repo_root: &Path, since: &str) -> Result<Vec<String>> {
-    let out = run(repo_root, &["diff", "--name-only", since, "HEAD"])?;
+    require_commit_oid(since)?;
+    let out = run(
+        repo_root,
+        &["diff", "--name-only", "--end-of-options", since, "HEAD"],
+    )?;
     Ok(lines(&out))
+}
+
+/// True for the full SHA-1/SHA-256 object IDs Git writes into index metadata.
+pub fn is_commit_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn require_commit_oid(value: &str) -> Result<()> {
+    if is_commit_oid(value) {
+        Ok(())
+    } else {
+        Err(crate::error::VaireError::IndexCorrupt(format!(
+            "invalid commit id in index metadata: {value:?}"
+        )))
+    }
 }
 
 /// Every file tracked at HEAD, repo-root-relative — the candidate set for a full build
@@ -182,4 +202,18 @@ fn lines(out: &Output) -> Vec<String> {
         .filter(|l| !l.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_commit_oid;
+
+    #[test]
+    fn commit_oid_validation_accepts_only_full_hex_ids() {
+        assert!(is_commit_oid(&"a".repeat(40)));
+        assert!(is_commit_oid(&"B".repeat(64)));
+        assert!(!is_commit_oid("--output=/tmp/file"));
+        assert!(!is_commit_oid(&"a".repeat(39)));
+        assert!(!is_commit_oid(&"z".repeat(40)));
+    }
 }

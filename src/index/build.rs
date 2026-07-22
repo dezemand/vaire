@@ -72,7 +72,7 @@ pub fn run(
 ) -> Result<IndexSummary> {
     let started = Instant::now();
     let root = repo.root();
-    let db_path = repo.index_db();
+    let db_path = Repo::prepare_derived_dir(root)?.join("index.db");
     let scanner = Scanner::from_config(config)?;
 
     // `--working-tree` forces the on-disk source regardless of Git state.
@@ -94,8 +94,11 @@ pub fn run(
     // index always restores to the last commit (it never inherits working-tree rows).
     let (last_commit, prior_source, schema_ok) = if committed && !force_full && db_path.exists() {
         let existing = Index::open(&db_path)?;
+        let last_commit = existing
+            .meta("last_indexed_commit")?
+            .filter(|commit| crate::git::is_commit_oid(commit));
         (
-            existing.meta("last_indexed_commit")?,
+            last_commit,
             existing.meta("index_source")?,
             existing.schema_version() == Some(crate::index::db::SCHEMA_VERSION),
         )
@@ -110,7 +113,7 @@ pub fn run(
     let index = if incremental {
         Index::open(&db_path)?
     } else {
-        recreate(&db_path)?
+        recreate(root, &db_path)?
     };
 
     let (to_index, to_delete) = if incremental {
@@ -281,7 +284,8 @@ fn prepare_embeddings(
 /// re-parse, no Git read — leaving nodes/edges and the commit anchor untouched.
 pub fn reembed(repo: &Repo, embedder: &dyn Embedder) -> Result<IndexSummary> {
     let started = Instant::now();
-    let index = Index::open(&repo.index_db())?; // exit 4 if not built yet
+    let db_path = Repo::prepare_derived_dir(repo.root())?.join("index.db");
+    let index = Index::open(&db_path)?; // exit 4 if not built yet
 
     // Snapshot the sections to re-embed.
     let sections: Vec<(String, u32, String)> = index.query_rows(
@@ -338,15 +342,13 @@ pub fn reembed(repo: &Repo, embedder: &dyn Embedder) -> Result<IndexSummary> {
 /// be created in a package that never ran `vaire init` (notably a linked dependency built
 /// by a consumer's ensure pass), and derived files must never show up as untracked noise
 /// in that package's repo.
-fn recreate(db_path: &Path) -> Result<Index> {
+fn recreate(root: &Path, db_path: &Path) -> Result<Index> {
+    let vaire_dir = Repo::prepare_derived_dir(root)?;
     for suffix in ["", "-wal", "-shm"] {
         let p = format!("{}{suffix}", db_path.display());
         let _ = std::fs::remove_file(p);
     }
-    if let Some(vaire_dir) = db_path.parent() {
-        std::fs::create_dir_all(vaire_dir)?;
-        Repo::ensure_derived_gitignore(vaire_dir)?;
-    }
+    Repo::ensure_derived_gitignore(&vaire_dir)?;
     Index::create_for_bulk_load(db_path)
 }
 

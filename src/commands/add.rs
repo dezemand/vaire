@@ -117,13 +117,10 @@ fn plan_link(root: &Path, name: &str, path: &Path) -> Result<LinkPlan> {
         )));
     }
 
-    let packages = Repo::packages_dir_at(root);
-    std::fs::create_dir_all(&packages)?;
-    Repo::ensure_derived_gitignore(&root.join(".vaire"))?;
+    let packages = Repo::prepare_packages_dir(root)?;
+    Repo::ensure_derived_gitignore(&Repo::prepare_derived_dir(root)?)?;
     // Canonicalize so the relative computation sees the same prefix shape as the
     // (already canonical) target — e.g. macOS's /var → /private/var.
-    let packages = std::fs::canonicalize(&packages)?;
-
     let entry = packages.join(name);
     if let Ok(meta) = std::fs::symlink_metadata(&entry)
         && !meta.file_type().is_symlink()

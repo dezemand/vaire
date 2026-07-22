@@ -44,7 +44,8 @@ pub fn run(ctx: &Ctx, id: &str) -> Result<RenderOutput> {
     let source_path = resolved.node.path.clone();
     let source_scope = resolved.node.id.scope().map(str::to_string);
 
-    let raw = std::fs::read_to_string(resolved.root.join(&source_path))?;
+    let path = crate::corpus::repo::Repo::safe_file_under(&resolved.root, &source_path)?;
+    let raw = std::fs::read_to_string(path)?;
     let (header, prose) = split_raw(&raw);
     let body = render_prose(&prose, &source_path, source_scope.as_deref(), ws, &owner);
 

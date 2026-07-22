@@ -15,7 +15,7 @@ use crate::index::build::IndexSummary;
 use crate::index::check::CheckReport;
 
 pub mod style;
-use style::{bold, cyan, dim, green, red, yellow};
+use style::{bold, cyan, dim, green, inline_text, plain, red, yellow};
 
 /// Initialize human-output coloring from the `--no-color` flag (also honors `NO_COLOR`
 /// and a non-tty stdout). Call once in `main` before rendering.
@@ -44,19 +44,19 @@ pub trait Output: Serialize {
 
 /// An aligned `  label:    value` line (label dimmed, padded to `width`).
 fn kv(out: &mut String, label: &str, width: usize, value: &str) {
-    let label = format!("{:<width$}", format!("{label}:"));
-    out.push_str(&format!("  {} {}\n", dim(&label), value));
+    let label = format!("{:<width$}", format!("{}:", plain(label)));
+    out.push_str(&format!("  {} {}\n", dim(&label), plain(value)));
 }
 
 /// `path:line`, dimmed — the clickable pointer the caller opens.
 fn loc(path: &str, line: u32) -> String {
-    dim(&format!("{path}:{line}"))
+    dim(&format!("{}:{line}", plain(path)))
 }
 
 /// Render one scalar/array JSON frontmatter value as a single line.
 fn json_inline(value: &serde_json::Value) -> String {
     match value {
-        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::String(s) => inline_text(s),
         serde_json::Value::Array(a) => a.iter().map(json_inline).collect::<Vec<_>>().join(", "),
         serde_json::Value::Null => String::new(),
         other => other.to_string(),
@@ -200,7 +200,7 @@ impl Output for SearchOutput {
                 out.push_str(&format!(
                     "      {}  {}\n",
                     dim(&format!("{}:{}", a.heading, a.line)),
-                    a.snippet,
+                    plain(&a.snippet),
                 ));
             }
         }
@@ -232,7 +232,7 @@ impl Output for UnresolvedOutput {
         let descs: Vec<String> = self
             .unresolved
             .iter()
-            .map(|u| format!("\"{}\"", u.descriptor))
+            .map(|u| format!("\"{}\"", plain(&u.descriptor)))
             .collect();
         let dw = col_width(descs.iter().map(String::as_str));
         for ((u, tag), desc) in self.unresolved.iter().zip(&tags).zip(&descs) {
@@ -449,14 +449,14 @@ impl Output for CheckReport {
             out.push_str(&format!(
                 "  {}  {}\n",
                 red(&format!("{:<13}", v.kind())),
-                v.detail()
+                plain(&v.detail())
             ));
         }
         for w in &self.warnings {
             out.push_str(&format!(
                 "  {}  {}\n",
                 yellow(&format!("{:<13}", w.kind())),
-                w.detail()
+                plain(&w.detail())
             ));
         }
         out.trim_end().to_string()
@@ -577,7 +577,7 @@ pub struct RenderOutput {
 
 impl Output for RenderOutput {
     fn render_human(&self) -> String {
-        self.markdown.clone()
+        plain(&self.markdown)
     }
 }
 
@@ -757,7 +757,7 @@ impl Output for SuggestOutput {
                 "  {}  {}  {}  {}\n",
                 dim(&format!("{:.2}", s.score)),
                 cyan(&format!("{:<w$}", s.id)),
-                s.name,
+                plain(&s.name),
                 dim(s.display_path.as_deref().unwrap_or(&s.path)),
             ));
         }

@@ -53,10 +53,11 @@ thiserror = "2"
 
 # Blocking HTTP for the OpenAI embedding provider (rustls TLS, no async runtime)
 ureq = "2"
+url = "2"
 directories = "6.0.0"
 
 # Interactive prompts for `vaire configure` (guided TUI-style wizard)
-inquire = "0.7"
+inquire = "0.9"
 
 [dev-dependencies]
 # Throwaway git-repo corpora for integration tests
