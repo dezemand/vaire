@@ -3,7 +3,7 @@
 The format loosely follows [Keep a Changelog](https://keepachangelog.com); this project
 uses [Semantic Versioning](https://semver.org).
 
-## [0.2.0] — unreleased
+## [0.2.0] — 2026-07-23
 
 The knowledge-package release: corpora become **packages** that reference each other on
 the local filesystem — `@acme-core/team:platform` resolves, searches, and lints across
@@ -73,7 +73,7 @@ package boundaries, with no registry and no network.
 - The index records which embedder produced its vectors (`embed_provider`); a provider
   switch forces a clean re-embed of dependency indexes instead of mixing vector spaces.
 
-## [0.1.0] — unreleased
+## [0.1.0] — 2026-06-16
 
 Initial release.
 
