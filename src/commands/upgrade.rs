@@ -96,9 +96,8 @@ pub fn run_from(src: &Source, version: Option<&str>, check: bool) -> Result<Upgr
                 up_to_date: true,
                 checked_only: check,
                 installed: None,
-                note: (!same).then(|| {
-                    "this build is newer than the latest release — nothing to do".into()
-                }),
+                note: (!same)
+                    .then(|| "this build is newer than the latest release — nothing to do".into()),
             });
         }
     }
@@ -116,7 +115,10 @@ pub fn run_from(src: &Source, version: Option<&str>, check: bool) -> Result<Upgr
     }
 
     let (asset, bin_name) = asset_names(&tag, &src.target);
-    let url = format!("{}/{REPO}/releases/download/{tag}/{asset}", src.download_base);
+    let url = format!(
+        "{}/{REPO}/releases/download/{tag}/{asset}",
+        src.download_base
+    );
 
     let scratch = Scratch::new()?;
     let archive = scratch.0.join(&asset);
@@ -165,7 +167,9 @@ fn managed_by(exe: &Path) -> Option<String> {
         return Some("this vaire is managed by Homebrew; upgrade with `brew upgrade vaire`".into());
     }
     if p.contains("/nix/store/") {
-        return Some("this vaire is managed by Nix; upgrade it through your Nix configuration".into());
+        return Some(
+            "this vaire is managed by Nix; upgrade it through your Nix configuration".into(),
+        );
     }
     None
 }
@@ -246,13 +250,7 @@ fn asset_names(tag: &str, target: &str) -> (String, &'static str) {
     }
 }
 
-fn download(
-    agent: &ureq::Agent,
-    url: &str,
-    dest: &Path,
-    tag: &str,
-    target: &str,
-) -> Result<()> {
+fn download(agent: &ureq::Agent, url: &str, dest: &Path, tag: &str, target: &str) -> Result<()> {
     let response = agent.get(url).call().map_err(|e| match e {
         ureq::Error::Status(404, _) => VaireError::Upgrade(format!(
             "release {tag} has no prebuilt binary for {target}; \
@@ -264,8 +262,11 @@ fn download(
         other => VaireError::Upgrade(format!("download failed: {other}")),
     })?;
     let mut file = fs::File::create(dest)?;
-    let copied = std::io::copy(&mut response.into_reader().take(MAX_ASSET_BYTES + 1), &mut file)
-        .map_err(|e| VaireError::Upgrade(format!("download failed mid-stream: {e}")))?;
+    let copied = std::io::copy(
+        &mut response.into_reader().take(MAX_ASSET_BYTES + 1),
+        &mut file,
+    )
+    .map_err(|e| VaireError::Upgrade(format!("download failed mid-stream: {e}")))?;
     if copied > MAX_ASSET_BYTES {
         return Err(VaireError::Upgrade(format!(
             "downloaded asset exceeds the {} MiB safety cap",
@@ -303,9 +304,9 @@ fn extract(dir: &Path, archive: &Path) -> Result<()> {
 /// into the executable's own directory (same filesystem), so the final step is a
 /// single atomic rename — the binary is never half-written.
 fn replace_exe(new_bin: &Path, exe: &Path) -> Result<()> {
-    let dir = exe
-        .parent()
-        .ok_or_else(|| VaireError::Upgrade(format!("cannot resolve parent of {}", exe.display())))?;
+    let dir = exe.parent().ok_or_else(|| {
+        VaireError::Upgrade(format!("cannot resolve parent of {}", exe.display()))
+    })?;
     let staged = dir.join(format!(".vaire-upgrade-{}", std::process::id()));
     let stage = |()| -> std::io::Result<()> {
         fs::copy(new_bin, &staged)?;
@@ -357,7 +358,8 @@ impl Scratch {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("vaire-upgrade-{}-{nanos}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vaire-upgrade-{}-{nanos}", std::process::id()));
         fs::create_dir_all(&dir)?;
         Ok(Scratch(dir))
     }

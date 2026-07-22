@@ -105,13 +105,19 @@ fn upgrades_to_the_latest_release_by_replacing_the_binary() {
 
     assert_eq!(out.latest, "v0.9.0");
     assert!(!out.up_to_date);
-    assert_eq!(out.installed.as_deref(), Some(src.exe_path.to_str().unwrap()));
+    assert_eq!(
+        out.installed.as_deref(),
+        Some(src.exe_path.to_str().unwrap())
+    );
     let installed = std::fs::read_to_string(&src.exe_path).unwrap();
     assert_eq!(installed, "new-binary v0.9.0");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&src.exe_path).unwrap().permissions().mode();
+        let mode = std::fs::metadata(&src.exe_path)
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o111, 0o111, "installed binary must be executable");
     }
 }
@@ -127,7 +133,10 @@ fn up_to_date_makes_no_network_download_and_touches_nothing() {
 
     assert!(out.up_to_date);
     assert!(out.installed.is_none());
-    assert_eq!(std::fs::read_to_string(&src.exe_path).unwrap(), "old-binary");
+    assert_eq!(
+        std::fs::read_to_string(&src.exe_path).unwrap(),
+        "old-binary"
+    );
 }
 
 #[test]
@@ -141,7 +150,10 @@ fn a_source_build_ahead_of_the_latest_release_is_not_downgraded() {
 
     assert!(out.up_to_date);
     assert!(out.note.is_some(), "explains why nothing happened");
-    assert_eq!(std::fs::read_to_string(&src.exe_path).unwrap(), "old-binary");
+    assert_eq!(
+        std::fs::read_to_string(&src.exe_path).unwrap(),
+        "old-binary"
+    );
 }
 
 #[test]
@@ -157,7 +169,10 @@ fn check_reports_the_available_upgrade_without_installing() {
     assert!(!out.up_to_date);
     assert_eq!(out.latest, "v0.9.0");
     assert!(out.installed.is_none());
-    assert_eq!(std::fs::read_to_string(&src.exe_path).unwrap(), "old-binary");
+    assert_eq!(
+        std::fs::read_to_string(&src.exe_path).unwrap(),
+        "old-binary"
+    );
 }
 
 #[test]
@@ -189,11 +204,17 @@ fn a_missing_platform_asset_names_the_target_and_suggests_source_build() {
     match err {
         VaireError::Upgrade(msg) => {
             assert!(msg.contains(TRIPLE), "names the target triple: {msg}");
-            assert!(msg.contains("cargo install"), "suggests source build: {msg}");
+            assert!(
+                msg.contains("cargo install"),
+                "suggests source build: {msg}"
+            );
         }
         other => panic!("expected upgrade error, got {other:?}"),
     }
-    assert_eq!(std::fs::read_to_string(&src.exe_path).unwrap(), "old-binary");
+    assert_eq!(
+        std::fs::read_to_string(&src.exe_path).unwrap(),
+        "old-binary"
+    );
 }
 
 #[test]
