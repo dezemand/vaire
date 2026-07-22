@@ -191,13 +191,35 @@ impl Repo {
     /// pass) or a first `vaire add --link` — and derived files must never show up as
     /// untracked noise in that package's repo.
     pub fn ensure_derived_gitignore(vaire_dir: &Path) -> std::io::Result<()> {
+        use std::io::Write;
+
         let gitignore = vaire_dir.join(".gitignore");
-        if !gitignore.exists() {
-            std::fs::write(
-                &gitignore,
-                "# Vairë — derived index, rebuildable from the corpus files.\n*\n!.gitignore\n",
-            )?;
+        match std::fs::symlink_metadata(&gitignore) {
+            // `symlink_metadata` sees both valid and dangling links. Never let a package
+            // redirect this write outside its derived directory.
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "refusing symlinked derived gitignore: {}",
+                        gitignore.display()
+                    ),
+                ));
+            }
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
         }
+        // `create_new` closes the check/create gap: if another entry appears after the
+        // metadata check, do not follow or overwrite it.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&gitignore)?;
+        file.write_all(
+            "# Vairë — derived index, rebuildable from the corpus files.\n*\n!.gitignore\n"
+                .as_bytes(),
+        )?;
         Ok(())
     }
 
@@ -236,5 +258,23 @@ mod tests {
         std::os::unix::fs::symlink(target.path(), dir.path().join(".vaire")).unwrap();
 
         assert!(Repo::prepare_derived_dir(dir.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn derived_gitignore_rejects_valid_and_dangling_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let vaire_dir = dir.path().join(".vaire");
+        std::fs::create_dir(&vaire_dir).unwrap();
+        let target = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(target.path().join("outside"), vaire_dir.join(".gitignore"))
+            .unwrap();
+        assert!(Repo::ensure_derived_gitignore(&vaire_dir).is_err());
+
+        std::fs::remove_file(vaire_dir.join(".gitignore")).unwrap();
+        std::fs::write(target.path().join("inside"), "x").unwrap();
+        std::os::unix::fs::symlink(target.path().join("inside"), vaire_dir.join(".gitignore"))
+            .unwrap();
+        assert!(Repo::ensure_derived_gitignore(&vaire_dir).is_err());
     }
 }

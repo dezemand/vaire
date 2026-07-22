@@ -15,7 +15,7 @@ use crate::index::build::IndexSummary;
 use crate::index::check::CheckReport;
 
 pub mod style;
-use style::{bold, cyan, dim, green, plain, red, yellow};
+use style::{bold, cyan, dim, green, inline_text, plain, red, yellow};
 
 /// Initialize human-output coloring from the `--no-color` flag (also honors `NO_COLOR`
 /// and a non-tty stdout). Call once in `main` before rendering.
@@ -56,7 +56,7 @@ fn loc(path: &str, line: u32) -> String {
 /// Render one scalar/array JSON frontmatter value as a single line.
 fn json_inline(value: &serde_json::Value) -> String {
     match value {
-        serde_json::Value::String(s) => plain(s),
+        serde_json::Value::String(s) => inline_text(s),
         serde_json::Value::Array(a) => a.iter().map(json_inline).collect::<Vec<_>>().join(", "),
         serde_json::Value::Null => String::new(),
         other => other.to_string(),

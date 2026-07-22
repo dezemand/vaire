@@ -23,6 +23,12 @@ pub fn plain(s: &str) -> String {
     out
 }
 
+/// Like [`plain`], but also represents whitespace controls visibly so callers that promise a
+/// one-line field cannot be split by corpus-controlled text.
+pub fn inline_text(s: &str) -> String {
+    plain(s).replace('\n', "\\n").replace('\t', "\\t")
+}
+
 /// Decide whether to colorize from the `--no-color` flag, the environment, and the tty.
 pub fn auto(no_color_flag: bool) -> bool {
     !no_color_flag && std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
@@ -66,7 +72,7 @@ pub fn yellow(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::plain;
+    use super::{inline_text, plain};
 
     #[test]
     fn plain_escapes_terminal_controls() {
@@ -75,5 +81,6 @@ mod tests {
             "ok\\u{1b}]52;clipboard\\u{7}"
         );
         assert_eq!(plain("line\n\tindent"), "line\n\tindent");
+        assert_eq!(inline_text("line\n\tindent"), "line\\n\\tindent");
     }
 }

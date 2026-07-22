@@ -204,8 +204,17 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
 /// Read a non-empty API key without ever placing it in argv. A trailing newline is accepted
 /// for `printf ... | vaire configure embeddings --api-key-stdin` ergonomics.
 fn read_api_key_from_stdin() -> Result<String> {
+    const MAX_API_KEY_BYTES: u64 = 16 * 1024;
+
     let mut key = String::new();
-    std::io::stdin().read_to_string(&mut key)?;
+    std::io::stdin()
+        .take(MAX_API_KEY_BYTES + 1)
+        .read_to_string(&mut key)?;
+    if key.len() as u64 > MAX_API_KEY_BYTES {
+        return Err(VaireError::Usage(
+            "--api-key-stdin accepts at most 16 KiB".into(),
+        ));
+    }
     let key = key.trim_end_matches(['\r', '\n']);
     if key.is_empty() {
         return Err(VaireError::Usage(

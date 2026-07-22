@@ -26,6 +26,8 @@ jobs:
             target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
@@ -52,7 +54,8 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_TARGET: ${{ matrix.target }}
         run: |
-          staging="vaire-${RELEASE_TAG}-${RELEASE_TARGET}"
+          safe_tag="${RELEASE_TAG//\//-}"
+          staging="vaire-${safe_tag}-${RELEASE_TARGET}"
           mkdir "$staging"
           cp "target/${{ matrix.target }}/release/vaire" "$staging/"
           cp README.md LICENSE CHANGELOG.md "$staging/"
@@ -66,7 +69,8 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_TARGET: ${{ matrix.target }}
         run: |
-          $staging = "vaire-$env:RELEASE_TAG-$env:RELEASE_TARGET"
+          $safeTag = $env:RELEASE_TAG -replace '/', '-'
+          $staging = "vaire-$safeTag-$env:RELEASE_TARGET"
           New-Item -ItemType Directory -Path $staging | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/vaire.exe" $staging
           Copy-Item README.md, LICENSE, CHANGELOG.md $staging

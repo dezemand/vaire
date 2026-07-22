@@ -18,11 +18,6 @@ use crate::output::InitOutput;
 const DEFAULT_TYPES: &str =
     r#"["person", "department", "method", "system", "event", "record", "project"]"#;
 
-/// `.vaire/.gitignore`: ignore everything derived (the index), keep only this file. The
-/// committed manifest now lives at the root (`knowledge.toml`), not under `.vaire/`.
-const GITIGNORE: &str =
-    "# Vairë — derived index, rebuildable from the corpus files.\n*\n!.gitignore\n";
-
 pub fn run(path: Option<&Path>) -> Result<InitOutput> {
     let root = path.unwrap_or_else(|| Path::new("."));
     let manifest = root.join("knowledge.toml");
@@ -50,7 +45,7 @@ pub fn run(path: Option<&Path>) -> Result<InitOutput> {
     std::fs::write(&manifest, body)?;
 
     // `.vaire/.gitignore` keeps the derived index untracked.
-    std::fs::write(vaire_dir.join(".gitignore"), GITIGNORE)?;
+    Repo::ensure_derived_gitignore(&vaire_dir)?;
 
     // Set the migrated legacy config aside so it is not re-migrated or confused for live.
     if migrated {

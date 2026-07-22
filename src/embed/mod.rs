@@ -265,9 +265,11 @@ impl Embedder for OpenAiEmbedder {
             .map_err(|e| match e {
                 ureq::Error::Status(code, resp) => VaireError::Config(format!(
                     "openai embeddings HTTP {code}: {}",
-                    read_response_limited(resp.into_reader())
-                        .unwrap_or_else(|_| "<response body unavailable or too large>".into())
-                        .trim()
+                    crate::output::style::plain(
+                        read_response_limited(resp.into_reader())
+                            .unwrap_or_else(|_| "<response body unavailable or too large>".into())
+                            .trim()
+                    )
                 )),
                 other => VaireError::Config(format!("openai embeddings request failed: {other}")),
             })?;
@@ -293,7 +295,12 @@ const MAX_EMBEDDING_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
 fn validate_base_url(value: &str) -> Result<String> {
     let url = url::Url::parse(value)
         .map_err(|e| VaireError::Config(format!("invalid OPENAI_BASE_URL: {e}")))?;
-    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    let loopback = match url.host() {
+        Some(url::Host::Domain("localhost")) => true,
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        _ => false,
+    };
     if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
         return Err(VaireError::Config(
             "OPENAI_BASE_URL must use https (http is allowed only for localhost)".into(),
@@ -467,6 +474,7 @@ mod tests {
     fn embedding_url_requires_https_except_loopback() {
         assert!(validate_base_url("https://api.example/v1").is_ok());
         assert!(validate_base_url("http://localhost:11434/v1").is_ok());
+        assert!(validate_base_url("http://[::1]:11434/v1").is_ok());
         assert!(validate_base_url("http://api.example/v1").is_err());
         assert!(validate_base_url("not a URL").is_err());
     }
