@@ -31,6 +31,11 @@ pub enum Violation {
         path: String,
         line: u32,
     },
+    /// A declared dependency that is unavailable — not linked, a broken link, or a name
+    /// mismatch — so its references cannot be verified at all. Reported once per
+    /// dependency; its edges are skipped by the dangling pass (no spam). The note
+    /// carries the exact fix (cli.md §6.5).
+    MissingDependency { package: String, note: String },
 }
 
 impl Violation {
@@ -40,6 +45,7 @@ impl Violation {
             Violation::DuplicateId { .. } => "duplicate_id",
             Violation::DanglingRef { .. } => "dangling_ref",
             Violation::UndeclaredImport { .. } => "undeclared_import",
+            Violation::MissingDependency { .. } => "missing_dependency",
         }
     }
 
@@ -63,6 +69,9 @@ impl Violation {
                 line,
             } => {
                 format!("{from} → {to}  package '{package}' not in [dependencies]  {path}:{line}")
+            }
+            Violation::MissingDependency { package, note } => {
+                format!("'{package}' unavailable — {note}")
             }
         }
     }
@@ -121,6 +130,17 @@ pub enum Warning {
         path: String,
         reason: String,
     },
+    /// A declared dependency no reference ever uses (packages.md §8: unused). Pure
+    /// manifest + edge-table check.
+    UnusedDependency { package: String },
+    /// A linked dependency whose declared MAJOR falls outside this package's `^N`
+    /// constraint. Surfaced only — version *enforcement* is explicitly out of scope for
+    /// v0.2 (issue #2 cut line).
+    DependencyVersionMismatch {
+        package: String,
+        constraint: String,
+        version: String,
+    },
 }
 
 impl Warning {
@@ -132,6 +152,8 @@ impl Warning {
             Warning::UnknownType { .. } => "unknown_type",
             Warning::ScopedTypeNotPermitted { .. } => "scoped_type_not_permitted",
             Warning::UnreferenceableId { .. } => "unreferenceable_id",
+            Warning::UnusedDependency { .. } => "unused_dependency",
+            Warning::DependencyVersionMismatch { .. } => "dependency_version_mismatch",
         }
     }
 
@@ -161,6 +183,18 @@ impl Warning {
             }
             Warning::UnreferenceableId { id, path, reason } => {
                 format!("{id}  no reference can address this id ({reason})  {path}")
+            }
+            Warning::UnusedDependency { package } => {
+                format!("'{package}' is declared but never referenced")
+            }
+            Warning::DependencyVersionMismatch {
+                package,
+                constraint,
+                version,
+            } => {
+                format!(
+                    "'{package}' declares version {version}, outside this package's {constraint}"
+                )
             }
         }
     }
@@ -422,6 +456,12 @@ fn candidate_type(value: &str) -> Option<NodeType> {
         return None;
     }
     let id: NodeId = v.parse().ok()?;
+    // A cross-package candidate is classified by its OWNING package's vocabulary, never
+    // this one's (same rule as the edge gate in build.rs) — the resolution lints judge
+    // it instead.
+    if id.package().is_some() {
+        return None;
+    }
     Some(id.node_type)
 }
 

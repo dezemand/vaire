@@ -105,6 +105,9 @@ pub enum Command {
         local: bool,
     },
 
+    /// Print the resolved local dependency tree (live link inspection; no index needed).
+    Deps,
+
     /// Every unresolved reference ([[?...]]) currently in the corpus.
     Unresolved {
         #[arg(long = "type")]
@@ -160,6 +163,10 @@ pub enum Command {
         /// Reindex the working tree first, then check uncommitted edits.
         #[arg(long)]
         working_tree: bool,
+        /// Skip the linked-dependency ensure pass (resolution lints then judge the
+        /// dependency indexes as-is).
+        #[arg(long = "no-deps")]
+        no_deps: bool,
     },
 
     /// Report index state.

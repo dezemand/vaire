@@ -22,7 +22,7 @@ use crate::output::Output;
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// The read tools, mapped 1:1 to CLI commands (cli.md §5 table).
-pub const READ_TOOLS: [&str; 7] = [
+pub const READ_TOOLS: [&str; 8] = [
     "resolve",
     "render",
     "backlinks",
@@ -30,6 +30,7 @@ pub const READ_TOOLS: [&str; 7] = [
     "search",
     "suggest",
     "unresolved",
+    "deps",
 ];
 
 /// Run the STDIO MCP server until the client disconnects (EOF on stdin).
@@ -139,6 +140,7 @@ pub fn call_tool(ctx: &Ctx, name: &str, args: &Value) -> std::result::Result<Val
             opt_bool(args, "all_packages"),
         )
         .map(|o| o.to_json()),
+        "deps" => commands::deps::run(ctx).map(|o| o.to_json()),
         other => return Err(format!("unknown tool: {other}")),
     };
 
@@ -238,6 +240,11 @@ pub fn tools_list() -> Value {
                     "all_packages": { "type": "boolean", "description": "Also list linked dependencies' loose ends (default: this package only)" }
                 }
             }
+        },
+        {
+            "name": "deps",
+            "description": "The resolved local dependency tree (linked packages; live link inspection, no index needed).",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ])
 }

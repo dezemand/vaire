@@ -104,14 +104,21 @@ references: [method:event-sourcing, system:ingest-api]
 
 ## References
 
-References are **IDs, never bare display names.** Four forms:
+References are **IDs, never bare display names.** Five forms:
 
 ```
 [[person:jane-doe]]                      resolved (ID known)
 [[person:jane-doe|Jane]]                 resolved, with display text
+[[@acme-core/team:platform]]             cross-package (the target lives in a dependency)
 [[?person: someone from logistics]]      unresolved (type hint + descriptor)
 [[?: the broker thing]]                  unresolved, type unknown
 ```
+
+A **cross-package** reference (`@<package>/type:id`) must name a package declared in this
+package's `knowledge.toml` `[dependencies]` (add one with `vaire add <pkg> --link <path>`).
+In frontmatter it must be **quoted** — `@` is a YAML reserved indicator:
+`owner: "@acme-core/team:platform"`. Unresolved `[[?...]]` forms never carry a package (a
+descriptor's package is unknown by definition).
 
 **The rule:** a `?` immediately after `[[` means **unresolved** — everything after the
 colon is a *descriptor* (what you saw), never an ID, and never a graph edge. No `?` means

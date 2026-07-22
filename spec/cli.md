@@ -380,6 +380,32 @@ JSON:
 `score` is an opaque relative rank (an exact `name`/alias match outranks a token-subset
 match, both outrank a prose-only hit).
 
+### 3.8 `vaire deps`
+
+The resolved local dependency tree — what each member's links actually point at.
+
+```
+vaire deps [--json]
+```
+
+- Pure **live link inspection** (§6.5): no index needed, so it is a safe first command in
+  a fresh workspace. Always exits `0` — reporting is its job; erroring is `vaire check`'s.
+- Each member's own dependencies resolve through *its* manifest and links (the same
+  (source package, dependency name) keying as reference resolution). Cycles are annotated
+  once (`(cycle)`) and not descended into; an unavailable dependency shows `MISSING` with
+  the exact fix; a resolved version whose MAJOR falls outside the `^N` constraint is
+  marked (surfaced only — enforcement is v0.3).
+
+```
+acme-web 1.0.0
+├── acme-core ^1 → ../acme-core  (1.0.0)
+│   └── acme-web ^1 → .  (1.0.0)  (cycle)
+└── acme-shared ^1 → ../acme-shared  (1.0.0)
+```
+
+JSON is the nested tree: `{ "name", "version", "dependencies": [{ "name", "constraint",
+"version", "resolved", "satisfied", "cycle"?, "note"?, "dependencies": […] }] }`.
+
 ## 4. Maintain commands
 
 Not exposed over MCP. These read the working tree and write `.vaire/`; they never write the
@@ -441,7 +467,7 @@ Run the integrity guards that ID-based discovery enables. Reads the index; exits
 if any violation is found, so it works as a pre-commit hook or CI gate.
 
 ```
-vaire check [--strict] [--working-tree] [--json]
+vaire check [--strict] [--working-tree] [--no-deps] [--json]
 ```
 
 `--working-tree` reindexes from the working tree first (as `vaire index --working-tree`),
@@ -450,11 +476,15 @@ so the checks see uncommitted edits — the agent's edit→validate loop without
 Checks:
 
 - **Duplicate IDs** — two nodes sharing one `id:` (the duplicate-entity guard).
-- **Dangling references** — a non-`?` *local* reference whose target ID is not a node.
-  (Cross-package targets are excluded — they aren't resolvable until workspace resolution;
-  `undeclared_import` guards them instead.)
+- **Dangling references** — a non-`?` reference whose target is not a node: local, or —
+  since M5 — cross-package (`@pkg/type:id` whose target, after tombstone-following in the
+  owning package's context, does not exist). Existence-based, so the dependency's own
+  `types` vocabulary is irrelevant.
 - **Undeclared import** — an `@pkg/…` reference whose package is not in the manifest
   `[dependencies]` (packages.md §8). A pure table check — no cross-package resolution needed.
+- **Missing dependency** — a *declared* dependency that is unavailable (not linked,
+  broken link, name mismatch — cli.md §6.5). Reported **once per dependency** with the
+  exact fix; its edges are skipped by the dangling pass (no spam).
 - **Frontmatter/inline drift** — a resolved reference linked **inline** whose target is
   not also in the frontmatter edge list (the actionable "declare it" direction). Advisory,
   since narrative inline links legitimately exceed the structured edge list — a *warning*,
@@ -462,10 +492,19 @@ Checks:
 - **Orphans** — nodes with no inbound or outbound edges. A warning.
 - **Unreferenceable id** — a node whose declared `id`/scope falls outside the reference
   grammar (design.md §6), so nothing can address it. The node still indexes. A warning.
+- **Unused dependency** — declared in `[dependencies]` but never referenced. A warning.
+- **Version mismatch** — a linked dependency whose declared MAJOR falls outside this
+  package's `^N`. A warning — *surfaced only*; version enforcement is explicitly v0.3.
 
-Duplicate IDs, dangling references, and undeclared imports are violations. Orphans, drift,
-and unreferenceable ids are warnings; `--strict` promotes them to failures. Exit `0` clean,
+Duplicate IDs, dangling references, undeclared imports, and missing dependencies are
+violations. The rest are warnings; `--strict` promotes them to failures. Exit `0` clean,
 `6` on any violation (or any warning under `--strict`).
+
+With linked dependencies the run starts with the same **ensure pass** as `vaire index`
+(near-no-op when fresh; `--no-deps` skips it), so the resolution lints judge commit-fresh
+dependency indexes — a cold clone can run `vaire check` first. The dependency *cycle*
+between packages terminates structurally: the lints iterate this package's edge table plus
+point lookups, never a graph traversal.
 
 JSON:
 
@@ -481,9 +520,10 @@ JSON:
 }
 ```
 
-`kind` is one of `duplicate_id`, `dangling_ref`, `undeclared_import` (violations), `drift`,
-`orphan`, `frontmatter_wikilink`, `unknown_type`, `unreferenceable_id`,
-`scoped_type_not_permitted` (warnings). `unknown_type` flags a frontmatter value that matches the reference `target`
+`kind` is one of `duplicate_id`, `dangling_ref`, `undeclared_import`, `missing_dependency`
+(violations), `drift`, `orphan`, `frontmatter_wikilink`, `unknown_type`,
+`unreferenceable_id`, `scoped_type_not_permitted`, `unused_dependency`,
+`dependency_version_mismatch` (warnings). `unknown_type` flags a frontmatter value that matches the reference `target`
 grammar (`field: team:alpha`) whose type isn't in `types` — it was *ignored* rather than
 made an edge, so the warning surfaces the silent drop (declare the type, or quote the value
 as a string). Identification is by shape (design.md §6), so a URL, a time, or a colon in a

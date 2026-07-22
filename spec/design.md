@@ -550,8 +550,9 @@ depth. The full command surface, flags, output shapes, and exit codes are specif
 [cli.md](cli.md); the summary:
 
 - **Read** (also the MCP tool surface): `resolve`, `render`, `backlinks`, `refs`,
-  `search`, `suggest`, `unresolved`. (`render` is the one that returns a body — resolved
-  Markdown — rather than pointers; `suggest` ranks existing IDs for a descriptor.)
+  `search`, `suggest`, `unresolved`, `deps`. (`render` is the one that returns a body —
+  resolved Markdown — rather than pointers; `suggest` ranks existing IDs for a
+  descriptor; `deps` prints the resolved linked-package tree.)
 - **Maintain** (run by humans / git hooks / CI, **not** exposed over MCP): `init`,
   `index`, `check`, `status`.
 

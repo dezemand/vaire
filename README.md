@@ -11,7 +11,12 @@ break links; IDs don't. Change an entity's `name:` once and every reference re-r
 files stay the source of truth — the index is a disposable cache, rebuildable in seconds and
 never written back to the corpus.
 
-> **Status:** early (0.1). The CLI and on-disk shapes are settling; expect changes.
+> **Status:** early (0.2). The CLI and on-disk shapes are settling; expect changes.
+
+Since 0.2, a corpus is a **knowledge package** (`knowledge.toml`), and packages can
+reference each other: link a dependency (`vaire add acme-core --link ../acme-core`) and
+`@acme-core/team:platform` resolves, searches, and lints across the boundary — locally,
+no registry needed. See [`examples/workspace/`](examples/workspace/).
 
 ## Install
 

@@ -178,8 +178,9 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Check {
             strict,
             working_tree,
+            no_deps,
         } => {
-            let (report, failed) = commands::check::run(&ctx, strict, working_tree)?;
+            let (report, failed) = commands::check::run(&ctx, strict, working_tree, no_deps)?;
             emit(&report, json);
             if failed {
                 return Ok(ExitCode::CheckViolations);
@@ -187,6 +188,9 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         }
         Command::Status => {
             emit(&commands::status::run(&ctx)?, json);
+        }
+        Command::Deps => {
+            emit(&commands::deps::run(&ctx)?, json);
         }
         Command::Init { .. } | Command::Mcp | Command::Configure { .. } | Command::Add { .. } => {
             unreachable!("handled above")

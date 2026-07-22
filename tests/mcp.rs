@@ -114,7 +114,7 @@ fn stdio_handshake_and_tool_call() {
     let by_id = |id: i64| responses.iter().find(|r| r["id"] == id).unwrap();
 
     assert_eq!(by_id(1)["result"]["serverInfo"]["name"], "vaire");
-    assert_eq!(by_id(2)["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(by_id(2)["result"]["tools"].as_array().unwrap().len(), 8);
 
     let call = by_id(3);
     assert_eq!(call["result"]["isError"], false);

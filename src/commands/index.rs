@@ -56,8 +56,9 @@ pub fn run(
 /// Build/refresh every linked dependency in the closure with its OWN repo, manifest, and
 /// commit anchor, then record the consumer's resolution snapshot (`deps_snapshot` meta) —
 /// the serialization source for the future lockfile. Locate failures (not linked, broken,
-/// mismatch) are tolerated as warning rows; build failures propagate.
-fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepIndexed>> {
+/// mismatch) are tolerated as warning rows; build failures propagate. Shared with
+/// `vaire check`, whose resolution lints need commit-fresh dependency indexes.
+pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepIndexed>> {
     let ws = ctx.workspace()?;
     let mut rows = Vec::new();
     let mut snapshot = Vec::new();
