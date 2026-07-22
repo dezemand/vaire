@@ -142,7 +142,7 @@ dl "$url" "$tmp/$asset" || die "download failed: $url"
 if [ "${VAIRE_SKIP_CHECKSUM:-0}" = "1" ]; then
   info "  skipping checksum verification (VAIRE_SKIP_CHECKSUM=1)"
 else
-  sums_url="https://github.com/${REPO}/releases/download/${version}/SHA256SUMS"
+  sums_url="https://github.com/${REPO}/releases/download/${tag}/SHA256SUMS"
   if dl "$sums_url" "$tmp/SHA256SUMS" 2>/dev/null; then
     # Exact filename match on field 2 (stripping sha256sum's binary-mode '*' marker), not a
     # substring search — a sibling asset like "<asset>.sig" would otherwise also match.

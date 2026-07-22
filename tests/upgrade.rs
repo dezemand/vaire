@@ -22,6 +22,16 @@ impl MockGithub {
     /// `latest_tag`: what `/releases/latest` reports. `asset`: `(name, bytes)` served
     /// under `/dezemand/vaire/releases/download/<tag>/<name>`; anything else is 404.
     fn serve(latest_tag: &str, asset: Option<(String, Vec<u8>)>) -> MockGithub {
+        // No SHA256SUMS: the release predates checksums, so verification is skipped.
+        MockGithub::serve_with_sums(latest_tag, asset, None)
+    }
+
+    /// As [`MockGithub::serve`], plus a `SHA256SUMS` body served under the release tag.
+    fn serve_with_sums(
+        latest_tag: &str,
+        asset: Option<(String, Vec<u8>)>,
+        sums: Option<String>,
+    ) -> MockGithub {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let base = format!("http://{}", listener.local_addr().unwrap());
         let latest = format!(r#"{{"tag_name": "{latest_tag}", "name": "irrelevant"}}"#);
@@ -36,6 +46,11 @@ impl MockGithub {
                 let (status, body): (&str, Vec<u8>) =
                     if path == "/repos/dezemand/vaire/releases/latest" {
                         ("200 OK", latest.clone().into_bytes())
+                    } else if path.ends_with("/SHA256SUMS") {
+                        match &sums {
+                            Some(body) => ("200 OK", body.clone().into_bytes()),
+                            None => ("404 Not Found", b"not found".to_vec()),
+                        }
                     } else if let Some((name, bytes)) = asset
                         .as_ref()
                         .filter(|(name, _)| path.ends_with(&format!("/{name}")))
@@ -255,4 +270,72 @@ fn a_package_managed_binary_refuses_and_names_the_manager() {
         VaireError::Upgrade(msg) => assert!(msg.contains("cargo install"), "{msg}"),
         other => panic!("expected upgrade error, got {other:?}"),
     }
+}
+
+// ---- release-download verification ----------------------------------------
+
+/// Lowercase hex SHA-256, computed the way `sha256sum` prints it.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[test]
+fn a_matching_checksum_lets_the_upgrade_proceed() {
+    let (name, bytes) = release_tarball("v0.9.0", "new-binary v0.9.0");
+    let sums = format!("{}  {name}\n", sha256_hex(&bytes));
+    let mock = MockGithub::serve_with_sums("v0.9.0", Some((name, bytes)), Some(sums));
+    let dir = tempfile::tempdir().unwrap();
+    let src = source(&mock, dir.path(), "0.2.0");
+
+    let out = upgrade::run_from(&src, None, false).expect("upgrade succeeds");
+    assert_eq!(out.latest, "0.9.0");
+    assert_eq!(
+        std::fs::read_to_string(&src.exe_path).unwrap(),
+        "new-binary v0.9.0"
+    );
+}
+
+#[test]
+fn a_tampered_archive_is_refused_and_the_binary_is_left_alone() {
+    // The published digest is for the genuine archive; the server hands back a different
+    // one — a replaced release asset or a compromised publish token. Self-update runs
+    // unattended, so this must fail closed rather than swap in whatever was served.
+    let (name, genuine) = release_tarball("v0.9.0", "genuine v0.9.0");
+    let (_, trojaned) = release_tarball("v0.9.0", "TROJANED PAYLOAD");
+    let sums = format!("{}  {name}\n", sha256_hex(&genuine));
+    let mock = MockGithub::serve_with_sums("v0.9.0", Some((name, trojaned)), Some(sums));
+    let dir = tempfile::tempdir().unwrap();
+    let src = source(&mock, dir.path(), "0.2.0");
+
+    let err = upgrade::run_from(&src, None, false).expect_err("must refuse");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("checksum mismatch"),
+        "expected a checksum mismatch, got: {msg}"
+    );
+    // The running executable is untouched.
+    assert_eq!(
+        std::fs::read_to_string(&src.exe_path).unwrap(),
+        "old-binary",
+        "a refused upgrade must not replace the binary"
+    );
+}
+
+#[test]
+fn published_checksums_without_an_entry_for_this_asset_are_refused() {
+    // SHA256SUMS exists but says nothing about our asset — it cannot be verified, and a
+    // silently-unverified install is exactly what the file is meant to prevent.
+    let (name, bytes) = release_tarball("v0.9.0", "new-binary v0.9.0");
+    let sums = format!("{}  some-other-asset.tar.gz\n", sha256_hex(&bytes));
+    let mock = MockGithub::serve_with_sums("v0.9.0", Some((name, bytes)), Some(sums));
+    let dir = tempfile::tempdir().unwrap();
+    let src = source(&mock, dir.path(), "0.2.0");
+
+    let err = upgrade::run_from(&src, None, false).expect_err("must refuse");
+    assert!(
+        err.to_string().contains("no entry for"),
+        "got: {err}"
+    );
+    assert_eq!(std::fs::read_to_string(&src.exe_path).unwrap(), "old-binary");
 }

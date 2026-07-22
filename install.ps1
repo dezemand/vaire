@@ -94,7 +94,7 @@ try {
         Write-Host "  skipping checksum verification (VAIRE_SKIP_CHECKSUM=1)" -ForegroundColor DarkGray
     }
     else {
-        $sumsUrl = "https://github.com/$Repo/releases/download/$Version/SHA256SUMS"
+        $sumsUrl = "https://github.com/$Repo/releases/download/$Tag/SHA256SUMS"
         $sums = Join-Path $tmp 'SHA256SUMS'
         $havesums = $true
         try {
