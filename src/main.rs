@@ -68,6 +68,9 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 };
                 commands::configure::run(&home, opts)?
             }
+            Some(ConfigureSection::LocalPackages { path, unset }) => {
+                commands::configure::run_local_packages(&home, path.as_deref(), *unset)?
+            }
             None => commands::configure::run_interactive(&home)?,
         };
         emit(&out, json);

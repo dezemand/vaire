@@ -62,11 +62,77 @@ pub fn run(home: &Path, opts: ConfigureOpts) -> Result<ConfigureOutput> {
 
     Ok(ConfigureOutput {
         config_path: config_path.display().to_string(),
+        section: "embeddings".to_string(),
         provider: provider_name(cfg.embeddings.provider).to_string(),
         dimensions: cfg.embeddings.dimensions,
         credentials_set,
         cancelled: false,
+        local_packages: display_local(&cfg),
     })
+}
+
+/// `vaire configure local-packages [<path>] [--unset]` — set, clear, or show the
+/// local-packages root (cli.md §6.3). The path is stored **canonical**, so a link
+/// materialized from it is stable even if the caller passed a relative or symlinked path.
+pub fn run_local_packages(home: &Path, path: Option<&str>, unset: bool) -> Result<ConfigureOutput> {
+    let mut cfg = UserConfig::load_from(home)?;
+
+    let config_path = match (path, unset) {
+        (Some(_), true) => {
+            return Err(VaireError::Usage(
+                "pass a path or --unset, not both".to_string(),
+            ));
+        }
+        (Some(p), false) => {
+            let given = expand_tilde(p);
+            // Reject up front rather than storing a root that discovers nothing: a typo
+            // here would otherwise surface much later as "dependency not found".
+            let root = std::fs::canonicalize(&given)
+                .map_err(|e| VaireError::Usage(format!("{}: {e}", given.display())))?;
+            if !root.is_dir() {
+                return Err(VaireError::Usage(format!(
+                    "{} is not a directory",
+                    root.display()
+                )));
+            }
+            cfg.packages.local = Some(root);
+            cfg.save_to(home)?
+        }
+        (None, true) => {
+            cfg.packages.local = None;
+            cfg.save_to(home)?
+        }
+        // Neither: report the current setting, writing nothing.
+        (None, false) => home.join("config.toml"),
+    };
+
+    Ok(ConfigureOutput {
+        config_path: config_path.display().to_string(),
+        section: "local-packages".to_string(),
+        provider: provider_name(cfg.embeddings.provider).to_string(),
+        dimensions: cfg.embeddings.dimensions,
+        credentials_set: Vec::new(),
+        cancelled: false,
+        local_packages: display_local(&cfg),
+    })
+}
+
+fn display_local(cfg: &UserConfig) -> Option<String> {
+    cfg.packages
+        .local
+        .as_ref()
+        .map(|p| p.display().to_string())
+}
+
+/// Expand a leading `~/`, so a quoted `"~/Documents/Knowledge"` (which the shell leaves
+/// alone) behaves like the unquoted form.
+fn expand_tilde(p: &str) -> std::path::PathBuf {
+    if let Some(rest) = p.strip_prefix("~/")
+        && let Some(base) = directories::BaseDirs::new()
+    {
+        return base.home_dir().join(rest);
+    }
+    std::path::PathBuf::from(p)
 }
 
 fn parse_provider(s: &str) -> Result<EmbeddingProvider> {
@@ -94,14 +160,36 @@ fn provider_name(p: EmbeddingProvider) -> &'static str {
 pub fn run_interactive(home: &Path) -> Result<ConfigureOutput> {
     let cfg = UserConfig::load_from(home)?;
 
-    // One section today; the menu is here so more can slot in without changing the UX.
-    let Some(section) = cancellable(Select::new("Configure", vec!["Embeddings"]).prompt())? else {
+    let Some(section) =
+        cancellable(Select::new("Configure", vec!["Embeddings", "Local packages"]).prompt())?
+    else {
         return Ok(cancelled(home));
     };
     match section {
         "Embeddings" => configure_embeddings_interactively(home, &cfg),
+        "Local packages" => configure_local_packages_interactively(home, &cfg),
         other => Err(VaireError::Usage(format!("unknown section '{other}'"))),
     }
+}
+
+/// The local-packages branch of the interactive flow: one prompt, seeded with the current
+/// root. An empty answer clears the setting.
+fn configure_local_packages_interactively(home: &Path, cfg: &UserConfig) -> Result<ConfigureOutput> {
+    let current = display_local(cfg).unwrap_or_default();
+    let Some(answer) = cancellable(
+        Text::new("Local packages directory (blank to unset)")
+            .with_default(&current)
+            .with_help_message("where your local packages live; searched by declared name")
+            .prompt(),
+    )?
+    else {
+        return Ok(cancelled(home));
+    };
+    let answer = answer.trim();
+    if answer.is_empty() {
+        return run_local_packages(home, None, true);
+    }
+    run_local_packages(home, Some(answer), false)
 }
 
 /// The embeddings branch of the interactive flow. Builds a [`ConfigureOpts`] from prompts
@@ -203,10 +291,12 @@ fn cancelled(home: &Path) -> ConfigureOutput {
     let cfg = UserConfig::load_from(home).unwrap_or_default();
     ConfigureOutput {
         config_path: home.join("config.toml").display().to_string(),
+        section: "embeddings".to_string(),
         provider: provider_name(cfg.embeddings.provider).to_string(),
         dimensions: cfg.embeddings.dimensions,
         credentials_set: Vec::new(),
         cancelled: true,
+        local_packages: display_local(&cfg),
     }
 }
 
