@@ -23,6 +23,7 @@ use crate::config::{is_caret_major, is_slug};
 use crate::corpus::repo::Repo;
 use crate::error::{Result, VaireError};
 use crate::output::AddOutput;
+use crate::workspace::discover;
 use crate::workspace::link::{self, LinkError, LinkPlan};
 
 /// Add (or update) a dependency. `spec` is `<name>` or `<name>@<constraint>` (e.g.
@@ -74,7 +75,28 @@ pub fn run(
 
     std::fs::write(&manifest, doc.to_string())?;
 
-    let linked = link_plan.map(link::commit).transpose()?;
+    let mut linked = link_plan.map(link::commit).transpose()?;
+
+    // No explicit `--link`: satisfy the dependency from the local-packages root, exactly
+    // as the ensure pass would. Declaring is what this command does; wiring is a
+    // convenience on top, so nothing here can fail the run — a name that cannot be found
+    // (or is ambiguous) comes back as a note.
+    let mut discovered = false;
+    let mut note = None;
+    if linked.is_none() {
+        let user = crate::userconfig::UserConfig::load()?;
+        let satisfied = discover::satisfy_name(&root, &name, user.packages.local.as_deref());
+        if let Some(dep) = satisfied.linked.first() {
+            linked = Some(dep.target.clone());
+            discovered = true;
+        } else {
+            note = satisfied
+                .notes
+                .get(&name)
+                .cloned()
+                .or_else(|| satisfied.warnings.first().cloned());
+        }
+    }
 
     Ok(AddOutput {
         name,
@@ -82,6 +104,8 @@ pub fn run(
         config_path: manifest.display().to_string(),
         updated,
         linked,
+        discovered,
+        note,
     })
 }
 

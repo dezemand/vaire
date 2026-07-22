@@ -118,10 +118,7 @@ pub fn run_local_packages(home: &Path, path: Option<&str>, unset: bool) -> Resul
 }
 
 fn display_local(cfg: &UserConfig) -> Option<String> {
-    cfg.packages
-        .local
-        .as_ref()
-        .map(|p| p.display().to_string())
+    cfg.packages.local.as_ref().map(|p| p.display().to_string())
 }
 
 /// Expand a leading `~/`, so a quoted `"~/Documents/Knowledge"` (which the shell leaves
@@ -174,7 +171,10 @@ pub fn run_interactive(home: &Path) -> Result<ConfigureOutput> {
 
 /// The local-packages branch of the interactive flow: one prompt, seeded with the current
 /// root. An empty answer clears the setting.
-fn configure_local_packages_interactively(home: &Path, cfg: &UserConfig) -> Result<ConfigureOutput> {
+fn configure_local_packages_interactively(
+    home: &Path,
+    cfg: &UserConfig,
+) -> Result<ConfigureOutput> {
     let current = display_local(cfg).unwrap_or_default();
     let Some(answer) = cancellable(
         Text::new("Local packages directory (blank to unset)")

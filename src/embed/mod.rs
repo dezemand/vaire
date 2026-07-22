@@ -391,6 +391,7 @@ mod tests {
                 command: command.to_string(),
                 ..EmbeddingConfig::default()
             },
+            ..UserConfig::default()
         }
     }
 
@@ -433,6 +434,7 @@ mod tests {
                 provider: EmbeddingProvider::OpenAi,
                 ..EmbeddingConfig::default()
             },
+            ..UserConfig::default()
         };
         let result = from_user_config(&cfg);
         assert!(result.is_err());

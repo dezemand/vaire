@@ -59,6 +59,16 @@ pub fn run(
 /// mismatch) are tolerated as warning rows; build failures propagate. Shared with
 /// `vaire check`, whose resolution lints need commit-fresh dependency indexes.
 pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepIndexed>> {
+    // Satisfy links first: a dependency that is merely *declared* is linked from the
+    // local-packages root if it can be found there, so a fresh clone needs no wiring
+    // step. Runs before the closure walk below, which then sees the new links.
+    let user = crate::userconfig::UserConfig::load()?;
+    let satisfied =
+        crate::workspace::discover::satisfy(&ctx.repo, &ctx.config, user.packages.local.as_deref());
+    for warning in &satisfied.warnings {
+        eprintln!("warning: {warning}");
+    }
+
     let ws = ctx.workspace()?;
     let mut rows = Vec::new();
     let mut snapshot = Vec::new();
@@ -70,7 +80,13 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
                 status: "missing".to_string(),
                 nodes: None,
                 commit: None,
-                note: Some(e.to_string()),
+                // What the locate failure was, plus what discovery found (or did not) for
+                // that name — the two halves of "why is this dependency unavailable".
+                note: Some(match satisfied.notes.get(id.as_str()) {
+                    Some(extra) => format!("{e} — {extra}"),
+                    None => e.to_string(),
+                }),
+                linked: None,
             }),
             Ok(handle) => {
                 let mode = dep_mode(&handle.root, embedder);
@@ -90,6 +106,11 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
                     nodes: Some(summary.nodes),
                     commit: summary.commit,
                     note: None,
+                    linked: satisfied
+                        .linked
+                        .iter()
+                        .find(|l| l.name == id.as_str())
+                        .map(|l| l.target.clone()),
                 });
             }
         }

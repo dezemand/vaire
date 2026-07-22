@@ -79,8 +79,7 @@ pub fn plan(root: &Path, name: &str, path: &Path) -> std::result::Result<LinkPla
         )));
     }
 
-    let packages =
-        Repo::prepare_packages_dir(root).map_err(|e| LinkError::Entry(e.to_string()))?;
+    let packages = Repo::prepare_packages_dir(root).map_err(|e| LinkError::Entry(e.to_string()))?;
     let derived = Repo::prepare_derived_dir(root).map_err(|e| LinkError::Entry(e.to_string()))?;
     Repo::ensure_derived_gitignore(&derived).map_err(|e| LinkError::Entry(e.to_string()))?;
     // Canonicalize so the relative computation sees the same prefix shape as the

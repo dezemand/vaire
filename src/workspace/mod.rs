@@ -12,6 +12,7 @@
 //! standalone package — no `[dependencies]`, no `@pkg/` references — never constructs
 //! any of this.
 
+pub mod discover;
 pub mod link;
 pub mod resolver;
 

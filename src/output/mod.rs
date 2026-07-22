@@ -386,6 +386,11 @@ pub struct DepIndexed {
     pub commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The package directory this run linked the dependency to, when the ensure pass
+    /// satisfied it from the local-packages root (cli.md §6.3); absent when the link
+    /// already existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linked: Option<String>,
 }
 
 /// `vaire index`: the current package's summary plus the linked-dependency ensure pass.
@@ -408,6 +413,16 @@ impl Output for IndexRunOutput {
                         Some(c) => format!("commit {}", &c[..c.len().min(7)]),
                         None => "working tree".to_string(),
                     };
+                    // A link this run created is worth saying out loud: it is the moment
+                    // a declared dependency became an actual one.
+                    if let Some(target) = &dep.linked {
+                        out.push_str(&format!(
+                            "  dep {}: linked → {}  {}\n",
+                            dep.name,
+                            target,
+                            dim("(local-packages)")
+                        ));
+                    }
                     out.push_str(&format!(
                         "  dep {}: indexed {}  {}",
                         dep.name,
@@ -499,9 +514,18 @@ pub struct AddOutput {
     pub config_path: String,
     /// True when the dependency already existed and its constraint was updated in place.
     pub updated: bool,
-    /// The `.vaire/packages/<name>` link target as stored (with `--link`), else absent.
+    /// The `.vaire/packages/<name>` link target: the path stored by `--link`, or the
+    /// package directory discovery found under the local-packages root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linked: Option<String>,
+    /// The link was materialized by discovery (cli.md §6.3) rather than by `--link`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub discovered: bool,
+    /// Why the dependency is declared but not linked — nothing found under the
+    /// local-packages root, an ambiguous name, or no root configured. Never an error:
+    /// declaring succeeded, and the link can arrive later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl Output for AddOutput {
@@ -519,6 +543,12 @@ impl Output for AddOutput {
                 "\n  linked:   .vaire/packages/{} → {}",
                 self.name, target
             ));
+            if self.discovered {
+                s.push_str(&format!("  {}", dim("(local-packages)")));
+            }
+        }
+        if let Some(note) = &self.note {
+            s.push_str(&format!("\n  {}", yellow(&format!("not linked — {note}"))));
         }
         s
     }
