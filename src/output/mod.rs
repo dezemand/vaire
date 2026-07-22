@@ -564,9 +564,10 @@ impl Output for ConfigureOutput {
 /// `vaire upgrade`: what release was resolved and what happened to the binary.
 #[derive(Debug, Serialize)]
 pub struct UpgradeOutput {
-    /// The running version (no `v` prefix).
+    /// The running version (bare, e.g. `0.2.0`).
     pub current: String,
-    /// The release tag resolved or pinned (e.g. `v0.3.0`).
+    /// The release version resolved or pinned (bare, e.g. `0.3.0` — the `v` prefix
+    /// exists only on the underlying git tag).
     pub latest: String,
     /// The release target triple this binary matches.
     pub target: String,

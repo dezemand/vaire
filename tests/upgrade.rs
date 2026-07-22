@@ -103,7 +103,7 @@ fn upgrades_to_the_latest_release_by_replacing_the_binary() {
 
     let out = upgrade::run_from(&src, None, false).expect("upgrade succeeds");
 
-    assert_eq!(out.latest, "v0.9.0");
+    assert_eq!(out.latest, "0.9.0");
     assert!(!out.up_to_date);
     assert_eq!(
         out.installed.as_deref(),
@@ -167,7 +167,7 @@ fn check_reports_the_available_upgrade_without_installing() {
 
     assert!(out.checked_only);
     assert!(!out.up_to_date);
-    assert_eq!(out.latest, "v0.9.0");
+    assert_eq!(out.latest, "0.9.0");
     assert!(out.installed.is_none());
     assert_eq!(
         std::fs::read_to_string(&src.exe_path).unwrap(),
@@ -186,7 +186,7 @@ fn a_pinned_version_installs_even_when_it_matches_the_current_one() {
 
     let out = upgrade::run_from(&src, Some("0.2.0"), false).expect("pinned install succeeds");
 
-    assert_eq!(out.latest, "v0.2.0");
+    assert_eq!(out.latest, "0.2.0");
     assert_eq!(
         std::fs::read_to_string(&src.exe_path).unwrap(),
         "reinstalled v0.2.0"
@@ -208,6 +208,29 @@ fn a_missing_platform_asset_names_the_target_and_suggests_source_build() {
                 msg.contains("cargo install"),
                 "suggests source build: {msg}"
             );
+        }
+        other => panic!("expected upgrade error, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(&src.exe_path).unwrap(),
+        "old-binary"
+    );
+}
+
+#[test]
+fn an_incomparable_latest_version_refuses_and_asks_for_an_explicit_pin() {
+    // The semver gate must not guess: a latest release that doesn't parse as
+    // MAJOR.MINOR.PATCH is neither installed nor ignored — it errors with the pin hint.
+    let mock = MockGithub::serve("nightly", None);
+    let dir = tempfile::tempdir().unwrap();
+    let src = source(&mock, dir.path(), "0.2.0");
+
+    let err = upgrade::run_from(&src, None, false).expect_err("incomparable refuses");
+
+    match err {
+        VaireError::Upgrade(msg) => {
+            assert!(msg.contains("nightly"), "names the release: {msg}");
+            assert!(msg.contains("vaire upgrade"), "suggests pinning: {msg}");
         }
         other => panic!("expected upgrade error, got {other:?}"),
     }

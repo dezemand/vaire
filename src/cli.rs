@@ -175,8 +175,9 @@ pub enum Command {
     /// Self-update: download the release binary for this platform and replace this
     /// executable (same contract as the installer script).
     Upgrade {
-        /// Version to install (e.g. `v0.3.0`; default: the latest release. An explicit
-        /// version always installs, so `vaire upgrade v<current>` repairs an install).
+        /// Version to install (e.g. `0.3.0`; default: the latest release, only if newer.
+        /// An explicit version always installs, so `vaire upgrade <current>` repairs an
+        /// install).
         version: Option<String>,
         /// Only report whether a newer release exists; install nothing.
         #[arg(long)]

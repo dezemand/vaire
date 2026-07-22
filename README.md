@@ -33,8 +33,10 @@ On Windows (PowerShell), installs `vaire.exe` and adds it to your user PATH:
 irm https://raw.githubusercontent.com/dezemand/vaire/main/install.ps1 | iex
 ```
 
-Both honor `VAIRE_VERSION` (a tag like `v0.1.0`) and `VAIRE_INSTALL_DIR` to override
-the version and target directory.
+Both honor `VAIRE_VERSION` (a version like `0.1.0`; a leading `v` is accepted) and
+`VAIRE_INSTALL_DIR` to override the version and target directory. Installing the
+latest is a no-op when the installed `vaire` is already at or above it; a pinned
+`VAIRE_VERSION` always installs.
 
 **From source (Rust 1.85+)** — also the path for Intel macOS or arm64 Linux, which
 have no prebuilt binary yet:

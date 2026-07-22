@@ -656,13 +656,17 @@ current executable.
 vaire upgrade [<version>] [--check] [--json]
 ```
 
-- Without arguments: resolve the latest release and install it if it is **newer**.
-  Same version → "up to date", exit `0`. A build *ahead* of the newest release (e.g.
-  built from source before the tag is cut) is never downgraded.
-- `<version>` (e.g. `v0.3.0`; the `v` is optional) pins the release to install — and an
-  explicit version **always** installs, even the currently running one, which is how a
-  corrupted install is repaired in place. Downgrading is allowed only this way,
-  explicitly.
+- Versions are **bare** everywhere the user sees them (`0.3.0`); the `v` prefix exists
+  only on the underlying git tag and the URLs built from it (a leading `v` is accepted
+  on input).
+- Without arguments: resolve the latest release and install it only when the semver
+  comparison says it is strictly **higher** than this build. Same version → "up to
+  date", exit `0`; a build *ahead* of the newest release (e.g. built from source before
+  the tag is cut) is never downgraded; versions that don't compare as
+  `MAJOR.MINOR.PATCH` refuse with a hint to pin explicitly rather than guess.
+- `<version>` (e.g. `0.3.0`) pins the release to install — and an explicit version
+  **always** installs, even the currently running one, which is how a corrupted
+  install is repaired in place. Downgrading is allowed only this way, explicitly.
 - `--check` reports what would happen (current vs latest, for this target triple) and
   installs nothing.
 - The swap is atomic: the new binary is staged next to the executable (same

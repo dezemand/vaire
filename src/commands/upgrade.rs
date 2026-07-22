@@ -75,23 +75,28 @@ pub fn run_from(src: &Source, version: Option<&str>, check: bool) -> Result<Upgr
         .build();
 
     let pinned = version.is_some();
-    let tag = match version {
-        Some(v) => normalize_tag(v)?,
-        None => latest_tag(&agent, src)?,
+    let available = match version {
+        Some(v) => normalize_version(v)?,
+        None => latest_version(&agent, src)?,
     };
-    let available = tag.trim_start_matches('v');
+    // Versions are bare (`0.2.0`) everywhere the user sees them; the `v` prefix exists
+    // only in the tag layer — release tags and the URLs built from them.
+    let tag = format!("v{available}");
 
-    // Unpinned runs only ever move forward: same version → done; a source build ahead
-    // of the newest release must not be "upgraded" backwards. An explicit version
-    // always installs (that is how a corrupted install is repaired in place).
+    // Unpinned runs only ever move forward, gated by a real semver comparison: install
+    // only when the latest release is strictly *higher* than this build (a source build
+    // ahead of the newest release must not be "upgraded" backwards). Incomparable
+    // versions refuse rather than guess. An explicit version always installs (that is
+    // how a corrupted install is repaired in place).
     if !pinned {
-        let ord = compare_versions(&src.current_version, available);
-        let same = ord == Some(std::cmp::Ordering::Equal)
-            || (ord.is_none() && src.current_version == available);
-        if same || ord == Some(std::cmp::Ordering::Greater) {
+        use std::cmp::Ordering;
+        let ord = compare_versions(&src.current_version, &available);
+        let same =
+            ord == Some(Ordering::Equal) || (ord.is_none() && src.current_version == available);
+        if same || ord == Some(Ordering::Greater) {
             return Ok(UpgradeOutput {
                 current: src.current_version.clone(),
-                latest: tag,
+                latest: available,
                 target: src.target.clone(),
                 up_to_date: true,
                 checked_only: check,
@@ -100,12 +105,19 @@ pub fn run_from(src: &Source, version: Option<&str>, check: bool) -> Result<Upgr
                     .then(|| "this build is newer than the latest release — nothing to do".into()),
             });
         }
+        if ord.is_none() {
+            return Err(VaireError::Upgrade(format!(
+                "cannot compare this build ({}) with the latest release ({available}); \
+                 pass the version to install explicitly: `vaire upgrade {available}`",
+                src.current_version
+            )));
+        }
     }
 
     if check {
         return Ok(UpgradeOutput {
             current: src.current_version.clone(),
-            latest: tag,
+            latest: available,
             target: src.target.clone(),
             up_to_date: false,
             checked_only: true,
@@ -142,7 +154,7 @@ pub fn run_from(src: &Source, version: Option<&str>, check: bool) -> Result<Upgr
 
     Ok(UpgradeOutput {
         current: src.current_version.clone(),
-        latest: tag,
+        latest: available,
         target: src.target.clone(),
         up_to_date: false,
         checked_only: false,
@@ -174,9 +186,10 @@ fn managed_by(exe: &Path) -> Option<String> {
     None
 }
 
-/// `v0.3.0` or `0.3.0` → `v0.3.0`. The tag lands in a URL path, so only the
-/// characters release tags actually use are accepted.
-fn normalize_tag(version: &str) -> Result<String> {
+/// `0.3.0` or `v0.3.0` → bare `0.3.0`. The version lands in a URL path (as the
+/// `v`-prefixed tag), so only the characters release versions actually use are
+/// accepted.
+fn normalize_version(version: &str) -> Result<String> {
     let bare = version.strip_prefix('v').unwrap_or(version);
     if bare.is_empty()
         || !bare
@@ -184,10 +197,10 @@ fn normalize_tag(version: &str) -> Result<String> {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
     {
         return Err(VaireError::Usage(format!(
-            "invalid version '{version}' (expected e.g. v0.3.0)"
+            "invalid version '{version}' (expected e.g. 0.3.0)"
         )));
     }
-    Ok(format!("v{bare}"))
+    Ok(bare.to_string())
 }
 
 /// Both parse as `MAJOR.MINOR.PATCH` (pre-release suffix ignored) → their ordering;
@@ -206,8 +219,8 @@ fn compare_versions(current: &str, available: &str) -> Option<std::cmp::Ordering
     Some(triple(current)?.cmp(&triple(available)?))
 }
 
-/// `tag_name` of the latest published release.
-fn latest_tag(agent: &ureq::Agent, src: &Source) -> Result<String> {
+/// The latest published release's version, bare (its `tag_name` with the `v` stripped).
+fn latest_version(agent: &ureq::Agent, src: &Source) -> Result<String> {
     let url = format!("{}/repos/{REPO}/releases/latest", src.api_base);
     let response = agent
         .get(&url)
@@ -231,10 +244,10 @@ fn latest_tag(agent: &ureq::Agent, src: &Source) -> Result<String> {
     let json: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| VaireError::Upgrade(format!("unexpected releases API response: {e}")))?;
     match json.get("tag_name").and_then(|t| t.as_str()) {
-        Some(tag) => normalize_tag(tag),
+        Some(tag) => normalize_version(tag),
         None => Err(VaireError::Upgrade(
             "could not determine the latest release version (no tag_name); \
-             pass one explicitly: `vaire upgrade v<X.Y.Z>`"
+             pass one explicitly: `vaire upgrade <X.Y.Z>`"
                 .into(),
         )),
     }
@@ -377,12 +390,12 @@ mod tests {
 
     #[test]
     fn version_pinning_normalizes_and_rejects_junk() {
-        assert_eq!(normalize_tag("0.3.0").unwrap(), "v0.3.0");
-        assert_eq!(normalize_tag("v0.3.0").unwrap(), "v0.3.0");
-        assert_eq!(normalize_tag("v1.0.0-rc.1").unwrap(), "v1.0.0-rc.1");
-        assert!(normalize_tag("").is_err());
-        assert!(normalize_tag("v0.3.0/../evil").is_err());
-        assert!(normalize_tag("v0 .3").is_err());
+        assert_eq!(normalize_version("0.3.0").unwrap(), "0.3.0");
+        assert_eq!(normalize_version("v0.3.0").unwrap(), "0.3.0");
+        assert_eq!(normalize_version("v1.0.0-rc.1").unwrap(), "1.0.0-rc.1");
+        assert!(normalize_version("").is_err());
+        assert!(normalize_version("v0.3.0/../evil").is_err());
+        assert!(normalize_version("v0 .3").is_err());
     }
 
     #[test]
