@@ -704,7 +704,7 @@ JSON (`installed` and `note` appear only when set):
 
 ### 4.6 `vaire pack`
 
-```
+```text
 vaire pack [--no-embeddings] [--json]
 ```
 

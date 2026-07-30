@@ -104,7 +104,16 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         return Ok(ExitCode::Success);
     }
 
-    let config_overridden = cli.config.is_some();
+    // `pack` refuses `--config` before any context is built: the artifact's identity
+    // and file selection must come from the package's own committed knowledge.toml, and
+    // a rejected override should not even be loaded.
+    if matches!(cli.command, Command::Pack { .. }) && cli.config.is_some() {
+        return Err(VaireError::Usage(
+            "`vaire pack` packs the package's committed knowledge.toml; --config is not supported"
+                .into(),
+        ));
+    }
+
     let ctx = Ctx::new(cli.repo, cli.config)?;
 
     match cli.command {
@@ -201,14 +210,6 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             emit(&commands::status::run(&ctx)?, json);
         }
         Command::Pack { no_embeddings } => {
-            // The artifact's identity and file selection come from the package's own
-            // committed knowledge.toml; a substituted manifest would build an artifact
-            // that matches neither the working tree nor HEAD.
-            if config_overridden {
-                return Err(VaireError::Usage(
-                    "`vaire pack` packs the package's committed knowledge.toml; --config is not supported".into(),
-                ));
-            }
             emit(&commands::pack::run(&ctx, no_embeddings)?, json);
         }
         Command::Deps => {

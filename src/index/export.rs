@@ -105,8 +105,9 @@ pub(crate) fn export_artifact_index(
     }
     drop(check);
 
-    // Closing checkpoints the WAL back into the main file (the same invariant the index
-    // builder's promote step relies on). A leftover non-empty sidecar would mean part of
+    // The explicit checkpoint above is what folded the WAL — closing does NOT (the
+    // index builder's promote step moves the sidecars along for the same reason). A
+    // leftover non-empty sidecar means the checkpoint did not do its job and part of
     // the artifact's content lives outside the one file we ship — refuse to continue.
     for suffix in ["-wal", "-shm"] {
         let sidecar = std::path::PathBuf::from(format!("{}{suffix}", dest_path.display()));
@@ -320,21 +321,25 @@ fn copy_meta(src: &Index, dest: &Index, packed_by: &str) -> Result<()> {
         }
     }
     if let Some(snapshot) = src.meta("deps_snapshot")? {
-        let entries: Vec<serde_json::Value> = serde_json::from_str(&snapshot)
+        // Typed on purpose: a snapshot entry missing its identity must fail here, at
+        // pack time, rather than ship as a well-formed-but-null dependency record.
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct SnapshotDep {
+            name: String,
+            version: String,
+            /// `null` for transitive members — their constraints live in their owners.
+            constraint: Option<String>,
+            /// The machine-local root: read so its presence is tolerated, never written
+            /// — an artifact records choices, not locations.
+            #[serde(default, skip_serializing)]
+            #[allow(dead_code)]
+            root: Option<String>,
+        }
+        let entries: Vec<SnapshotDep> = serde_json::from_str(&snapshot)
             .map_err(|e| VaireError::IndexCorrupt(format!("deps_snapshot meta: {e}")))?;
-        let portable: Vec<serde_json::Value> = entries
-            .iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "name": entry.get("name"),
-                    "version": entry.get("version"),
-                    "constraint": entry.get("constraint"),
-                })
-            })
-            .collect();
         dest.set_meta(
             "deps_snapshot",
-            &serde_json::to_string(&portable).expect("json array"),
+            &serde_json::to_string(&entries).expect("json array"),
         )?;
     }
     dest.set_meta("packed_by", packed_by)?;

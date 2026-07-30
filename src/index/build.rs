@@ -281,8 +281,10 @@ pub fn run(
         commit: recorded,
     };
 
-    // Everything succeeded — swap the finished index in. Both handles must be closed first
-    // so their WAL is checkpointed back into the file being renamed.
+    // Everything succeeded — swap the finished index in. Both handles must be closed
+    // first so no connection still holds the files being renamed. Turso does NOT
+    // checkpoint the WAL on close, which is exactly why `promote` moves the sidecars
+    // along with the database instead of assuming the file is self-contained.
     if let Some(staged) = staged {
         drop(previous);
         drop(index);

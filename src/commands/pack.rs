@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::commands::Ctx;
+use crate::corpus::markdown::{Fences, mask_code_spans};
 use crate::corpus::repo::Repo;
 use crate::corpus::scan::Scanner;
 use crate::error::{Result, VaireError};
@@ -94,7 +95,20 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
     let vaire_dir = Repo::prepare_derived_dir(root)?;
     let dist = vaire_dir.join("dist");
     std::fs::create_dir_all(&dist)?;
-    let staging_db = dist.join(format!(".pack-index-{}.db", std::process::id()));
+    let top = format!("{}-{}", ctx.config.name, ctx.config.version);
+    let file_name = format!("{top}.tgz");
+    // Scratch paths are pid-scoped (two packs of one package must not trample each
+    // other's staging) and removed on every exit path, success or failure — a failed
+    // pack never leaves a plausible-looking artifact or staging debris behind.
+    let pid = std::process::id();
+    let staging_db = dist.join(format!(".pack-index-{pid}.db"));
+    let tmp = dist.join(format!(".{file_name}.{pid}.tmp"));
+    let _scratch = RemoveOnDrop(vec![
+        staging_db.clone(),
+        std::path::PathBuf::from(format!("{}-wal", staging_db.display())),
+        std::path::PathBuf::from(format!("{}-shm", staging_db.display())),
+        tmp.clone(),
+    ]);
     let stats = export::export_artifact_index(
         &ctx.repo.index_db(),
         &staging_db,
@@ -105,6 +119,8 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
     // ---- the deterministic archive -----------------------------------------------------
     // Entry order is the BTreeMap's (sorted); timestamps are the commit's; ownership is
     // zeroed; the gzip header carries no timestamp. Same commit, same flags, same bytes.
+    // Held fully in memory on purpose: knowledge corpora are megabytes, not gigabytes,
+    // and streaming would buy nothing at this scale.
     let git_paths: Vec<String> = selected.iter().cloned().collect();
     let blobs = git::show_many_at_head_bytes(root, &git_paths)?;
     let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -115,14 +131,9 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
         entries.insert(path.clone(), bytes);
     }
     entries.insert(".vaire/index.db".to_string(), std::fs::read(&staging_db)?);
-    let _ = std::fs::remove_file(&staging_db);
 
     let epoch = git::commit_epoch(root)?.unwrap_or(0).max(0) as u64;
-    let top = format!("{}-{}", ctx.config.name, ctx.config.version);
-    let file_name = format!("{top}.tgz");
-    // Assemble beside the final name, promote by rename — a failed pack never leaves a
-    // plausible-looking artifact behind.
-    let tmp = dist.join(format!(".{file_name}.tmp"));
+    // Assemble beside the final name, promote by rename.
     write_archive(&tmp, &top, &entries, epoch)?;
     let artifact = dist.join(&file_name);
     std::fs::rename(&tmp, &artifact)?;
@@ -269,24 +280,23 @@ fn collect_referenced_files(
 /// Extract relative link/image targets with 1-based line numbers: inline
 /// `[text](target)` / `![alt](target)` plus reference-style definitions
 /// (`[label]: target` on its own line). Because **inclusion rides on extraction**
-/// (registry.md §5.2), the scope is deliberate and documented: fenced code blocks are
-/// skipped, HTML (`<img src>`) is out of scope, and anything URL-shaped (`https://…`,
-/// `mailto:`, bare `#anchor`) is ignored — those are not files this artifact must
-/// carry. Wikilinks (`[[type:id]]`) never match: they have no `](`, and `vaire check`
-/// owns them.
+/// (registry.md §5.2), the scope is deliberate and documented: code is skipped via the
+/// shared CommonMark awareness (`corpus::markdown` — fences tracked by their opening
+/// marker, inline spans masked), HTML (`<img src>`) is out of scope, and anything
+/// URL-shaped (`https://…`, `mailto:`, bare `#anchor`) is ignored — those are not files
+/// this artifact must carry. Wikilinks (`[[type:id]]`) never match: they have no `](`,
+/// and `vaire check` owns them.
 fn relative_link_targets(content: &str) -> Vec<(String, u32)> {
     let mut out = Vec::new();
-    let mut in_fence = false;
+    let mut fences = Fences::new();
     for (i, raw_line) in content.lines().enumerate() {
         let line_no = (i + 1) as u32;
-        let trimmed = raw_line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
+        if fences.is_code(raw_line) {
             continue;
         }
-        if in_fence {
-            continue;
-        }
+        // A link inside an inline code span is an example, not a demand.
+        let masked = mask_code_spans(raw_line);
+        let trimmed = masked.trim_start();
         // Reference-style definition: `[label]: target` alone on a line. Footnotes
         // (`[^…]`) are prose; a label containing brackets means this was actually an
         // inline link followed by a colon, which the `](` scan below handles.
@@ -308,7 +318,7 @@ fn relative_link_targets(content: &str) -> Vec<(String, u32)> {
             }
             continue;
         }
-        let mut rest = raw_line;
+        let mut rest = masked.as_str();
         while let Some(idx) = rest.find("](") {
             let after = &rest[idx + 2..];
             let (raw_target, remainder) = match after.strip_prefix('<') {
@@ -375,6 +385,19 @@ fn resolve_relative(source: &str, target: &str) -> Option<String> {
     Some(stack.join("/"))
 }
 
+/// Best-effort scratch cleanup on every exit path — a `?` anywhere in `run` must not
+/// leave staging files in `.vaire/dist/`. Missing files are fine (the success path has
+/// already renamed or the failure happened before they existed).
+struct RemoveOnDrop(Vec<std::path::PathBuf>);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 /// Write the artifact archive: a gzip stream (no embedded timestamp, fixed level) over a
 /// tar whose entries appear in `entries` (sorted) order with pinned metadata.
 fn write_archive(
@@ -429,6 +452,16 @@ mod tests {
     fn titles_are_split_in_extraction() {
         let md = "[doc](a.md \"the title\")\n";
         assert_eq!(relative_link_targets(md), vec![("a.md".to_string(), 1)]);
+    }
+
+    #[test]
+    fn code_awareness_is_shared_with_the_corpus() {
+        // A backtick fence nested inside a tilde fence stays code — the naive toggle
+        // failed exactly here, which is why `corpus::markdown::Fences` exists — and an
+        // inline code span is an example, not a demand.
+        let md = "~~~\n```\n[not](a.md)\n```\n[not](b.md)\n~~~\n\
+                  [real](c.md) and `[not](d.md)`\n";
+        assert_eq!(relative_link_targets(md), vec![("c.md".to_string(), 7)]);
     }
 
     #[test]

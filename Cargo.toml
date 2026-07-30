@@ -64,9 +64,11 @@ sha2 = "0.10"
 
 # Artifact writing (`vaire pack`): a deterministic tar stream, gzip-compressed. Written
 # in-process (never the system `tar`) so entry order, timestamps, and ownership are
-# pinned — same commit, same flags, same bytes (registry.md §5).
+# pinned — same commit, same flags, same bytes (registry.md §5). The compression backend
+# is pinned explicitly (default features off): letting feature unification swap in zlib
+# or zlib-ng would silently change the artifact bytes.
 tar = "0.4"
-flate2 = "1"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 # Interactive prompts for `vaire configure` (guided TUI-style wizard)
 inquire = "0.9"

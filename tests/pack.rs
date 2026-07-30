@@ -164,6 +164,43 @@ fn packing_the_same_commit_twice_is_byte_identical() {
 }
 
 #[test]
+fn archive_metadata_is_pinned() {
+    let c = Corpus::fixture();
+    let out = pack::run(&c.ctx(), false).expect("pack");
+    // The commit's own timestamp — the only mtime the archive is allowed to carry.
+    let commit_epoch: u64 = {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(c.root())
+            .args(["show", "-s", "--format=%ct", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    };
+
+    let file = std::fs::File::open(c.root().join(&out.artifact)).unwrap();
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut names = Vec::new();
+    for entry in archive.entries().unwrap() {
+        let entry = entry.unwrap();
+        let header = entry.header();
+        assert_eq!(header.uid().unwrap(), 0);
+        assert_eq!(header.gid().unwrap(), 0);
+        assert_eq!(header.mode().unwrap(), 0o644);
+        assert_eq!(
+            header.mtime().unwrap(),
+            commit_epoch,
+            "entry mtime is the commit epoch"
+        );
+        names.push(entry.path().unwrap().display().to_string());
+    }
+    assert!(!names.is_empty());
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "entries are emitted in sorted order");
+}
+
+#[test]
 fn a_diverged_manifest_refuses_to_pack() {
     let c = Corpus::fixture();
     let manifest = c.root().join("knowledge.toml");
