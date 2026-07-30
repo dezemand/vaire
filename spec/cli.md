@@ -702,6 +702,65 @@ JSON (`installed` and `note` appear only when set):
 }
 ```
 
+### 4.6 `vaire pack`
+
+```
+vaire pack [--no-embeddings] [--json]
+```
+
+Build this package's distributable artifact: `.vaire/dist/<name>-<version>.tgz`, a
+gzipped tar with a single top-level directory `<name>-<version>/` holding the manifest,
+every corpus file the manifest's include/exclude selects, `attachments/**`, and a freshly
+exported `.vaire/index.db`. This is the unit a registry stores and a consumer pulls
+(design: the project registry doc, v0.2).
+
+- **The committed tree is the only input.** Packing is commit-as-publish taken
+  literally: the corpus root must be a Git repository with commits (a corpus nested in a
+  larger repo indexes from the working tree but cannot honestly claim "this artifact is
+  commit X", so it cannot pack), and `knowledge.toml` must be committed and identical to
+  the working copy — the manifest is the artifact's identity *and* its file-selection
+  rules. A dirty working tree otherwise warns and packs HEAD.
+- **Publication gate.** `pack` refreshes the index to HEAD and runs the `vaire check`
+  suite first; violations refuse the pack (exit `6`), because an artifact with
+  violations ships broken references to every consumer.
+- **Attachments are checked.** Every relative Markdown link/image in a packed `.md` is
+  resolved against the artifact. A target **missing at HEAD** or escaping the package
+  root fails the pack (exit `1`, kind `pack`) — that is the corruption class: a typo or
+  a forgotten attachment. A target that exists at HEAD but is **excluded** from the
+  artifact by include/exclude only warns — pointing at deliberately-unshipped source
+  material is legitimate provenance. A trailing-`/` target is a directory link,
+  satisfied by any packed file under it. An `attachments/**` file nothing references is
+  a warning (orphan). URLs, `mailto:`, and bare `#anchors` are ignored; wikilinks
+  belong to `check`.
+- **The shipped index is exported, not copied**: a fresh database written in a fixed
+  order. The machine-local `embed_cache` never ships; `deps_snapshot` is rewritten to
+  `{name, version, constraint}` (an artifact records choices, never locations);
+  `packed_by` records the packing vaire. The FTS structure does **not** ship (its
+  segments embed random identity) — it is derived state over the shipped sections,
+  recreated when the artifact is materialized into a store. Section vectors ship by
+  default with their `embed_provider` identity; `--no-embeddings` strips them.
+- **Reproducible**: entries sorted, timestamps pinned to the commit, ownership zeroed,
+  gzip untimestamped, compression level fixed. Same commit, same flags, same bytes —
+  with vectors included this additionally requires the same vectors (the content-hash
+  cache makes repeat packs on one machine stable); `--no-embeddings` is unconditional.
+
+JSON:
+
+```json
+{
+  "name": "acme-core",
+  "version": "1.4.0",
+  "commit": "8c0f2a…",
+  "artifact": ".vaire/dist/acme-core-1.4.0.tgz",
+  "sha256": "ab12…",
+  "size_bytes": 148215,
+  "entries": 61,
+  "nodes": 58,
+  "embeddings": 214,
+  "warnings": ["attachments/old-diagram.png is not referenced by any packed file"]
+}
+```
+
 ## 5. MCP server
 
 ```

@@ -73,6 +73,7 @@ version = "1.0.0"
 | `name` | **yes** | slug | — | package identity; declared, not path-derived |
 | `version` | **yes** | semver | — | `MAJOR.MINOR.PATCH` |
 | `description` | no | string | *(none)* | one line |
+| `repository` | no | string (URL) | *(none)* | where this package is **authored** (its source repo); rides the manifest into artifacts and registry records so a consumer can choose pull-to-read or clone-to-author |
 | `include` | no | glob[] | `["knowledge/**/*.md", "projects/**/*.md"]` | package file scope |
 | `exclude` | no | glob[] | `["**/node_modules/**", "**/drafts/**", "**/archive/**"]` | |
 | `types` | no | slug[] | *(empty)* | the entity types this package **defines** |
