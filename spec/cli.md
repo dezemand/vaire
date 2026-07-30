@@ -710,7 +710,8 @@ vaire pack [--no-embeddings] [--json]
 
 Build this package's distributable artifact: `.vaire/dist/<name>-<version>.tgz`, a
 gzipped tar with a single top-level directory `<name>-<version>/` holding the manifest,
-every corpus file the manifest's include/exclude selects, `attachments/**`, and a freshly
+every corpus file the manifest's include/exclude selects, **every file those reference**
+by relative link or image (transitively through referenced Markdown), and a freshly
 exported `.vaire/index.db`. This is the unit a registry stores and a consumer pulls
 (design: the project registry doc, v0.2).
 
@@ -723,18 +724,20 @@ exported `.vaire/index.db`. This is the unit a registry stores and a consumer pu
 - **Publication gate.** `pack` refreshes the index to HEAD and runs the `vaire check`
   suite first; violations refuse the pack (exit `6`), because an artifact with
   violations ships broken references to every consumer.
-- **Attachments are checked.** Every relative Markdown link/image in a packed `.md` is
-  resolved against the artifact. A target **missing at HEAD** or escaping the package
-  root fails the pack (exit `1`, kind `pack`) — that is the corruption class: a typo or
-  a forgotten attachment. A target that exists at HEAD but is **excluded** from the
-  artifact by include/exclude only warns — pointing at deliberately-unshipped source
-  material is legitimate provenance. A trailing-`/` target is a directory link,
-  satisfied by any packed file under it. An `attachments/**` file nothing references is
-  a warning (orphan). URLs, `mailto:`, and bare `#anchors` are ignored; wikilinks
-  belong to `check`. What makes something an attachment is **placement alone**: the
-  root-level `attachments/` directory ships wholesale and is hard-excluded from corpus
-  scanning — a Markdown file there never becomes a node, however broad the include
-  globs.
+- **Attachments ship by reference.** Every relative link/image target — inline
+  `[]()`/`![]()` and reference-style `[label]: path` definitions, fenced code skipped —
+  reachable from a packed `.md` is pulled into the artifact, transitively through
+  referenced Markdown (a shipped document never carries broken links of its own). There
+  is no reserved directory and no extension list: the reference is the declaration, and
+  an unreferenced file simply does not ship (orphans cannot exist). Referenced payload
+  is never corpus — the include/exclude globs alone decide what gets an id. Three
+  author decisions outrank a link: an **exclude glob vetoes** shipment (warning — a
+  stray link must not republish a draft); a **gitignored** target is declared
+  local-only (warning); anything else **missing at HEAD** or escaping the package root
+  fails the pack (exit `1`, kind `pack`) — a typo or a forgotten `git add`. A
+  trailing-`/` target is a directory link: satisfied by any shipped file under it,
+  never an inclusion demand. URLs, `mailto:`, bare `#anchors`, and HTML `<img>` are out
+  of scope; wikilinks belong to `check`.
 - **The shipped index is exported, not copied**: a fresh database written in a fixed
   order. The machine-local `embed_cache` never ships; `deps_snapshot` is rewritten to
   `{name, version, constraint}` (an artifact records choices, never locations);
@@ -760,7 +763,7 @@ JSON:
   "entries": 61,
   "nodes": 58,
   "embeddings": 214,
-  "warnings": ["attachments/old-diagram.png is not referenced by any packed file"]
+  "warnings": ["knowledge/pointer.md:12 links to drafts/wip.md, which the exclude globs veto; it stays out of the artifact"]
 }
 ```
 

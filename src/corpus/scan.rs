@@ -53,15 +53,16 @@ impl Scanner {
     }
 
     /// True iff `rel` (a repo-root-relative path) is in scope: matched by an include
-    /// glob, not by any exclude glob, and not under the root-level `attachments/`.
-    ///
-    /// `attachments/` is the package's non-corpus payload (registry.md §5.2): files
-    /// there ship in the artifact but are **never** parsed as nodes, regardless of how
-    /// broad the include globs are — placement is the author's declaration, so a
-    /// Markdown file inside it stays an attachment. Only the root-level directory is
-    /// special; a nested `foo/attachments/` is ordinary glob-governed corpus space.
+    /// glob and not by any exclude glob.
     pub fn is_match(&self, rel: &std::path::Path) -> bool {
-        !rel.starts_with("attachments") && self.include.is_match(rel) && !self.exclude.is_match(rel)
+        self.include.is_match(rel) && !self.exclude.is_match(rel)
+    }
+
+    /// True iff `rel` is matched by an exclude glob. The excludes are the author's
+    /// veto, and `vaire pack` honors it beyond corpus scope: a file referenced from
+    /// packed Markdown ships as payload — unless excluded here (registry.md §5.2).
+    pub fn is_excluded(&self, rel: &std::path::Path) -> bool {
+        self.exclude.is_match(rel)
     }
 }
 
@@ -73,29 +74,4 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet> {
     }
     b.build()
         .map_err(|e| VaireError::Config(format!("glob set: {e}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Scanner;
-    use crate::config::Config;
-    use std::path::Path;
-
-    #[test]
-    fn root_level_attachments_are_never_corpus_even_under_broad_globs() {
-        let config = Config {
-            include: vec!["**/*.md".into()],
-            exclude: vec![],
-            ..Config::default()
-        };
-        let scanner = Scanner::from_config(&config).unwrap();
-
-        assert!(scanner.is_match(Path::new("knowledge/a.md")));
-        assert!(!scanner.is_match(Path::new("attachments/notes.md")));
-        assert!(!scanner.is_match(Path::new("attachments/deep/nested.md")));
-        // Only the root-level directory is special.
-        assert!(scanner.is_match(Path::new("knowledge/attachments/a.md")));
-        // Component match, not a string prefix: this is an ordinary directory.
-        assert!(scanner.is_match(Path::new("attachments-archive/a.md")));
-    }
 }

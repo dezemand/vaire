@@ -3,15 +3,17 @@
 //!
 //! The artifact is `<name>-<version>.tgz` in `.vaire/dist/`: a gzipped tar with a single
 //! top-level directory holding the manifest, every corpus file the manifest's
-//! include/exclude selects, `attachments/**`, and a freshly exported `.vaire/index.db`
-//! (the machine-readable manifest — registry.md §5.1). Everything is read **from the
-//! committed tree**: what you commit is what you publish, and the artifact is
-//! reproducible because its inputs are a commit, not a mood.
+//! include/exclude selects, **every file those reference** by relative link or image
+//! (transitively through referenced Markdown — registry.md §5.2), and a freshly
+//! exported `.vaire/index.db` (the machine-readable manifest — registry.md §5.1).
+//! Everything is read **from the committed tree**: what you commit is what you publish,
+//! and the artifact is reproducible because its inputs are a commit, not a mood.
 //!
 //! Pack is also a publication gate: it refuses to build when `vaire check` reports
-//! violations, and it fails on a relative Markdown link whose target is missing from the
-//! artifact (registry.md §5.2). Orphaned attachments and a dirty working tree are
-//! warnings, not stops.
+//! violations, and it fails on a relative Markdown link whose target is missing from
+//! the committed tree (registry.md §5.2). Links to targets the author chose to keep out
+//! — exclude-glob-vetoed or gitignored — and a dirty working tree are warnings, not
+//! stops. Orphans cannot exist: an unreferenced file simply does not ship.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -74,26 +76,19 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
         return Err(VaireError::CheckViolations(report.violations.len()));
     }
 
-    // ---- the artifact file set ---------------------------------------------------------
+    // ---- the artifact file set: corpus, plus everything it references ------------------
     let head_files = git::list_files_at_head(root)?;
     let head_set: BTreeSet<&str> = head_files.iter().map(String::as_str).collect();
     let scanner = Scanner::from_config(&ctx.config)?;
     let mut selected: BTreeSet<String> = BTreeSet::new();
     selected.insert("knowledge.toml".to_string());
     for file in &head_files {
-        if scanner.is_match(Path::new(file)) || file.starts_with("attachments/") {
+        if scanner.is_match(Path::new(file)) {
             selected.insert(file.clone());
         }
     }
-
-    // ---- relative-link integrity (registry.md §5.2) ------------------------------------
-    let referenced_attachments = lint_relative_links(root, &selected, &head_set, &mut warnings)?;
-    for orphan in selected
-        .iter()
-        .filter(|p| p.starts_with("attachments/") && !referenced_attachments.contains(*p))
-    {
-        warnings.push(format!("{orphan} is not referenced by any packed file"));
-    }
+    let payload = collect_referenced_files(root, &selected, &head_set, &scanner, &mut warnings)?;
+    selected.extend(payload);
 
     // ---- the artifact index (registry.md §5.1) -----------------------------------------
     let vaire_dir = Repo::prepare_derived_dir(root)?;
@@ -149,78 +144,103 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
     })
 }
 
-/// Check every relative Markdown link in the packed `.md` files against the artifact.
+/// Grow the artifact's payload from references, validating every relative link.
 ///
-/// Two tiers, calibrated on real corpora: a target **missing at HEAD and not gitignored**
-/// (or escaping the package root) fails the pack — that is the corruption class, a typo
-/// or a forgotten `git add`. A target the author *chose* to keep out — excluded from the
-/// artifact by include/exclude, or gitignored entirely — only warns: pointing at
-/// deliberately-unshipped source material (a raw reference corpus, a draft) is
-/// legitimate provenance. A trailing-`/` target is a directory link, satisfied by any
-/// file under it.
-///
-/// Returns the set of `attachments/` paths that are referenced (for the orphan warning).
-fn lint_relative_links(
+/// **Inclusion is by reference, not location** (registry.md §5.2): every relative
+/// `[]()`/`![]()` target reachable from the corpus files ships — transitively, when the
+/// target is itself Markdown, so a shipped document never carries broken links of its
+/// own. Three author decisions outrank a link, calibrated on real corpora: the
+/// **exclude globs veto** shipment (warning — a stray link must not republish a draft);
+/// a **gitignored** target is declared local-only (warning — togaf's raw `reference/`
+/// corpus is the canonical case); anything else missing at HEAD (or escaping the
+/// package root) **fails the pack** — a typo or a forgotten `git add`. A trailing-`/`
+/// target is a directory link: satisfied by any shipped file under it, but never an
+/// inclusion demand — a link asks for a file, not a tree.
+fn collect_referenced_files(
     root: &Path,
-    selected: &BTreeSet<String>,
+    corpus: &BTreeSet<String>,
     head_set: &BTreeSet<&str>,
+    scanner: &Scanner,
     warnings: &mut Vec<String>,
 ) -> Result<BTreeSet<String>> {
-    let md_paths: Vec<String> = selected
+    let mut payload: BTreeSet<String> = BTreeSet::new();
+    let mut visited_md: BTreeSet<String> = corpus
         .iter()
         .filter(|p| p.ends_with(".md"))
         .cloned()
         .collect();
-    let contents = git::show_many_at_head(root, &md_paths)?;
-
-    let mut referenced = BTreeSet::new();
     let mut violations = Vec::new();
     // Targets absent from HEAD, held back for the gitignore tiebreaker below:
     // (source, line, target-as-written, path-to-ask-git-about, kind).
     let mut missing: Vec<(String, u32, String, String, &'static str)> = Vec::new();
-    for (path, content) in md_paths.iter().zip(contents) {
-        let Some(content) = content else { continue };
-        for (target, line) in relative_link_targets(&content) {
-            let is_dir = target.ends_with('/');
-            match resolve_relative(path, &target) {
-                None => violations.push(format!(
-                    "{path}:{line} → {target} (escapes the package root)"
-                )),
-                Some(resolved) if is_dir => {
-                    let prefix = format!("{resolved}/");
-                    if selected.iter().any(|p| p.starts_with(&prefix)) {
-                        // At least one packed file materializes the directory.
-                    } else if head_set.iter().any(|p| p.starts_with(&prefix)) {
-                        warnings.push(format!(
-                            "{path}:{line} links to {target}, which is excluded from the \
-                             artifact by include/exclude"
+    // Directory links validate against the *final* shipped set, so they are deferred:
+    // (source, line, target-as-written, resolved-prefix).
+    let mut dir_links: Vec<(String, u32, String, String)> = Vec::new();
+
+    // Breadth-first over the reference graph, one Git batch per frontier.
+    let mut frontier: Vec<String> = visited_md.iter().cloned().collect();
+    while !frontier.is_empty() {
+        let contents = git::show_many_at_head(root, &frontier)?;
+        let mut next = Vec::new();
+        for (path, content) in frontier.iter().zip(contents) {
+            let Some(content) = content else { continue };
+            for (target, line) in relative_link_targets(&content) {
+                let is_dir = target.ends_with('/');
+                match resolve_relative(path, &target) {
+                    None => violations.push(format!(
+                        "{path}:{line} → {target} (escapes the package root)"
+                    )),
+                    Some(resolved) if is_dir => {
+                        dir_links.push((
+                            path.clone(),
+                            line,
+                            target.clone(),
+                            format!("{resolved}/"),
                         ));
-                    } else {
-                        missing.push((path.clone(), line, target.clone(), prefix, "directory"));
                     }
-                }
-                Some(resolved) => {
-                    if selected.contains(&resolved) {
-                        if resolved.starts_with("attachments/") {
-                            referenced.insert(resolved);
+                    Some(resolved) => {
+                        if corpus.contains(&resolved) || payload.contains(&resolved) {
+                            // Already shipping.
+                        } else if !head_set.contains(resolved.as_str()) {
+                            missing.push((path.clone(), line, target.clone(), resolved, "file"));
+                        } else if scanner.is_excluded(Path::new(&resolved)) {
+                            warnings.push(format!(
+                                "{path}:{line} links to {target}, which the exclude globs \
+                                 veto; it stays out of the artifact"
+                            ));
+                        } else {
+                            payload.insert(resolved.clone());
+                            if resolved.ends_with(".md") && visited_md.insert(resolved.clone()) {
+                                next.push(resolved);
+                            }
                         }
-                    } else if head_set.contains(resolved.as_str()) {
-                        warnings.push(format!(
-                            "{path}:{line} links to {target}, which is excluded from the \
-                             artifact by include/exclude"
-                        ));
-                    } else {
-                        missing.push((path.clone(), line, target.clone(), resolved, "file"));
                     }
                 }
             }
         }
+        frontier = next;
+    }
+
+    for (path, line, target, prefix) in dir_links {
+        if corpus
+            .iter()
+            .chain(payload.iter())
+            .any(|p| p.starts_with(&prefix))
+        {
+            continue; // at least one shipped file materializes the directory
+        }
+        if head_set.iter().any(|p| p.starts_with(&prefix)) {
+            warnings.push(format!(
+                "{path}:{line} links to {target}, but nothing under it ships in the artifact"
+            ));
+        } else {
+            missing.push((path, line, target, prefix, "directory"));
+        }
     }
 
     // The tiebreaker for a target absent from HEAD: the repository's own ignore rules.
-    // A gitignored target was *declared* local-only by the author (togaf's raw
-    // `reference/` corpus is the canonical case) — warn. An unignored one is a typo or
-    // a forgotten `git add` — fail.
+    // A gitignored target was *declared* local-only by the author — warn. An unignored
+    // one is a typo or a forgotten `git add` — fail.
     if !missing.is_empty() {
         let ask: Vec<String> = missing.iter().map(|(_, _, _, p, _)| p.clone()).collect();
         let ignored = git::ignored_paths(root, &ask)?;
@@ -243,14 +263,17 @@ fn lint_relative_links(
             violations.join("\n  ")
         )));
     }
-    Ok(referenced)
+    Ok(payload)
 }
 
-/// Extract relative link/image targets (`[text](target)`) with 1-based line numbers.
-/// Deliberately narrow: inline links only (no reference-style definitions), fenced code
-/// blocks skipped, and anything URL-shaped (`https://…`, `mailto:`, bare `#anchor`)
-/// ignored — those are not files this artifact must carry. Wikilinks (`[[type:id]]`)
-/// never match: they have no `](`, and `vaire check` owns them.
+/// Extract relative link/image targets with 1-based line numbers: inline
+/// `[text](target)` / `![alt](target)` plus reference-style definitions
+/// (`[label]: target` on its own line). Because **inclusion rides on extraction**
+/// (registry.md §5.2), the scope is deliberate and documented: fenced code blocks are
+/// skipped, HTML (`<img src>`) is out of scope, and anything URL-shaped (`https://…`,
+/// `mailto:`, bare `#anchor`) is ignored — those are not files this artifact must
+/// carry. Wikilinks (`[[type:id]]`) never match: they have no `](`, and `vaire check`
+/// owns them.
 fn relative_link_targets(content: &str) -> Vec<(String, u32)> {
     let mut out = Vec::new();
     let mut in_fence = false;
@@ -262,6 +285,27 @@ fn relative_link_targets(content: &str) -> Vec<(String, u32)> {
             continue;
         }
         if in_fence {
+            continue;
+        }
+        // Reference-style definition: `[label]: target` alone on a line. Footnotes
+        // (`[^…]`) are prose; a label containing brackets means this was actually an
+        // inline link followed by a colon, which the `](` scan below handles.
+        if let Some(rest) = trimmed.strip_prefix('[')
+            && !rest.starts_with('^')
+            && let Some((label, def)) = rest.split_once("]:")
+            && !label.contains(['[', ']'])
+        {
+            let def = def.trim();
+            let raw_target = match def.strip_prefix('<') {
+                Some(bracketed) => bracketed
+                    .split_once('>')
+                    .map(|(t, _)| t)
+                    .unwrap_or(bracketed),
+                None => def.split(char::is_whitespace).next().unwrap_or(def),
+            };
+            if let Some(target) = classify(raw_target) {
+                out.push((target, line_no));
+            }
             continue;
         }
         let mut rest = raw_line;
@@ -385,6 +429,21 @@ mod tests {
     fn titles_are_split_in_extraction() {
         let md = "[doc](a.md \"the title\")\n";
         assert_eq!(relative_link_targets(md), vec![("a.md".to_string(), 1)]);
+    }
+
+    #[test]
+    fn reference_style_definitions_extract() {
+        let md = "![photo][p]\n\n[p]: assets/photo.jpg\n[q]: <my file.png>\n\
+                  [^fn]: a footnote, not a file\n[r]: https://x.example\n\
+                  [text](a.md): an inline link before a colon is not a definition\n";
+        assert_eq!(
+            relative_link_targets(md),
+            vec![
+                ("assets/photo.jpg".to_string(), 3),
+                ("my file.png".to_string(), 4),
+                ("a.md".to_string(), 7),
+            ]
+        );
     }
 
     #[test]

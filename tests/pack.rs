@@ -249,11 +249,10 @@ fn a_broken_relative_link_blocks_packing() {
 }
 
 #[test]
-fn a_link_to_an_excluded_file_warns_but_packs() {
+fn an_exclude_glob_vetoes_a_referenced_file() {
     let c = Corpus::fixture();
-    // drafts/ is excluded by the default globs: the target exists at HEAD but is
-    // deliberately not in the artifact. Pointing at unshipped source material is
-    // legitimate provenance — the author gets a warning, not a refusal.
+    // drafts/ is excluded by the default globs: a stray link must not republish a
+    // draft. The author gets a warning, and the file stays out of the artifact.
     c.add("knowledge/drafts/wip.md", "# WIP\n")
         .add("knowledge/pointer.md", "[wip](drafts/wip.md)\n")
         .commit();
@@ -262,9 +261,14 @@ fn a_link_to_an_excluded_file_warns_but_packs() {
     assert!(
         out.warnings
             .iter()
-            .any(|w| w.contains("drafts/wip.md") && w.contains("excluded from the artifact")),
+            .any(|w| w.contains("drafts/wip.md") && w.contains("veto")),
         "{:?}",
         out.warnings
+    );
+    let map = entries(&c.root().join(&out.artifact));
+    assert!(
+        !map.keys().any(|k| k.contains("drafts/wip.md")),
+        "the veto is real: referenced or not, an excluded file does not ship"
     );
 }
 
@@ -284,10 +288,13 @@ fn directory_links_resolve_against_packed_files() {
     assert!(
         out.warnings
             .iter()
-            .any(|w| w.contains("reference/") && w.contains("excluded")),
+            .any(|w| w.contains("reference/") && w.contains("nothing under it ships")),
         "{:?}",
         out.warnings
     );
+    // A directory link is not an inclusion demand: nothing under reference/ ships.
+    let map = entries(&c.root().join(&out.artifact));
+    assert!(!map.keys().any(|k| k.contains("raw-source.md")));
 
     c.add("knowledge/toc.md", "[gone](../nowhere/)\n").commit();
     let err = pack::run(&c.ctx(), false).unwrap_err();
@@ -298,44 +305,37 @@ fn directory_links_resolve_against_packed_files() {
 }
 
 #[test]
-fn attachments_never_become_nodes_even_under_broad_globs() {
-    let c = Corpus::empty();
-    // Broad include globs (the togaf style) would otherwise reach into attachments/.
-    std::fs::write(
-        c.root().join("knowledge.toml"),
-        "name = \"test-corpus\"\nversion = \"0.1.0\"\ntypes = [\"person\"]\ninclude = [\"**/*.md\"]\n",
-    )
-    .unwrap();
+fn referenced_markdown_ships_transitively_as_payload_not_nodes() {
+    let c = Corpus::fixture();
+    // guides/ is outside the corpus globs. Referencing setup.md pulls it in as
+    // payload; its own image link is chased too — a shipped document never carries
+    // broken links. Neither becomes a node: only the globs decide what is corpus,
+    // even when the payload file carries id: frontmatter.
     c.add(
-        "knowledge/real.md",
-        "---\nid: real\ntype: person\nname: Real\n---\n# Real\n",
+        "guides/setup.md",
+        "---\nid: setup\ntype: system\nname: Setup\n---\n# Setup\n\n![diagram](diagram.png)\n",
     )
+    .add("guides/diagram.png", "PNGDATA\n")
     .add(
-        "attachments/smuggled.md",
-        "---\nid: smuggled\ntype: person\nname: Smuggled\n---\n# Smuggled\n",
+        "knowledge/howto.md",
+        "# Howto\n\nFollow the [setup guide](../guides/setup.md).\n",
     )
     .commit();
 
     let out = pack::run(&c.ctx(), false).expect("pack");
     let map = entries(&c.root().join(&out.artifact));
+    assert!(map.contains_key("test-corpus-0.1.0/guides/setup.md"));
     assert!(
-        map.contains_key("test-corpus-0.1.0/attachments/smuggled.md"),
-        "ships as an attachment"
+        map.contains_key("test-corpus-0.1.0/guides/diagram.png"),
+        "the closure is transitive through referenced Markdown"
     );
     let (_dir, index) = artifact_index(&c.root().join(&out.artifact));
     assert_eq!(
         index
-            .scalar_i64(
-                "SELECT count(*) FROM nodes WHERE path LIKE 'attachments/%'",
-                ()
-            )
+            .scalar_i64("SELECT count(*) FROM nodes WHERE path LIKE 'guides/%'", ())
             .unwrap(),
         0,
-        "placement declares intent: an id-bearing file in attachments/ is not a node"
-    );
-    assert_eq!(
-        index.scalar_i64("SELECT count(*) FROM nodes", ()).unwrap(),
-        1
+        "payload is never corpus: globs alone decide what gets an id"
     );
 }
 
@@ -360,39 +360,53 @@ fn gitignored_targets_warn_instead_of_failing() {
 }
 
 #[test]
-fn attachments_ship_verbatim_and_orphans_warn() {
+fn referenced_files_ship_verbatim_and_unreferenced_files_never_ship() {
     let c = Corpus::fixture();
-    // Clearly binary bytes — NULs and an invalid-UTF-8 sequence — to prove the git blob
-    // path is byte-safe end to end.
+    // Co-located next to the entity that uses it — no reserved directory. Clearly
+    // binary bytes (NULs, invalid UTF-8) prove the git blob path is byte-safe.
     let wiring: Vec<u8> = vec![0xFF, 0xD8, 0x00, 0x01, 0xFE, 0x00, 0x42];
-    std::fs::create_dir_all(c.root().join("attachments")).unwrap();
-    std::fs::write(c.root().join("attachments/wiring.png"), &wiring).unwrap();
-    std::fs::write(c.root().join("attachments/orphan.bin"), b"unreferenced").unwrap();
+    std::fs::create_dir_all(c.root().join("knowledge/entities")).unwrap();
+    std::fs::write(c.root().join("knowledge/entities/wiring.png"), &wiring).unwrap();
+    std::fs::write(
+        c.root().join("knowledge/entities/unused.bin"),
+        b"never linked",
+    )
+    .unwrap();
     c.add(
-        "knowledge/line-3.md",
-        "# Line 3\n\n![wiring](../attachments/wiring.png)\n",
+        "knowledge/entities/line-3.md",
+        "# Line 3\n\n![wiring](wiring.png)\n",
     )
     .commit();
 
     let out = pack::run(&c.ctx(), false).expect("pack");
     let map = entries(&c.root().join(&out.artifact));
     assert_eq!(
-        map["test-corpus-0.1.0/attachments/wiring.png"], wiring,
-        "attachment bytes survive git and tar untouched"
+        map["test-corpus-0.1.0/knowledge/entities/wiring.png"], wiring,
+        "referenced bytes survive git and tar untouched"
     );
-    assert!(map.contains_key("test-corpus-0.1.0/attachments/orphan.bin"));
+    // Inclusion is by reference: an unlinked file is not an orphan to warn about —
+    // it simply does not ship.
+    assert!(!map.keys().any(|k| k.contains("unused.bin")));
     assert!(
-        out.warnings
-            .iter()
-            .any(|w| w.contains("attachments/orphan.bin") && w.contains("not referenced")),
+        !out.warnings.iter().any(|w| w.contains("unused.bin")),
         "{:?}",
         out.warnings
     );
-    assert!(
-        !out.warnings
-            .iter()
-            .any(|w| w.contains("attachments/wiring.png")),
-        "referenced attachments are not orphans: {:?}",
-        out.warnings
-    );
+}
+
+#[test]
+fn reference_style_definitions_are_extracted_too() {
+    let c = Corpus::fixture();
+    let photo = b"\x00\x01photo".to_vec();
+    std::fs::create_dir_all(c.root().join("knowledge")).unwrap();
+    std::fs::write(c.root().join("knowledge/photo.jpg"), &photo).unwrap();
+    c.add(
+        "knowledge/gallery.md",
+        "# Gallery\n\nSee the ![photo][p].\n\n[p]: photo.jpg\n",
+    )
+    .commit();
+
+    let out = pack::run(&c.ctx(), false).expect("pack");
+    let map = entries(&c.root().join(&out.artifact));
+    assert_eq!(map["test-corpus-0.1.0/knowledge/photo.jpg"], photo);
 }
