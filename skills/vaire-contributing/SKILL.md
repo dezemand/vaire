@@ -29,7 +29,11 @@ an observer — see the **vaire-answering** skill), never a maintainer.
 | Add **`aliases:`** | a term people actually use for an existing entity — this seeds future resolution |
 | Add **references** | `[[type:id]]` links in prose, edges in frontmatter |
 | Raise a **loose end** | `[[?type: descriptor]]` for anything you couldn't resolve |
-| **Resolve** a loose end | the one sanctioned in-place edit: `[[?person: someone from logistics]]` → `[[person:logistics-contact|someone from logistics]]` — add the ID, keep the phrasing |
+| **Resolve** a loose end | the one sanctioned in-place edit — add the ID, keep the phrasing as display text (example below) |
+
+```text
+[[?person: someone from logistics]]  →  [[person:logistics-contact|someone from logistics]]
+```
 
 ## What you must not do — the hard gates
 

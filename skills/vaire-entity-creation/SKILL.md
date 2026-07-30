@@ -75,7 +75,7 @@ keep it that way by auto-resolving only the unambiguous cases.
 
 Rewriting is **additive**: add the ID, keep the original phrasing as display text —
 
-```
+```text
 [[?person: someone from logistics]]  →  [[person:logistics-contact|someone from logistics]]
 ```
 

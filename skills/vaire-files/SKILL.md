@@ -114,7 +114,7 @@ references: [method:event-sourcing, system:ingest-api]
 
 References are **IDs, never bare display names.** Five forms:
 
-```
+```text
 [[person:jane-doe]]                      resolved (ID known)
 [[person:jane-doe|Jane]]                 resolved, with display text
 [[@acme-core/team:platform]]             cross-package (the target lives in a dependency)
@@ -156,7 +156,7 @@ Two invariants:
 The one sanctioned in-place edit is **resolving** an unresolved reference, which is
 additive (add the ID, keep the original phrasing as display text):
 
-```
+```text
 [[?person: someone from logistics]]  →  [[person:logistics-contact|someone from logistics]]
 ```
 
@@ -168,7 +168,7 @@ step (the **vaire-entity-creation** skill). Just leave a `[[?...]]` descriptor.
 A resolved reference renders to a portable Markdown link, with link text from the
 target's `name:` (or a `|` override):
 
-```
+```text
 [[department:hr]]      →  [Human Resources](./hr.md)
 [[department:hr|HR]]   →  [HR](./hr.md)
 ```

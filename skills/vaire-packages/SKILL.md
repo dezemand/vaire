@@ -129,7 +129,7 @@ inspection (no index needed, safe as a first command anywhere).
 
 Grammar recap (the full reference model is in the **vaire-files** skill):
 
-```
+```text
 [[@acme-core/team:platform]]            inline (prose)
 owner: "@acme-core/team:platform"       frontmatter — quoted; @ is YAML-reserved
 ```
