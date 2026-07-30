@@ -115,7 +115,8 @@ References are **IDs, never bare display names.** Five forms:
 ```
 
 A **cross-package** reference (`@<package>/type:id`) must name a package declared in this
-package's `knowledge.toml` `[dependencies]` (add one with `vaire add <pkg> --link <path>`).
+package's `knowledge.toml` `[dependencies]` (add one with `vaire add <pkg> --link <path>`;
+the full package model — manifests, linking, versioning — is the **vaire-packages** skill).
 In frontmatter it must be **quoted** — `@` is a YAML reserved indicator:
 `owner: "@acme-core/team:platform"`. Unresolved `[[?...]]` forms never carry a package (a
 descriptor's package is unknown by definition).
@@ -152,7 +153,7 @@ additive (add the ID, keep the original phrasing as display text):
 ```
 
 Creating a brand-new entity is **not** your call when authoring — it is a separate, gated
-step. Just leave a `[[?...]]` descriptor.
+step (the **vaire-entity-creation** skill). Just leave a `[[?...]]` descriptor.
 
 ## Display & rendering
 

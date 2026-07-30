@@ -58,7 +58,8 @@ agent-facing surface is bounded to reads. The eight tools and their arguments:
 Cross-package ids carry an `@<package>/` qualifier (`@acme-core/team:platform`) and are
 accepted wherever an `id` is; cross-package results include a `package` field (`path`
 stays package-root-relative). Fan-out reads list unavailable dependencies under
-`skipped` — never silently dropped.
+`skipped` — never silently dropped. The dependency model behind this (linking, the
+local-packages root) is the **vaire-packages** skill.
 
 `id` is the node's address: global nodes are `type:id` (`person:jane-doe`), while
 **scoped** nodes (any node carrying a `scope:`) are a path —
@@ -91,3 +92,6 @@ tool, missing required argument) is a JSON-RPC protocol error.
 2. **Traverse** — `backlinks` / `refs` to walk the graph.
 3. **Read for depth** — open the returned path, or `render` the node for clean Markdown.
 4. **Find loose ends** — `unresolved` for the `[[?...]]` work list.
+
+Using this surface to *answer questions well* — citation by address, corpus fact vs own
+inference — is the **vaire-answering** skill.

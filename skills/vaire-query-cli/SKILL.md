@@ -72,6 +72,10 @@ dropping them; run `vaire index` to (re)build linked dependency indexes.
 | `vaire status` | Index state: last-indexed commit, commits behind HEAD, node/edge/embedding counts, and one row per linked dependency (freshness, lag, embedding provider). Tolerates a missing index. |
 | `vaire add <pkg>[@^N] [--link <path>]` | Declare a dependency in `knowledge.toml` and (with `--link`) wire `.vaire/packages/<pkg>` to where it lives. |
 
+What each `check` finding means and its sanctioned fix is the **vaire-check-triage**
+skill; the dependency model behind `add`/`deps` (linking, the local-packages root,
+`^MAJOR`) is the **vaire-packages** skill.
+
 ## Global flags
 
 `--repo <path>` (corpus root, overrides discovery and `VAIRE_REPO`), `--json`,
