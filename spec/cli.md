@@ -731,7 +731,10 @@ exported `.vaire/index.db`. This is the unit a registry stores and a consumer pu
   material is legitimate provenance. A trailing-`/` target is a directory link,
   satisfied by any packed file under it. An `attachments/**` file nothing references is
   a warning (orphan). URLs, `mailto:`, and bare `#anchors` are ignored; wikilinks
-  belong to `check`.
+  belong to `check`. What makes something an attachment is **placement alone**: the
+  root-level `attachments/` directory ships wholesale and is hard-excluded from corpus
+  scanning — a Markdown file there never becomes a node, however broad the include
+  globs.
 - **The shipped index is exported, not copied**: a fresh database written in a fixed
   order. The machine-local `embed_cache` never ships; `deps_snapshot` is rewritten to
   `{name, version, constraint}` (an artifact records choices, never locations);

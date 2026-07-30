@@ -298,6 +298,48 @@ fn directory_links_resolve_against_packed_files() {
 }
 
 #[test]
+fn attachments_never_become_nodes_even_under_broad_globs() {
+    let c = Corpus::empty();
+    // Broad include globs (the togaf style) would otherwise reach into attachments/.
+    std::fs::write(
+        c.root().join("knowledge.toml"),
+        "name = \"test-corpus\"\nversion = \"0.1.0\"\ntypes = [\"person\"]\ninclude = [\"**/*.md\"]\n",
+    )
+    .unwrap();
+    c.add(
+        "knowledge/real.md",
+        "---\nid: real\ntype: person\nname: Real\n---\n# Real\n",
+    )
+    .add(
+        "attachments/smuggled.md",
+        "---\nid: smuggled\ntype: person\nname: Smuggled\n---\n# Smuggled\n",
+    )
+    .commit();
+
+    let out = pack::run(&c.ctx(), false).expect("pack");
+    let map = entries(&c.root().join(&out.artifact));
+    assert!(
+        map.contains_key("test-corpus-0.1.0/attachments/smuggled.md"),
+        "ships as an attachment"
+    );
+    let (_dir, index) = artifact_index(&c.root().join(&out.artifact));
+    assert_eq!(
+        index
+            .scalar_i64(
+                "SELECT count(*) FROM nodes WHERE path LIKE 'attachments/%'",
+                ()
+            )
+            .unwrap(),
+        0,
+        "placement declares intent: an id-bearing file in attachments/ is not a node"
+    );
+    assert_eq!(
+        index.scalar_i64("SELECT count(*) FROM nodes", ()).unwrap(),
+        1
+    );
+}
+
+#[test]
 fn gitignored_targets_warn_instead_of_failing() {
     let c = Corpus::fixture();
     // The togaf pattern: raw source material retained locally, declared local-only by

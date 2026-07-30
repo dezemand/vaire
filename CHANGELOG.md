@@ -13,7 +13,10 @@ uses [Semantic Versioning](https://semver.org).
   attachments and a dirty working tree. Reproducible: sorted entries, commit-pinned
   timestamps, zeroed ownership, untimestamped gzip — the exported index ships no
   `embed_cache`, no machine paths in `deps_snapshot`, and no FTS structure (recreated at
-  materialization). `--no-embeddings` strips section vectors.
+  materialization). `--no-embeddings` strips section vectors. The root-level
+  `attachments/` directory is the non-corpus payload: ships wholesale, hard-excluded
+  from corpus scanning (placement declares intent — a Markdown file there never
+  becomes a node).
 - **`repository` manifest field** (manifest.md §3) — where the package is authored, for
   the registry's pull-to-read vs clone-to-author choice (registry design v0.2).
 

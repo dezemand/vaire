@@ -74,7 +74,7 @@ version = "1.0.0"
 | `version` | **yes** | semver | — | `MAJOR.MINOR.PATCH` |
 | `description` | no | string | *(none)* | one line |
 | `repository` | no | string (URL) | *(none)* | where this package is **authored** (its source repo); rides the manifest into artifacts and registry records so a consumer can choose pull-to-read or clone-to-author |
-| `include` | no | glob[] | `["knowledge/**/*.md", "projects/**/*.md"]` | package file scope |
+| `include` | no | glob[] | `["knowledge/**/*.md", "projects/**/*.md"]` | package file scope; the root-level `attachments/` is always outside it (never corpus, ships in artifacts) |
 | `exclude` | no | glob[] | `["**/node_modules/**", "**/drafts/**", "**/archive/**"]` | |
 | `types` | no | slug[] | *(empty)* | the entity types this package **defines** |
 | `vocabulary_strict` | no | bool | `false` | when set, `vaire check` warns on a type not in `types` |
