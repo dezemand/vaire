@@ -1,6 +1,14 @@
 ---
 name: vaire-query-cli
-description: How to query a Vairë reference-graph index from a shell with the `vaire` CLI. Covers the read commands resolve, render, backlinks, refs, search, suggest, unresolved, and deps (including cross-package `@pkg/type:id` ids and linked dependencies), plus maintenance (init, index, check, status), their flags, JSON output, and exit codes. Use this when looking up an entity or record, following references or backlinks, traversing the graph, searching the corpus, listing unresolved references, rendering a node to portable Markdown, resolving scoped record IDs (`container-id/type:local`) or scope-filtering, or building/validating the index of a Vairë knowledge base from the command line.
+description: >-
+  How to query a Vairë reference-graph index from a shell with the `vaire` CLI. Covers the read
+  commands resolve, render, backlinks, refs, search, suggest, unresolved, and deps (including
+  cross-package `@pkg/type:id` ids and linked dependencies), plus maintenance (init, index,
+  check, status), their flags, JSON output, and exit codes. Use this when looking up an entity
+  or record, following references or backlinks, traversing the graph, searching the corpus,
+  listing unresolved references, rendering a node to portable Markdown, resolving scoped record
+  IDs (`container-id/type:local`) or scope-filtering, or building/validating the index of a
+  Vairë knowledge base from the command line.
 metadata:
   project: vaire
 ---
@@ -71,6 +79,10 @@ dropping them; run `vaire index` to (re)build linked dependency indexes.
 | `vaire check [--strict] [--working-tree] [--no-deps]` | Integrity: duplicate IDs, dangling references (local **and** cross-package), undeclared imports, and missing dependencies are failures (exit `6`); orphans, drift, frontmatter-`[[ ]]`, `unknown_type`, unused dependencies, and version mismatches are warnings (`--strict` promotes them). Runs the dependency ensure pass first (`--no-deps` skips); `--working-tree` reindexes the working tree first. |
 | `vaire status` | Index state: last-indexed commit, commits behind HEAD, node/edge/embedding counts, and one row per linked dependency (freshness, lag, embedding provider). Tolerates a missing index. |
 | `vaire add <pkg>[@^N] [--link <path>]` | Declare a dependency in `knowledge.toml` and (with `--link`) wire `.vaire/packages/<pkg>` to where it lives. |
+
+What each `check` finding means and its sanctioned fix is the **vaire-check-triage**
+skill; the dependency model behind `add`/`deps` (linking, the local-packages root,
+`^MAJOR`) is the **vaire-packages** skill.
 
 ## Global flags
 

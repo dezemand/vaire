@@ -1,6 +1,14 @@
 ---
 name: vaire-files
-description: Explains how a Vairë knowledge corpus is structured and authored. Nodes are Markdown files whose frontmatter carries a bare `id:` plus a `type:` that compose to an addressable `type:id`; they reference each other with `[[type:id]]` wikilinks, or `[[?type: descriptor]]` when the target is not yet known. Use this when creating, editing, or interpreting files in a Vairë corpus — writing entities or records, adding references between them, resolving unresolved references, or understanding frontmatter edge lists, display names, supersession, scoped IDs (records scoped under a container via `scope:`, addressed as `container-id/type:local`), and the additive authoring rules.
+description: >-
+  Explains how a Vairë knowledge corpus is structured and authored. Nodes are Markdown files
+  whose frontmatter carries a bare `id:` plus a `type:` that compose to an addressable
+  `type:id`; they reference each other with `[[type:id]]` wikilinks, or `[[?type: descriptor]]`
+  when the target is not yet known. Use this when creating, editing, or interpreting files in a
+  Vairë corpus — writing entities or records, adding references between them, resolving
+  unresolved references, or understanding frontmatter edge lists, display names, supersession,
+  scoped IDs (records scoped under a container via `scope:`, addressed as `container-
+  id/type:local`), and the additive authoring rules.
 metadata:
   project: vaire
 ---
@@ -106,7 +114,7 @@ references: [method:event-sourcing, system:ingest-api]
 
 References are **IDs, never bare display names.** Five forms:
 
-```
+```text
 [[person:jane-doe]]                      resolved (ID known)
 [[person:jane-doe|Jane]]                 resolved, with display text
 [[@acme-core/team:platform]]             cross-package (the target lives in a dependency)
@@ -115,7 +123,8 @@ References are **IDs, never bare display names.** Five forms:
 ```
 
 A **cross-package** reference (`@<package>/type:id`) must name a package declared in this
-package's `knowledge.toml` `[dependencies]` (add one with `vaire add <pkg> --link <path>`).
+package's `knowledge.toml` `[dependencies]` (add one with `vaire add <pkg> --link <path>`;
+the full package model — manifests, linking, versioning — is the **vaire-packages** skill).
 In frontmatter it must be **quoted** — `@` is a YAML reserved indicator:
 `owner: "@acme-core/team:platform"`. Unresolved `[[?...]]` forms never carry a package (a
 descriptor's package is unknown by definition).
@@ -147,19 +156,19 @@ Two invariants:
 The one sanctioned in-place edit is **resolving** an unresolved reference, which is
 additive (add the ID, keep the original phrasing as display text):
 
-```
+```text
 [[?person: someone from logistics]]  →  [[person:logistics-contact|someone from logistics]]
 ```
 
 Creating a brand-new entity is **not** your call when authoring — it is a separate, gated
-step. Just leave a `[[?...]]` descriptor.
+step (the **vaire-entity-creation** skill). Just leave a `[[?...]]` descriptor.
 
 ## Display & rendering
 
 A resolved reference renders to a portable Markdown link, with link text from the
 target's `name:` (or a `|` override):
 
-```
+```text
 [[department:hr]]      →  [Human Resources](./hr.md)
 [[department:hr|HR]]   →  [HR](./hr.md)
 ```
