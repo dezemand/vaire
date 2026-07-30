@@ -1,6 +1,13 @@
 ---
 name: vaire-entity-creation
-description: The entity-creation pass — the one gated Vairë process, which turns accumulated `[[?...]]` loose ends into links to existing entities or into new ones. Use this when asked to run the pass or to "create the entities": processing `vaire unresolved` output, clustering descriptors, deduplicating against existing entities, adjudicating "new entity or that one?", resolving references, and superseding duplicates with `superseded_by:`. This is maintainer work performed on request — never a side effect of authoring; an agent running it surfaces genuinely ambiguous identity decisions instead of guessing.
+description: >-
+  The entity-creation pass — the one gated Vairë process, which turns accumulated `[[?...]]`
+  loose ends into links to existing entities or into new ones. Use this when asked to run the
+  pass or to "create the entities": processing `vaire unresolved` output, clustering
+  descriptors, deduplicating against existing entities, adjudicating "new entity or that one?",
+  resolving references, and superseding duplicates with `superseded_by:`. This is maintainer
+  work performed on request — never a side effect of authoring; an agent running it surfaces
+  genuinely ambiguous identity decisions instead of guessing.
 metadata:
   project: vaire
 ---

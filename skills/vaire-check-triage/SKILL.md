@@ -1,6 +1,13 @@
 ---
 name: vaire-check-triage
-description: How to interpret and fix every `vaire check` finding. Use this when `vaire check` (or `vaire check --strict`) fails or warns and the finding needs its sanctioned fix — duplicate_id, dangling_ref, undeclared_import, missing_dependency, drift, orphan, frontmatter_wikilink, unknown_type, unreferenceable_id, scoped_type_not_permitted, unused_dependency, or dependency_version_mismatch. Covers what each kind means, the fix that respects the corpus rules (tombstones not deletions, loose ends not guessed IDs), and which findings block publication.
+description: >-
+  How to interpret and fix every `vaire check` finding. Use this when `vaire check` (or `vaire
+  check --strict`) fails or warns and the finding needs its sanctioned fix — duplicate_id,
+  dangling_ref, undeclared_import, missing_dependency, drift, orphan, frontmatter_wikilink,
+  unknown_type, unreferenceable_id, scoped_type_not_permitted, unused_dependency, or
+  dependency_version_mismatch. Covers what each kind means, the fix that respects the corpus
+  rules (tombstones not deletions, loose ends not guessed IDs), and which findings block
+  publication.
 metadata:
   project: vaire
 ---

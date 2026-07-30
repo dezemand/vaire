@@ -1,6 +1,14 @@
 ---
 name: vaire-files
-description: Explains how a Vairë knowledge corpus is structured and authored. Nodes are Markdown files whose frontmatter carries a bare `id:` plus a `type:` that compose to an addressable `type:id`; they reference each other with `[[type:id]]` wikilinks, or `[[?type: descriptor]]` when the target is not yet known. Use this when creating, editing, or interpreting files in a Vairë corpus — writing entities or records, adding references between them, resolving unresolved references, or understanding frontmatter edge lists, display names, supersession, scoped IDs (records scoped under a container via `scope:`, addressed as `container-id/type:local`), and the additive authoring rules.
+description: >-
+  Explains how a Vairë knowledge corpus is structured and authored. Nodes are Markdown files
+  whose frontmatter carries a bare `id:` plus a `type:` that compose to an addressable
+  `type:id`; they reference each other with `[[type:id]]` wikilinks, or `[[?type: descriptor]]`
+  when the target is not yet known. Use this when creating, editing, or interpreting files in a
+  Vairë corpus — writing entities or records, adding references between them, resolving
+  unresolved references, or understanding frontmatter edge lists, display names, supersession,
+  scoped IDs (records scoped under a container via `scope:`, addressed as `container-
+  id/type:local`), and the additive authoring rules.
 metadata:
   project: vaire
 ---

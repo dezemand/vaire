@@ -1,6 +1,12 @@
 ---
 name: vaire-query-mcp
-description: How to query a Vairë reference-graph index through its STDIO MCP server, started with `vaire mcp`. The server exposes the read tools resolve, render, backlinks, refs, search, suggest, unresolved, and deps; their results are the CLI `--json` shapes verbatim. Use this when an agent should query a Vairë knowledge corpus via MCP tools rather than shelling out — registering/starting the server, calling the tools with the right arguments (including scoped record IDs like `container-id/type:local`), and interpreting their JSON results and errors.
+description: >-
+  How to query a Vairë reference-graph index through its STDIO MCP server, started with `vaire
+  mcp`. The server exposes the read tools resolve, render, backlinks, refs, search, suggest,
+  unresolved, and deps; their results are the CLI `--json` shapes verbatim. Use this when an
+  agent should query a Vairë knowledge corpus via MCP tools rather than shelling out —
+  registering/starting the server, calling the tools with the right arguments (including scoped
+  record IDs like `container-id/type:local`), and interpreting their JSON results and errors.
 metadata:
   project: vaire
 ---

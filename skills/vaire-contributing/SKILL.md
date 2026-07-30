@@ -1,6 +1,13 @@
 ---
 name: vaire-contributing
-description: The workflow for writing new knowledge into a Vairë corpus as a contributor — the autonomous-safe role, and the default role for an agent that learned something. Use this when capturing meeting notes, decisions, status, or observations as records; extending an entity's prose with new confirmed material; adding aliases; raising or resolving `[[?...]]` loose ends; or validating and publishing such changes. Covers what a contributor may and must not change, the edit → validate (`--working-tree`) → commit loop, commit-as-publish, and the hard gates (no entity creation, no record rewrites, no deletions, no version bumps).
+description: >-
+  The workflow for writing new knowledge into a Vairë corpus as a contributor — the autonomous-
+  safe role, and the default role for an agent that learned something. Use this when capturing
+  meeting notes, decisions, status, or observations as records; extending an entity's prose with
+  new confirmed material; adding aliases; raising or resolving `[[?...]]` loose ends; or
+  validating and publishing such changes. Covers what a contributor may and must not change, the
+  edit → validate (`--working-tree`) → commit loop, commit-as-publish, and the hard gates (no
+  entity creation, no record rewrites, no deletions, no version bumps).
 metadata:
   project: vaire
 ---

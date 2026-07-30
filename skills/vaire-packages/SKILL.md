@@ -1,6 +1,15 @@
 ---
 name: vaire-packages
-description: Explains the Vairë knowledge-package model — what a package is (an ownership and consumption boundary with a declared identity), the `knowledge.toml` manifest, declaring dependencies with `^MAJOR` constraints, linking where dependencies live (`.vaire/packages/`, `vaire add --link`, the configured local-packages root), how cross-package `@pkg/type:id` references resolve, versioning semantics (MAJOR/MINOR/PATCH, tombstones, re-confirmation), and the integrity checks that guard the dependency surface. Use this when working with manifests or dependencies in any way — creating or editing `knowledge.toml`, adding or linking a dependency, understanding why an `@pkg/…` reference does or doesn't resolve, setting up a cloned package, interpreting `vaire deps` output, or reasoning about what a version constraint or bump means.
+description: >-
+  Explains the Vairë knowledge-package model — what a package is (an ownership and consumption
+  boundary with a declared identity), the `knowledge.toml` manifest, declaring dependencies with
+  `^MAJOR` constraints, linking where dependencies live (`.vaire/packages/`, `vaire add --link`,
+  the configured local-packages root), how cross-package `@pkg/type:id` references resolve,
+  versioning semantics (MAJOR/MINOR/PATCH, tombstones, re-confirmation), and the integrity
+  checks that guard the dependency surface. Use this when working with manifests or dependencies
+  in any way — creating or editing `knowledge.toml`, adding or linking a dependency,
+  understanding why an `@pkg/…` reference does or doesn't resolve, setting up a cloned package,
+  interpreting `vaire deps` output, or reasoning about what a version constraint or bump means.
 metadata:
   project: vaire
 ---

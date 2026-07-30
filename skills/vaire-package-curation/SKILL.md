@@ -1,6 +1,12 @@
 ---
 name: vaire-package-curation
-description: Maintainer judgment for Vairë package boundaries and ontologies. Use this when deciding whether knowledge deserves a new package (or should stay put), scaffolding one, writing or auditing a package README against the substance bar ("questions this package answers"), deciding whether to add a new entity type (the reuse → facet → new-type ladder), moving knowledge between packages with tombstones, or judging whether a past split should be merged back. Pairs with vaire-versioning for the release consequences of these decisions.
+description: >-
+  Maintainer judgment for Vairë package boundaries and ontologies. Use this when deciding
+  whether knowledge deserves a new package (or should stay put), scaffolding one, writing or
+  auditing a package README against the substance bar ("questions this package answers"),
+  deciding whether to add a new entity type (the reuse → facet → new-type ladder), moving
+  knowledge between packages with tombstones, or judging whether a past split should be merged
+  back. Pairs with vaire-versioning for the release consequences of these decisions.
 metadata:
   project: vaire
 ---

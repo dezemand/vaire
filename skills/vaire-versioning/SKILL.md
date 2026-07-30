@@ -1,6 +1,11 @@
 ---
 name: vaire-versioning
-description: How to version and release a Vairë knowledge package. Use this when cutting a release, deciding whether a change is MAJOR, MINOR, or PATCH (the meaning-change predicate), renaming, merging, or removing entities (the tombstone obligation), writing the changelog, tagging, or responding as a consumer to a dependency's MAJOR bump (re-confirmation). Maintainer work: versions are a package's published promises, so only its maintainer bumps them.
+description: >-
+  How to version and release a Vairë knowledge package. Use this when cutting a release,
+  deciding whether a change is MAJOR, MINOR, or PATCH (the meaning-change predicate), renaming,
+  merging, or removing entities (the tombstone obligation), writing the changelog, tagging, or
+  responding as a consumer to a dependency's MAJOR bump (re-confirmation). Maintainer work:
+  versions are a package's published promises, so only its maintainer bumps them.
 metadata:
   project: vaire
 ---

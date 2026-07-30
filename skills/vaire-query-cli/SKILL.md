@@ -1,6 +1,14 @@
 ---
 name: vaire-query-cli
-description: How to query a Vairë reference-graph index from a shell with the `vaire` CLI. Covers the read commands resolve, render, backlinks, refs, search, suggest, unresolved, and deps (including cross-package `@pkg/type:id` ids and linked dependencies), plus maintenance (init, index, check, status), their flags, JSON output, and exit codes. Use this when looking up an entity or record, following references or backlinks, traversing the graph, searching the corpus, listing unresolved references, rendering a node to portable Markdown, resolving scoped record IDs (`container-id/type:local`) or scope-filtering, or building/validating the index of a Vairë knowledge base from the command line.
+description: >-
+  How to query a Vairë reference-graph index from a shell with the `vaire` CLI. Covers the read
+  commands resolve, render, backlinks, refs, search, suggest, unresolved, and deps (including
+  cross-package `@pkg/type:id` ids and linked dependencies), plus maintenance (init, index,
+  check, status), their flags, JSON output, and exit codes. Use this when looking up an entity
+  or record, following references or backlinks, traversing the graph, searching the corpus,
+  listing unresolved references, rendering a node to portable Markdown, resolving scoped record
+  IDs (`container-id/type:local`) or scope-filtering, or building/validating the index of a
+  Vairë knowledge base from the command line.
 metadata:
   project: vaire
 ---

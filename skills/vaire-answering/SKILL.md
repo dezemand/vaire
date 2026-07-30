@@ -1,6 +1,12 @@
 ---
 name: vaire-answering
-description: How to answer questions from a Vairë corpus as an observer — read, cite, change nothing. Use this when asked a question the corpus should answer ("who owns X", "how does process Y work", "what do we know about Z"): choosing the right lookup (`suggest` for entities, `search` for content, `backlinks`/`refs` for structure), reading nodes for depth, citing answers by node address (`type:id`, `@pkg/type:id`), keeping corpus facts distinct from your own inference, and reporting wrong or missing knowledge instead of fixing it.
+description: >-
+  How to answer questions from a Vairë corpus as an observer — read, cite, change nothing. Use
+  this when asked a question the corpus should answer ("who owns X", "how does process Y work",
+  "what do we know about Z"): choosing the right lookup (`suggest` for entities, `search` for
+  content, `backlinks`/`refs` for structure), reading nodes for depth, citing answers by node
+  address (`type:id`, `@pkg/type:id`), keeping corpus facts distinct from your own inference,
+  and reporting wrong or missing knowledge instead of fixing it.
 metadata:
   project: vaire
 ---

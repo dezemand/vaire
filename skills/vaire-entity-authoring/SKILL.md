@@ -1,6 +1,13 @@
 ---
 name: vaire-entity-authoring
-description: What a good Vairë entity file looks like, and the bar for admitting one at all. Use this when writing, converting, or reviewing entity files — during the entity-creation pass, when building a package from source material (documents, wikis, transcripts), or when auditing existing entities. Covers the admission tests (single subject, mappable type, substance floor, standalone), the canonical file shape (frontmatter edges, rich aliases, boundary-first body, facet sections), slug discipline, rewriting rules (extractive-first, qualifiers survive, PII becomes edges never prose), and provenance scalars.
+description: >-
+  What a good Vairë entity file looks like, and the bar for admitting one at all. Use this when
+  writing, converting, or reviewing entity files — during the entity-creation pass, when
+  building a package from source material (documents, wikis, transcripts), or when auditing
+  existing entities. Covers the admission tests (single subject, mappable type, substance floor,
+  standalone), the canonical file shape (frontmatter edges, rich aliases, boundary-first body,
+  facet sections), slug discipline, rewriting rules (extractive-first, qualifiers survive, PII
+  becomes edges never prose), and provenance scalars.
 metadata:
   project: vaire
 ---
