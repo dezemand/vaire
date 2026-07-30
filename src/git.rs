@@ -108,9 +108,22 @@ pub fn show_at_head(repo_root: &Path, rel_path: &str) -> Result<Option<String>> 
 }
 
 /// Read many committed files through one long-lived Git process, preserving the supplied
-/// path order. `git cat-file --batch` avoids paying process startup, repository discovery,
-/// and pack setup once per Markdown file during a full index build.
+/// path order. Lossy-UTF-8 view of [`show_many_at_head_bytes`] — the corpus reader wants
+/// text; artifact packing (`vaire pack`) reads the byte form so attachments survive intact.
 pub fn show_many_at_head(repo_root: &Path, rel_paths: &[String]) -> Result<Vec<Option<String>>> {
+    Ok(show_many_at_head_bytes(repo_root, rel_paths)?
+        .into_iter()
+        .map(|blob| blob.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+        .collect())
+}
+
+/// Read many committed files as raw bytes through one long-lived Git process, preserving
+/// the supplied path order. `git cat-file --batch` avoids paying process startup,
+/// repository discovery, and pack setup once per file.
+pub fn show_many_at_head_bytes(
+    repo_root: &Path,
+    rel_paths: &[String],
+) -> Result<Vec<Option<Vec<u8>>>> {
     if rel_paths.is_empty() {
         return Ok(Vec::new());
     }
@@ -141,7 +154,7 @@ pub fn show_many_at_head(repo_root: &Path, rel_paths: &[String]) -> Result<Vec<O
 
     let stdout = child.stdout.take().expect("piped stdout");
     let mut reader = BufReader::new(stdout);
-    let result: Result<Vec<Option<String>>> = (|| {
+    let result: Result<Vec<Option<Vec<u8>>>> = (|| {
         let mut out = Vec::with_capacity(rel_paths.len());
         for _ in rel_paths {
             let mut header = String::new();
@@ -178,7 +191,7 @@ pub fn show_many_at_head(repo_root: &Path, rel_paths: &[String]) -> Result<Vec<O
                 )
                 .into());
             }
-            out.push(Some(String::from_utf8_lossy(&bytes).into_owned()));
+            out.push(Some(bytes));
         }
         Ok(out)
     })();
@@ -208,6 +221,78 @@ pub fn show_many_at_head(repo_root: &Path, rel_paths: &[String]) -> Result<Vec<O
         );
     }
     Ok(out)
+}
+
+/// Which of `paths` the repository's ignore rules match — the author's own declaration
+/// that something is local-only. Drives `vaire pack`'s missing-link tiebreaker: a
+/// gitignored target was *chosen* to stay undistributed (warn), an unignored one is a
+/// typo or a forgotten file (fail). Paths may be hypothetical; `git check-ignore`
+/// evaluates patterns, not the filesystem. A git failure reports none ignored — the
+/// strict (failing) direction.
+pub fn ignored_paths(
+    repo_root: &Path,
+    paths: &[String],
+) -> Result<std::collections::BTreeSet<String>> {
+    if paths.is_empty() {
+        return Ok(Default::default());
+    }
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["check-ignore", "--stdin", "-z"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let input: Vec<u8> = paths
+        .iter()
+        .flat_map(|p| p.bytes().chain(std::iter::once(0)))
+        .collect();
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .expect("piped stdout")
+        .read_to_end(&mut stdout)?;
+    let status = child.wait()?;
+    let _ = writer.join();
+    // Exit 0 = some ignored, 1 = none; anything else means git could not answer.
+    if !matches!(status.code(), Some(0) | Some(1)) {
+        return Ok(Default::default());
+    }
+    Ok(stdout
+        .split(|&b| b == 0)
+        .filter(|chunk| !chunk.is_empty())
+        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+        .collect())
+}
+
+/// The committer timestamp of HEAD as a Unix epoch, or `None` without commits. `vaire
+/// pack` pins artifact entry mtimes to this, so the same commit always produces the same
+/// bytes (registry.md §5) while extracted files still carry a meaningful date.
+pub fn commit_epoch(repo_root: &Path) -> Result<Option<i64>> {
+    let out = run(repo_root, &["show", "-s", "--format=%ct", "HEAD"])?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    Ok(stdout_trimmed(&out).parse().ok())
+}
+
+/// Whether the working tree differs from HEAD (advisory — drives `vaire pack`'s
+/// "you are packing the committed tree" warning, never a hard gate). `.vaire/` is
+/// excluded: its self-contained `.gitignore` is derived state that may legitimately be
+/// untracked. A failed `git status` reports clean — this is a warning source, not truth.
+pub fn working_tree_dirty(repo_root: &Path) -> Result<bool> {
+    let out = run(
+        repo_root,
+        &["status", "--porcelain", "--", ":(exclude).vaire"],
+    )?;
+    if !out.status.success() {
+        return Ok(false);
+    }
+    Ok(!out.stdout.iter().all(|b| b.is_ascii_whitespace()))
 }
 
 fn run(repo_root: &Path, args: &[&str]) -> Result<Output> {

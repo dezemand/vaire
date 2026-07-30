@@ -57,9 +57,16 @@ url = "2"
 directories = "6.0.0"
 
 # SHA-256 for verifying release downloads against the published SHA256SUMS
-# (`vaire upgrade`, mirroring install.sh/install.ps1). Note `embed::cache::hash_text` is
-# NOT usable here — it is a DefaultHasher stub for cache keys, not a cryptographic digest.
+# (`vaire upgrade`, mirroring install.sh/install.ps1) and for artifact digests
+# (`vaire pack`). Note `embed::cache::hash_text` is NOT usable here — it is a
+# DefaultHasher stub for cache keys, not a cryptographic digest.
 sha2 = "0.10"
+
+# Artifact writing (`vaire pack`): a deterministic tar stream, gzip-compressed. Written
+# in-process (never the system `tar`) so entry order, timestamps, and ownership are
+# pinned — same commit, same flags, same bytes (registry.md §5).
+tar = "0.4"
+flate2 = "1"
 
 # Interactive prompts for `vaire configure` (guided TUI-style wizard)
 inquire = "0.9"
@@ -69,3 +76,7 @@ inquire = "0.9"
 tempfile = "3"
 # Compute expected digests when asserting on release-download verification
 sha2 = "0.10"
+# Read `vaire pack` artifacts back in tests (integration tests cannot see the lib's own
+# dependency graph, so the archive crates are declared here too)
+tar = "0.4"
+flate2 = "1"

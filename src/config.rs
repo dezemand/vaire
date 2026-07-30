@@ -21,6 +21,12 @@ pub struct Config {
     pub version: String,
     pub description: Option<String>,
 
+    /// Where this package is authored — its source repository URL (registry.md §6.1).
+    /// Rides the manifest into the artifact and the registry record, so a consumer can
+    /// choose `vaire pull` (read-only artifact) or clone-and-PR (authoring). Optional,
+    /// free-form; older CLIs ignore it (unknown manifest keys are not errors).
+    pub repository: Option<String>,
+
     /// Dependencies on other packages: `name → "^MAJOR"` (the only legal constraint form).
     pub dependencies: BTreeMap<String, String>,
 
@@ -82,6 +88,7 @@ impl Default for Config {
             name: String::new(),
             version: "0.1.0".to_string(),
             description: None,
+            repository: None,
             dependencies: BTreeMap::new(),
             include: vec!["knowledge/**/*.md".into(), "projects/**/*.md".into()],
             exclude: vec![
@@ -130,10 +137,16 @@ impl Config {
             return Ok(Config::default());
         }
         let text = std::fs::read_to_string(path)?;
-        let cfg: Config = toml::from_str(&text)
-            .map_err(|e| VaireError::Config(format!("{}: {e}", path.display())))?;
+        Self::parse(&text, &path.display().to_string())
+    }
+
+    /// Parse and validate a manifest from its text. `origin` labels errors (a path for
+    /// [`Self::load`]; e.g. `knowledge.toml@HEAD` when reading the committed manifest).
+    pub fn parse(text: &str, origin: &str) -> Result<Config> {
+        let cfg: Config =
+            toml::from_str(text).map_err(|e| VaireError::Config(format!("{origin}: {e}")))?;
         cfg.validate()
-            .map_err(|e| VaireError::Config(format!("{}: {e}", path.display())))?;
+            .map_err(|e| VaireError::Config(format!("{origin}: {e}")))?;
         Ok(cfg)
     }
 

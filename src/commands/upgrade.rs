@@ -360,16 +360,10 @@ fn verify_checksum(
     Ok(())
 }
 
-/// Lowercase hex SHA-256 of a file, read in chunks so a large asset is never fully
-/// buffered in memory.
+/// Lowercase hex SHA-256 of a file (shared digest helper; see `crate::hash`).
 fn sha256_file(path: &Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
-
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)
-        .map_err(|e| VaireError::Upgrade(format!("could not hash the download: {e}")))?;
-    Ok(format!("{:x}", hasher.finalize()))
+    crate::hash::sha256_file(path)
+        .map_err(|e| VaireError::Upgrade(format!("could not hash the download: {e}")))
 }
 
 /// Unpack with the system `tar` — the exact tool `install.sh` requires, and on
