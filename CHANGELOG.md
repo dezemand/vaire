@@ -7,18 +7,17 @@ uses [Semantic Versioning](https://semver.org).
 
 ### Added
 - **`vaire pack`** (cli.md §4.6) — build the package's distributable artifact
-  (`.vaire/dist/<name>-<version>.tgz`) from the committed tree: manifest, corpus files,
-  `attachments/**`, and a freshly exported `.vaire/index.db`. Gated on `vaire check`;
-  fails on relative links whose targets are missing from the artifact; warns on orphaned
-  attachments and a dirty working tree. Reproducible: sorted entries, commit-pinned
-  timestamps, zeroed ownership, untimestamped gzip — the exported index ships no
-  `embed_cache`, no machine paths in `deps_snapshot`, and no FTS structure (recreated at
-  materialization). `--no-embeddings` strips section vectors. Payload ships **by
-  reference**: every relative link/image target in packed Markdown (inline and
-  reference-style, transitively through referenced Markdown) is pulled into the
-  artifact — no reserved directory, no orphans (unreferenced files never ship);
-  exclude globs veto shipment, gitignored targets warn as local-only, anything else
-  missing fails the pack.
+  (`.vaire/dist/<name>-<version>.tgz`) from the committed tree: the manifest, the
+  corpus files the include/exclude globs select, **every file those reference** by
+  relative link or image (inline and reference-style, transitively through referenced
+  Markdown — no reserved directory, and an unreferenced file never ships), and a
+  freshly exported `.vaire/index.db`. Gated on `vaire check`. A link target missing at
+  HEAD fails the pack; targets the author chose to keep out — exclude-glob-vetoed or
+  gitignored — warn, as does a dirty working tree. Reproducible: sorted entries,
+  commit-pinned timestamps, zeroed ownership, untimestamped gzip, pinned compression
+  backend — and the exported index ships no `embed_cache`, no machine paths in
+  `deps_snapshot`, and no FTS structure (recreated at materialization).
+  `--no-embeddings` strips section vectors.
 - **`repository` manifest field** (manifest.md §3) — where the package is authored, for
   the registry's pull-to-read vs clone-to-author choice (registry design v0.2).
 
