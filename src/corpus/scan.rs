@@ -57,6 +57,13 @@ impl Scanner {
     pub fn is_match(&self, rel: &std::path::Path) -> bool {
         self.include.is_match(rel) && !self.exclude.is_match(rel)
     }
+
+    /// True iff `rel` is matched by an exclude glob. The excludes are the author's
+    /// veto, and `vaire pack` honors it beyond corpus scope: a file referenced from
+    /// packed Markdown ships as payload — unless excluded here (registry.md §5.2).
+    pub fn is_excluded(&self, rel: &std::path::Path) -> bool {
+        self.exclude.is_match(rel)
+    }
 }
 
 fn build_globset(patterns: &[String]) -> Result<GlobSet> {

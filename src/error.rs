@@ -47,6 +47,7 @@ pub enum ErrorKind {
     CheckViolations,
     Dependency,
     Upgrade,
+    Pack,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,6 +89,12 @@ pub enum VaireError {
     #[error("upgrade error: {0}")]
     Upgrade(String),
 
+    /// `vaire pack` refused to build the artifact — no committed tree to pack, a
+    /// diverged manifest, or broken relative links (an artifact must be
+    /// self-contained). The message carries the exact fix. Exit `1`.
+    #[error("cannot pack: {0}")]
+    Pack(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -127,6 +134,7 @@ impl VaireError {
             VaireError::CheckViolations(_) => ErrorKind::CheckViolations,
             VaireError::Dependency(_) => ErrorKind::Dependency,
             VaireError::Upgrade(_) => ErrorKind::Upgrade,
+            VaireError::Pack(_) => ErrorKind::Pack,
             _ => ErrorKind::Generic,
         }
     }

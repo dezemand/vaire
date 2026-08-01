@@ -1034,3 +1034,77 @@ pub struct EmbeddingCounts {
     pub sections: usize,
     pub cached: usize,
 }
+
+// ---- pack ------------------------------------------------------------------
+
+/// `vaire pack`: the artifact that was built (registry.md §5). `artifact` is
+/// package-root-relative like every other returned path; `sha256` is the digest a
+/// lockfile or registry pins.
+#[derive(Debug, Serialize)]
+pub struct PackOutput {
+    pub name: String,
+    pub version: String,
+    /// The commit the artifact was packed from (the committed tree, always).
+    pub commit: String,
+    pub artifact: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    /// Files in the archive (manifest + corpus files + referenced payload + the index).
+    pub entries: usize,
+    pub nodes: usize,
+    /// Section vectors shipped in the artifact index (0 under `--no-embeddings`).
+    pub embeddings: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl Output for PackOutput {
+    fn render_human(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "{} {} {}\n",
+            green("packed"),
+            bold(&cyan(&self.name)),
+            plain(&self.version)
+        ));
+        kv(&mut out, "artifact", 10, &self.artifact);
+        kv(&mut out, "sha256", 10, &self.sha256);
+        kv(&mut out, "size", 10, &human_size(self.size_bytes));
+        kv(
+            &mut out,
+            "contents",
+            10,
+            &format!(
+                "{}, {} node{}, {} embedded section{}",
+                pluralize(self.entries, "file"),
+                self.nodes,
+                if self.nodes == 1 { "" } else { "s" },
+                self.embeddings,
+                if self.embeddings == 1 { "" } else { "s" },
+            ),
+        );
+        kv(
+            &mut out,
+            "commit",
+            10,
+            &self.commit[..self.commit.len().min(12)],
+        );
+        for warning in &self.warnings {
+            out.push_str(&yellow(&format!("  warning: {warning}\n")));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB ({bytes} bytes)", bytes as f64 / 1024.0)
+    } else {
+        format!(
+            "{:.1} MiB ({bytes} bytes)",
+            bytes as f64 / (1024.0 * 1024.0)
+        )
+    }
+}

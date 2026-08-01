@@ -13,6 +13,7 @@
 pub mod build;
 pub mod check;
 pub mod db;
+pub mod export;
 pub mod query;
 
 pub use db::Index;

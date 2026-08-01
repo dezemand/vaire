@@ -702,6 +702,71 @@ JSON (`installed` and `note` appear only when set):
 }
 ```
 
+### 4.6 `vaire pack`
+
+```text
+vaire pack [--no-embeddings] [--json]
+```
+
+Build this package's distributable artifact: `.vaire/dist/<name>-<version>.tgz`, a
+gzipped tar with a single top-level directory `<name>-<version>/` holding the manifest,
+every corpus file the manifest's include/exclude selects, **every file those reference**
+by relative link or image (transitively through referenced Markdown), and a freshly
+exported `.vaire/index.db`. This is the unit a registry stores and a consumer pulls
+(design: the project registry doc, v0.2).
+
+- **The committed tree is the only input.** Packing is commit-as-publish taken
+  literally: the corpus root must be a Git repository with commits (a corpus nested in a
+  larger repo indexes from the working tree but cannot honestly claim "this artifact is
+  commit X", so it cannot pack), and `knowledge.toml` must be committed and identical to
+  the working copy — the manifest is the artifact's identity *and* its file-selection
+  rules. A dirty working tree otherwise warns and packs HEAD.
+- **Publication gate.** `pack` refreshes the index to HEAD and runs the `vaire check`
+  suite first; violations refuse the pack (exit `6`), because an artifact with
+  violations ships broken references to every consumer.
+- **Attachments ship by reference.** Every relative link/image target — inline
+  `[]()`/`![]()` and reference-style `[label]: path` definitions, fenced code skipped —
+  reachable from a packed `.md` is pulled into the artifact, transitively through
+  referenced Markdown (a shipped document never carries broken links of its own). There
+  is no reserved directory and no extension list: the reference is the declaration, and
+  an unreferenced file simply does not ship (orphans cannot exist). Referenced payload
+  is never corpus — the include/exclude globs alone decide what gets an id. Three
+  author decisions outrank a link: an **exclude glob vetoes** shipment (warning — a
+  stray link must not republish a draft); a **gitignored** target is declared
+  local-only (warning); anything else **missing at HEAD** or escaping the package root
+  fails the pack (exit `1`, kind `pack`) — a typo or a forgotten `git add`. A
+  trailing-`/` target is a directory link: satisfied by any shipped file under it,
+  never an inclusion demand. URLs, `mailto:`, bare `#anchors`, and HTML `<img>` are out
+  of scope; wikilinks belong to `check`.
+- **The shipped index is exported, not copied**: a fresh database written in a fixed
+  order. The machine-local `embed_cache` never ships; `deps_snapshot` is rewritten to
+  `{name, version, constraint}` (an artifact records choices, never locations);
+  `packed_by` records the packing vaire. The FTS structure does **not** ship (its
+  segments embed random identity) — it is derived state over the shipped sections,
+  recreated when the artifact is materialized into a store. Section vectors ship by
+  default with their `embed_provider` identity; `--no-embeddings` strips them.
+- **Reproducible**: entries sorted, timestamps pinned to the commit, ownership zeroed,
+  gzip untimestamped, compression level fixed. Same commit, same flags, same bytes —
+  with vectors included this additionally requires the same vectors (the content-hash
+  cache makes repeat packs on one machine stable); `--no-embeddings` is unconditional.
+
+JSON:
+
+```json
+{
+  "name": "acme-core",
+  "version": "1.4.0",
+  "commit": "8c0f2a…",
+  "artifact": ".vaire/dist/acme-core-1.4.0.tgz",
+  "sha256": "ab12…",
+  "size_bytes": 148215,
+  "entries": 61,
+  "nodes": 58,
+  "embeddings": 214,
+  "warnings": ["knowledge/pointer.md:12 links to drafts/wip.md, which the exclude globs veto; it stays out of the artifact"]
+}
+```
+
 ## 5. MCP server
 
 ```

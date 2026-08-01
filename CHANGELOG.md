@@ -3,6 +3,24 @@
 The format loosely follows [Keep a Changelog](https://keepachangelog.com); this project
 uses [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+- **`vaire pack`** (cli.md §4.6) — build the package's distributable artifact
+  (`.vaire/dist/<name>-<version>.tgz`) from the committed tree: the manifest, the
+  corpus files the include/exclude globs select, **every file those reference** by
+  relative link or image (inline and reference-style, transitively through referenced
+  Markdown — no reserved directory, and an unreferenced file never ships), and a
+  freshly exported `.vaire/index.db`. Gated on `vaire check`. A link target missing at
+  HEAD fails the pack; targets the author chose to keep out — exclude-glob-vetoed or
+  gitignored — warn, as does a dirty working tree. Reproducible: sorted entries,
+  commit-pinned timestamps, zeroed ownership, untimestamped gzip, pinned compression
+  backend — and the exported index ships no `embed_cache`, no machine paths in
+  `deps_snapshot`, and no FTS structure (recreated at materialization).
+  `--no-embeddings` strips section vectors.
+- **`repository` manifest field** (manifest.md §3) — where the package is authored, for
+  the registry's pull-to-read vs clone-to-author choice (registry design v0.2).
+
 ## [0.2.0] — 2026-07-23
 
 The knowledge-package release: corpora become **packages** that reference each other on

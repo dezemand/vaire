@@ -281,8 +281,10 @@ pub fn run(
         commit: recorded,
     };
 
-    // Everything succeeded — swap the finished index in. Both handles must be closed first
-    // so their WAL is checkpointed back into the file being renamed.
+    // Everything succeeded — swap the finished index in. Both handles must be closed
+    // first so no connection still holds the files being renamed. Turso does NOT
+    // checkpoint the WAL on close, which is exactly why `promote` moves the sidecars
+    // along with the database instead of assuming the file is self-contained.
     if let Some(staged) = staged {
         drop(previous);
         drop(index);
@@ -303,7 +305,7 @@ fn staging_path(db_path: &Path) -> std::path::PathBuf {
 /// rebuild continue against the *old* file when the unlink failed (e.g. a root-owned
 /// `.vaire/`), where `CREATE ... IF NOT EXISTS` no-ops and the schema version is re-stamped
 /// — quietly keeping ghost rows and branding an old-shaped db with the current version.
-fn remove_db_files(path: &Path) -> Result<()> {
+pub(crate) fn remove_db_files(path: &Path) -> Result<()> {
     for suffix in ["", "-wal", "-shm"] {
         let sidecar = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
         match std::fs::remove_file(&sidecar) {

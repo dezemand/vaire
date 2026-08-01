@@ -172,6 +172,16 @@ pub enum Command {
     /// Report index state.
     Status,
 
+    /// Build this package's distributable artifact from the committed tree
+    /// (`.vaire/dist/<name>-<version>.tgz`: manifest, corpus files, every file
+    /// they reference, pre-built index).
+    Pack {
+        /// Strip section vectors from the shipped index — smaller, and byte-reproducible
+        /// regardless of embedding provider.
+        #[arg(long = "no-embeddings")]
+        no_embeddings: bool,
+    },
+
     /// Self-update: download the release binary for this platform and replace this
     /// executable (same contract as the installer script).
     Upgrade {
