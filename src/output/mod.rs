@@ -1049,7 +1049,7 @@ pub struct PackOutput {
     pub artifact: String,
     pub sha256: String,
     pub size_bytes: u64,
-    /// Files in the archive (corpus files + manifest + attachments + the index).
+    /// Files in the archive (manifest + corpus files + referenced payload + the index).
     pub entries: usize,
     pub nodes: usize,
     /// Section vectors shipped in the artifact index (0 under `--no-embeddings`).

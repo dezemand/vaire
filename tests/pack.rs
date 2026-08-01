@@ -178,6 +178,16 @@ fn archive_metadata_is_pinned() {
         String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
     };
 
+    // The gzip container's own header must carry no timestamp either: bytes 4..8 of a
+    // gzip stream are its little-endian MTIME field. Asserted on the raw bytes so the
+    // check cannot depend on any decoder's header-parsing behavior.
+    let raw = std::fs::read(c.root().join(&out.artifact)).unwrap();
+    assert_eq!(
+        &raw[4..8],
+        &[0, 0, 0, 0],
+        "gzip header mtime is untimestamped"
+    );
+
     let file = std::fs::File::open(c.root().join(&out.artifact)).unwrap();
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
     let mut names = Vec::new();
