@@ -107,6 +107,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     // `pack` refuses `--config` before any context is built: the artifact's identity
     // and file selection must come from the package's own committed knowledge.toml, and
     // a rejected override should not even be loaded.
+    #[cfg(feature = "pack")]
     if matches!(cli.command, Command::Pack { .. }) && cli.config.is_some() {
         return Err(VaireError::Usage(
             "`vaire pack` packs the package's committed knowledge.toml; --config is not supported"
@@ -209,6 +210,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Status => {
             emit(&commands::status::run(&ctx)?, json);
         }
+        #[cfg(feature = "pack")]
         Command::Pack { no_embeddings } => {
             emit(&commands::pack::run(&ctx, no_embeddings)?, json);
         }

@@ -13,6 +13,7 @@ pub mod configure;
 pub mod deps;
 pub mod index;
 pub mod init;
+#[cfg(feature = "pack")]
 pub mod pack;
 pub mod refs;
 pub mod render;

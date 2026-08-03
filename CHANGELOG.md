@@ -6,7 +6,10 @@ uses [Semantic Versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
-- **`vaire pack`** (cli.md §4.6) — build the package's distributable artifact
+- **`vaire pack`** (cli.md §4.6) — **behind the non-default `pack` feature**, so it
+  is not compiled into the released binary: the artifact format is still settling and
+  the registry that consumes it does not exist yet. Build with `--features pack` to
+  work on it. Build the package's distributable artifact
   (`.vaire/dist/<name>-<version>.tgz`) from the committed tree: the manifest, the
   corpus files the include/exclude globs select, **every file those reference** by
   relative link or image (inline and reference-style, transitively through referenced
@@ -20,6 +23,25 @@ uses [Semantic Versioning](https://semver.org).
   `--no-embeddings` strips section vectors.
 - **`repository` manifest field** (manifest.md §3) — where the package is authored, for
   the registry's pull-to-read vs clone-to-author choice (registry design v0.2).
+
+## [0.2.1] — 2026-08-03
+
+### Added
+- **Cargo features** — the crate's parsing core (`model`, `corpus`, `config`, `error`)
+  can now be used without the index layer. `index` is a **default** feature covering
+  the Turso-backed index, search, embeddings, git provenance, the CLI binary and the
+  MCP server, so the binary and every existing dependent are unaffected. With
+  `default-features = false` a library consumer gets the reference grammar,
+  frontmatter parsing, the manifest and discovery globs while dropping turso, tokio,
+  clap, rustls and ~350 other crates — 67 crates in the tree instead of 420. Added for
+  `vaire-renderer`, which needs the corpus semantics and nothing else; the point is
+  that a consumer reuses this grammar rather than reimplementing it.
+
+### Changed
+- `vaire pack` and its artifact-index writer are now behind a non-default `pack`
+  feature, so they are compiled out of the released binary. `pack` landed after
+  `v0.2.0` was tagged and has never shipped, so nothing is removed from a released
+  surface.
 
 ## [0.2.0] — 2026-07-23
 

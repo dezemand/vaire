@@ -98,6 +98,7 @@ pub enum VaireError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[cfg(feature = "index")]
     #[error("index engine error: {0}")]
     Turso(#[from] turso::Error),
 
@@ -140,6 +141,7 @@ impl VaireError {
     }
 
     /// The `{"error": {...}}` payload emitted on stdout under `--json` (cli.md §7).
+    #[cfg(feature = "index")]
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "error": {

@@ -1,6 +1,6 @@
 [package]
 name = "vaire"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Derived reference-graph index over a Markdown knowledge corpus, with a CLI and an MCP server"
@@ -14,18 +14,48 @@ repository = "https://github.com/dezemand/vaire"
 [[bin]]
 name = "vaire"
 path = "src/main.rs"
+# The CLI is the `index` feature by definition; without it there is nothing to drive.
+required-features = ["index"]
 
 [lib]
 name = "vaire"
 path = "src/lib.rs"
 
+[features]
+default = ["index"]
+
+# `index` is everything above the parsing core: the Turso-backed index, search,
+# embeddings, git provenance, the CLI and the MCP server. It is on by default, so the
+# binary and every existing dependent are unaffected. Turning it off leaves the
+# corpus semantics — the reference grammar, frontmatter, the manifest, discovery —
+# for a consumer that only reads the corpus (e.g. a renderer), without the ~350
+# crates the index layer needs.
+index = [
+    "dep:clap",
+    "dep:turso",
+    "dep:tokio",
+    "dep:serde_json",
+    "dep:toml_edit",
+    "dep:ureq",
+    "dep:url",
+    "dep:directories",
+    "dep:sha2",
+    "dep:inquire",
+]
+
+# `vaire pack` (registry.md §5) — the artifact format is still settling and the
+# registry that consumes it does not exist yet, so the command is compiled out by
+# default rather than shipped as a promise. Build with `--features pack` to work on
+# it. Enable when the registry line is ready.
+pack = ["index", "dep:tar", "dep:flate2"]
+
 [dependencies]
 # CLI surface (cli.md §2)
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env"], optional = true }
 
 # Output shapes — JSON is the canonical machine shape, mirrored by MCP (cli.md §2.3)
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", optional = true }
 
 # Frontmatter is YAML
 serde_yaml = "0.9"
@@ -34,15 +64,15 @@ serde_yaml = "0.9"
 toml = "0.8"
 # Format- and comment-preserving edits to the user-authored knowledge.toml (`vaire add`);
 # already in the build graph as a transitive dep of `toml`.
-toml_edit = "0.22"
+toml_edit = { version = "0.22", optional = true }
 
 # Derived index: Turso Database — the Rust rewrite of SQLite — as a local embedded file
 # engine, for its native full-text search and native vectors (design.md §9, issue #2 M3).
 # `fts` gates the experimental FTS index method (also enabled per-connection at runtime).
-turso = { version = "0.7", features = ["fts"] }
+turso = { version = "0.7", features = ["fts"], optional = true }
 # Turso's embedded API is async (io_uring); we own one current-thread runtime inside the
 # `Index` and `block_on` at that boundary, keeping the rest of the CLI synchronous.
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt"], optional = true }
 
 # Corpus discovery: include/exclude globs over the working tree (cli.md §6)
 globset = "0.4"
@@ -52,26 +82,26 @@ walkdir = "2"
 thiserror = "2"
 
 # Blocking HTTP for the OpenAI embedding provider (rustls TLS, no async runtime)
-ureq = "2"
-url = "2"
-directories = "6.0.0"
+ureq = { version = "2", optional = true }
+url = { version = "2", optional = true }
+directories = { version = "6.0.0", optional = true }
 
 # SHA-256 for verifying release downloads against the published SHA256SUMS
 # (`vaire upgrade`, mirroring install.sh/install.ps1) and for artifact digests
 # (`vaire pack`). Note `embed::cache::hash_text` is NOT usable here — it is a
 # DefaultHasher stub for cache keys, not a cryptographic digest.
-sha2 = "0.10"
+sha2 = { version = "0.10", optional = true }
 
 # Artifact writing (`vaire pack`): a deterministic tar stream, gzip-compressed. Written
 # in-process (never the system `tar`) so entry order, timestamps, and ownership are
 # pinned — same commit, same flags, same bytes (registry.md §5). The compression backend
 # is pinned explicitly (default features off): letting feature unification swap in zlib
 # or zlib-ng would silently change the artifact bytes.
-tar = "0.4"
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4", optional = true }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
 
 # Interactive prompts for `vaire configure` (guided TUI-style wizard)
-inquire = "0.9"
+inquire = { version = "0.9", optional = true }
 
 [dev-dependencies]
 # Throwaway git-repo corpora for integration tests
