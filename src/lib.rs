@@ -18,20 +18,31 @@
 //! - [`config`]  — the one committed file under `.vaire/`, `config.toml`.
 //! - [`error`]   — [`error::VaireError`] and its mapping to documented exit codes.
 
+#[cfg(feature = "index")]
 pub mod cli;
+#[cfg(feature = "index")]
 pub mod commands;
 pub mod config;
 pub mod corpus;
+#[cfg(feature = "index")]
 pub mod embed;
 pub mod error;
+#[cfg(feature = "index")]
 pub mod git;
+#[cfg(feature = "index")]
 mod hash;
+#[cfg(feature = "index")]
 pub mod index;
+#[cfg(feature = "index")]
 pub mod mcp;
 pub mod model;
+#[cfg(feature = "index")]
 pub mod output;
+#[cfg(feature = "index")]
 pub mod search;
+#[cfg(feature = "index")]
 pub mod userconfig;
+#[cfg(feature = "index")]
 pub mod workspace;
 
 pub use error::{ExitCode, Result, VaireError};

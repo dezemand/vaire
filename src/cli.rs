@@ -175,6 +175,7 @@ pub enum Command {
     /// Build this package's distributable artifact from the committed tree
     /// (`.vaire/dist/<name>-<version>.tgz`: manifest, corpus files, every file
     /// they reference, pre-built index).
+    #[cfg(feature = "pack")]
     Pack {
         /// Strip section vectors from the shipped index — smaller, and byte-reproducible
         /// regardless of embedding provider.

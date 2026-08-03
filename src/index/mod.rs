@@ -13,6 +13,8 @@
 pub mod build;
 pub mod check;
 pub mod db;
+// The artifact index writer exists only to serve `vaire pack`.
+#[cfg(feature = "pack")]
 pub mod export;
 pub mod query;
 
