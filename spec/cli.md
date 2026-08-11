@@ -839,9 +839,13 @@ JSON:
   "tag": "v1.5.0",
   "record": "releases/1-5-0.md",
   "commit": "d8ecc979227…",
-  "warnings": 3
+  "warnings": 3,
+  "advisories": [{ "id": "department:platform", "inbound": 14 }]
 }
 ```
+
+`advisories` carries the backlink weighting — changed entities with ten or more inbound
+references, present on `planned` and `released` alike, and absent when there are none.
 
 `status` is one of `released`, `planned` (`--dry-run`), `nothing`, or `blocked` (a MAJOR
 awaiting a maintainer, exit `7`).

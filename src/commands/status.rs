@@ -141,7 +141,15 @@ fn pending_release(
         .ok()
         .and_then(|()| Index::open(&scratch).ok())
         .and_then(|before| {
-            crate::release::classify::diff(&before, index, &ctx.config.release_type).ok()
+            // Each side is excluded by the release type *its own* manifest declared, so a
+            // renamed type does not present the old records as removals.
+            crate::release::classify::diff(
+                &before,
+                &config.release_type,
+                index,
+                &ctx.config.release_type,
+            )
+            .ok()
         });
     let _ = crate::index::build::remove_db_files(&scratch);
 

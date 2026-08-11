@@ -106,13 +106,22 @@ pub fn resolve_rev(repo_root: &Path, rev: &str) -> Result<Option<String>> {
 /// Every tag in the repository, in Git's own (lexical) order. Callers that care about
 /// version order parse the names and sort themselves — `1.10.0` must not sort below
 /// `1.9.0`, which is exactly what a text sort here would do.
+///
+/// A failure is an error, never an empty listing — the same rule [`list_files_at`] follows,
+/// and for a sharper reason here: the release classifier reads "no tags" as "never
+/// released", so a transient ref-read failure would make it skip the baseline diff entirely
+/// and re-publish an already-published version.
 pub fn tags(repo_root: &Path) -> Result<Vec<String>> {
     let out = run(
         repo_root,
         &["for-each-ref", "--format=%(refname:short)", "refs/tags"],
     )?;
     if !out.status.success() {
-        return Ok(Vec::new());
+        return Err(std::io::Error::other(format!(
+            "git for-each-ref failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+        .into());
     }
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -505,7 +514,10 @@ pub fn working_tree_dirty_except(repo_root: &Path, paths: &[String]) -> Result<b
         "--".to_string(),
         ":(exclude).vaire".to_string(),
     ];
-    args.extend(paths.iter().map(|p| format!(":(exclude){p}")));
+    // `literal` matters: a bare `:(exclude)` treats the path as a glob, so a caller-supplied
+    // name containing `*`, `?` or `[` would exclude more than the one file it names — and
+    // this is a *gate*, so over-excluding means a dirty tree passing as clean.
+    args.extend(paths.iter().map(|p| format!(":(exclude,literal){p}")));
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = run(repo_root, &borrowed)?;
     if !out.status.success() {

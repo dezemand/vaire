@@ -70,9 +70,15 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
     let classification = match &baseline {
         None => classify::initial(),
         Some((tag, _)) => {
-            build::snapshot(root, &baseline_config(ctx, tag), tag, &scratch.db)?;
+            let baseline_config = baseline_config(ctx, tag);
+            build::snapshot(root, &baseline_config, tag, &scratch.db)?;
             let before = Index::open(&scratch.db)?;
-            classify::diff(&before, &index, &ctx.config.release_type)?
+            classify::diff(
+                &before,
+                &baseline_config.release_type,
+                &index,
+                &ctx.config.release_type,
+            )?
         }
     };
     let heavily_cited = heavily_cited(&index, &classification)?;
@@ -89,10 +95,14 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
         ));
     }
 
-    // `--major` may always escalate: a truth reversal can be one word wide, and the
-    // classifier only sees structure.
+    // `--major` may escalate: a truth reversal can be one word wide, and the classifier
+    // only sees structure. It cannot escalate a *first* release, though — there is no
+    // prior version for a major to be major *relative to*, so escalating would publish
+    // 2.0.0 for a manifest declaring 1.0.0 and demand invalidated-assumptions notes for a
+    // release that invalidates nothing.
     let computed = classification.bump();
-    let bump = match (computed, options.major) {
+    let initial = matches!(classification.outcome, classify::Outcome::Initial);
+    let bump = match (computed, options.major && !initial) {
         (_, true) => Some(Bump::Major),
         (Some(Bump::Major), false) => {
             // Not an error — a decision the tool cannot make. The caller turns this into
@@ -173,7 +183,18 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
     };
     let commit =
         crate::git::commit_paths(root, &[manifest_rel(ctx), written.path.clone()], &message)?;
-    crate::git::create_tag(root, &tag, &message)?;
+    // Past this point the release exists in history, so a failure here is not a failed
+    // release — it is a finished one missing its name. Say exactly how to finish it: the
+    // next run would otherwise compute this same version and then refuse, because the
+    // record it wants to write is already committed.
+    crate::git::create_tag(root, &tag, &message).map_err(|e| {
+        VaireError::Release(format!(
+            "{package} {version} is committed ({}), but the tag could not be created: {e}\n  \
+             finish it with: git tag -a {tag} -m {message:?} {}",
+            &commit[..commit.len().min(12)],
+            &commit[..commit.len().min(12)]
+        ))
+    })?;
 
     // Fold the release commit into the index, so the package is left coherent: the record
     // just written is immediately queryable (`resolve release:1-4-2`, `backlinks … --type

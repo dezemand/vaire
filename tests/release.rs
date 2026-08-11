@@ -38,7 +38,7 @@ fn release(c: &Corpus, options: Options<'_>) -> vaire::output::ReleaseOutput {
     release::run(&c.ctx(), options).expect("release runs")
 }
 
-/// The first release plus one more, so later tests start from a real baseline.
+/// Cut the first release, so later tests start from a real baseline.
 fn released_once(c: &Corpus) -> vaire::output::ReleaseOutput {
     release(c, Options::default())
 }
@@ -586,4 +586,69 @@ fn a_release_leaves_the_index_current_and_the_record_queryable() {
     let resolved = vaire::commands::resolve::run(&c.ctx(), "release:1-0-0")
         .expect("the record is queryable straight after the release");
     assert_eq!(resolved.node_type, "release");
+}
+
+#[test]
+fn major_cannot_escalate_a_first_release() {
+    let c = corpus();
+    let notes = c.root().join("notes.md");
+    std::fs::write(
+        &notes,
+        "Nothing to invalidate; there is no prior version.\n",
+    )
+    .unwrap();
+
+    // A major is a claim *relative to* a previous release. With no prior tag there is
+    // nothing to be major against, so `--major` must not turn a manifest's 1.0.0 into
+    // 2.0.0 — the first release publishes what the manifest declares, full stop.
+    let out = release(
+        &c,
+        Options {
+            major: true,
+            notes: Some(&notes),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.version, "1.0.0", "{out:?}");
+    assert_eq!(out.bump, None, "{out:?}");
+    assert_eq!(out.tag.as_deref(), Some("v1.0.0"));
+}
+
+#[test]
+fn renaming_the_release_type_does_not_manufacture_a_major() {
+    let c = corpus();
+    released_once(&c);
+
+    // The baseline is parsed with the manifest committed at its tag, so each side must be
+    // told its own release type. Otherwise the old records go unexcluded on the baseline
+    // side, present as removed, and force a spurious MAJOR on a package that only renamed
+    // a vocabulary word.
+    let manifest = std::fs::read_to_string(c.root().join("knowledge.toml")).unwrap();
+    std::fs::write(
+        c.root().join("knowledge.toml"),
+        manifest.replace(
+            "types = [",
+            "release_type = \"changelog\"\nrelease_dir = \"changelogs\"\ntypes = [",
+        ),
+    )
+    .unwrap();
+    c.commit();
+
+    let out = release(&c, Options::default());
+    assert!(
+        out.classification.removed.is_empty(),
+        "the old records must stay excluded: {out:?}"
+    );
+    assert_ne!(out.bump, Some(vaire::model::Bump::Major), "{out:?}");
+}
+
+#[test]
+fn an_unreadable_tag_listing_is_an_error_not_an_empty_history() {
+    // "No tags" means "never released", which skips the baseline diff and republishes the
+    // manifest version. A git failure must therefore never masquerade as an empty tag list.
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        vaire::git::tags(dir.path()).is_err(),
+        "a non-repository must error rather than report no tags"
+    );
 }

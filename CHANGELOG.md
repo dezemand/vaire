@@ -24,8 +24,8 @@ uses [Semantic Versioning](https://semver.org).
   the maintainer owns meaning while the tool owns structure.
 
   **Backlink weighting** is the one advisory: a PATCH touching an entity with ten or more
-  inbound references reports *"…has 14 inbound references — patch, really?"* and asks,
-  because structure is only a proxy for meaning. `--yes` skips the question (the CI
+  inbound references reports it (`department:platform has 14 inbound references — patch,
+  really?`) and asks before proceeding, because structure is only a proxy for meaning. `--yes` skips the question (the CI
   posture) and so does the absence of a terminal — a prompt that blocked an automated
   release would be a bug — while the advisory still rides along in the output.
 

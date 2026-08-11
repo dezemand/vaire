@@ -97,6 +97,8 @@ work from a two-line manifest.
 > hand, and the release **tag** — not this field — is what the next release counts from.
 > Editing it by hand is not an error; it is simply overwritten by the next release.
 
+<!-- markdownlint MD028: separates two adjacent blockquotes -->
+
 > **`release_type`/`release_dir` are conventions, not reserved words.** A type name is
 > package vocabulary, so a knowledge base whose own subject matter means something by
 > "release" renames these rather than losing the word.
