@@ -86,14 +86,50 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     // `add` edits the manifest's [dependencies] (and with --link, the package links);
     // it needs the package root but not the index, so it runs before `Ctx` is built
     // (like `init`/`configure`).
-    if let Command::Add { spec, link } = &cli.command {
+    if let Command::Add {
+        spec,
+        link,
+        no_register,
+    } = &cli.command
+    {
         let out = commands::add::run(
             cli.repo.as_deref(),
             cli.config.as_deref(),
             spec,
             link.as_deref(),
         )?;
+        // Declaring a dependency is a statement that this package exists and is being
+        // worked on, so it is worth recording — the manifest's directory is the package.
+        if let Some(root) = std::path::Path::new(&out.config_path).parent() {
+            for warning in commands::catalog::register_path(
+                &vaire::userconfig::vaire_home(),
+                root,
+                *no_register,
+            ) {
+                eprintln!("warning: {warning}");
+            }
+        }
         emit(&out, json);
+        return Ok(ExitCode::Success);
+    }
+
+    // The catalog is machine-level state *about* packages, so it has to work from
+    // anywhere — notably from outside any package, which is exactly where
+    // `catalog add <path>` and `catalog scan <dir>` are used. It never builds a `Ctx`.
+    if let Command::Catalog { action } = cli.command {
+        let home = vaire::userconfig::vaire_home();
+        use vaire::cli::CatalogAction;
+        match action {
+            CatalogAction::Add { path } => {
+                emit(&commands::catalog::add(&home, path.as_deref())?, json)
+            }
+            CatalogAction::Scan { dir } => emit(&commands::catalog::scan_dir(&home, &dir)?, json),
+            CatalogAction::Rm { target, missing } => emit(
+                &commands::catalog::remove(&home, target.as_deref(), missing)?,
+                json,
+            ),
+            CatalogAction::List => emit(&commands::catalog::list(&home)?, json),
+        }
         return Ok(ExitCode::Success);
     }
 
@@ -190,18 +226,24 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             working_tree,
             re_embed,
             no_deps,
+            no_register,
         } => {
-            emit(
-                &commands::index::run(&ctx, full, working_tree, re_embed, no_deps)?,
-                json,
-            );
+            let out = commands::index::run(&ctx, full, working_tree, re_embed, no_deps)?;
+            for warning in commands::catalog::register_ambient(&ctx, no_register) {
+                eprintln!("warning: {warning}");
+            }
+            emit(&out, json);
         }
         Command::Check {
             strict,
             working_tree,
             no_deps,
+            no_register,
         } => {
             let (report, failed) = commands::check::run(&ctx, strict, working_tree, no_deps)?;
+            for warning in commands::catalog::register_ambient(&ctx, no_register) {
+                eprintln!("warning: {warning}");
+            }
             emit(&report, json);
             if failed {
                 return Ok(ExitCode::CheckViolations);
@@ -261,6 +303,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             emit(&commands::deps::run(&ctx)?, json);
         }
         Command::Init { .. }
+        | Command::Catalog { .. }
         | Command::Mcp
         | Command::Configure { .. }
         | Command::Add { .. }
