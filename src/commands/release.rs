@@ -126,6 +126,23 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
 
     let tag = crate::release::tag_name(&package, version, false);
     let record_path = record::path_for(&ctx.config, version);
+
+    // Everything that can refuse a release runs *before* the dry-run returns, because a
+    // dry run's whole job is to predict the real one. A `--dry-run` that reported
+    // "would release 1.1.0" and then let the real release fail its gate would be worse
+    // than useless in the place it matters most: a merge-request pipeline telling a
+    // reviewer what merging will do.
+    preflight_writes(ctx, &tag, &record_path)?;
+
+    // The integrity gate. Violations refuse the release for the same reason they refuse a
+    // pack: a published version with dangling references ships them to every consumer.
+    // Warnings are reported, never fatal — an inline-rich corpus carries thousands of
+    // advisory drift notes by design, and a release must not be hostage to them.
+    let (report, _) = crate::commands::check::run(ctx, false, false, false)?;
+    if !report.violations.is_empty() {
+        return Err(VaireError::CheckViolations(report.violations.len()));
+    }
+
     if options.dry_run {
         return Ok(ReleaseOutput::planned(
             package,
@@ -137,17 +154,8 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
         )
         .with_advisories(heavily_cited));
     }
-    preflight_writes(ctx, &tag, &record_path)?;
+    // Only now: a question, which a dry run must never ask.
     confirm_patch(&heavily_cited, &options)?;
-
-    // The integrity gate. Violations refuse the release for the same reason they refuse a
-    // pack: a published version with dangling references ships them to every consumer.
-    // Warnings are reported, never fatal — an inline-rich corpus carries thousands of
-    // advisory drift notes by design, and a release must not be hostage to them.
-    let (report, _) = crate::commands::check::run(ctx, false, false, false)?;
-    if !report.violations.is_empty() {
-        return Err(VaireError::CheckViolations(report.violations.len()));
-    }
 
     let written = record::write(
         root,
@@ -166,6 +174,14 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
     let commit =
         crate::git::commit_paths(root, &[manifest_rel(ctx), written.path.clone()], &message)?;
     crate::git::create_tag(root, &tag, &message)?;
+
+    // Fold the release commit into the index, so the package is left coherent: the record
+    // just written is immediately queryable (`resolve release:1-4-2`, `backlinks … --type
+    // release`) and `status` can report against a current index instead of asking for a
+    // rebuild. Best-effort by design — the release is already committed and tagged, and
+    // the index is a disposable cache, so a failure here is a `vaire index` away and must
+    // not turn a completed release into an error.
+    let _ = build::run(&ctx.repo, &ctx.config, embedder, Mode::Incremental);
 
     Ok(ReleaseOutput::released(
         package,

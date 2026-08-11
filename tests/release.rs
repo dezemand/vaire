@@ -545,3 +545,45 @@ fn an_uncited_edit_carries_no_advisory() {
     );
     assert!(out.advisories.is_empty(), "{out:?}");
 }
+
+#[test]
+fn a_dry_run_predicts_the_gate_it_would_hit() {
+    let c = corpus();
+    released_once(&c);
+    c.add(
+        "knowledge/broken.md",
+        "---\nid: broken\ntype: system\nname: Broken\nowner: department:does-not-exist\n---\n# Broken\n\nPoints at [[department:does-not-exist]].\n",
+    )
+    .commit();
+
+    // A merge-request pipeline asks --dry-run what merging will do. If it answered
+    // "would release 1.1.0" while the real release refused, the reviewer would be told
+    // the opposite of the truth.
+    let err = release::run(
+        &c.ctx(),
+        Options {
+            dry_run: true,
+            ..Default::default()
+        },
+    )
+    .expect_err("the dry run reports the gate");
+    assert!(matches!(err, VaireError::CheckViolations(_)), "{err:?}");
+}
+
+#[test]
+fn a_release_leaves_the_index_current_and_the_record_queryable() {
+    let c = corpus();
+    released_once(&c);
+
+    // The release commit lands after the index was built, so without folding it in the
+    // package would be left one commit stale — and the record it just wrote invisible to
+    // every read command until someone ran `vaire index` by hand.
+    let status = vaire::commands::status::run(&c.ctx()).expect("status");
+    assert_eq!(status.commits_behind_head, 0, "{status:?}");
+    let pending = status.pending_release.expect("status reports releases");
+    assert_eq!(pending.would_be, "none", "{pending:?}");
+
+    let resolved = vaire::commands::resolve::run(&c.ctx(), "release:1-0-0")
+        .expect("the record is queryable straight after the release");
+    assert_eq!(resolved.node_type, "release");
+}
