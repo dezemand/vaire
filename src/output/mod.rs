@@ -351,6 +351,9 @@ impl Output for StatusOutput {
                 out.push('\n');
             }
         }
+        if let Some(pending) = &self.pending_release {
+            kv(&mut out, "release", 10, &pending.render());
+        }
         out.trim_end().to_string()
     }
 }
@@ -999,6 +1002,10 @@ pub struct StatusOutput {
     /// One row per linked dependency (transitive closure); empty for a standalone package.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<DepStatus>,
+    /// What `vaire release` would do — absent when it could not be determined cheaply
+    /// (no git, or an index behind HEAD, where the answer would describe neither tree).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_release: Option<PendingRelease>,
 }
 
 /// One linked dependency's state as reported by `vaire status` (cli.md §4.3).
@@ -1106,5 +1113,292 @@ fn human_size(bytes: u64) -> String {
             "{:.1} MiB ({bytes} bytes)",
             bytes as f64 / (1024.0 * 1024.0)
         )
+    }
+}
+
+// ---- vaire release ---------------------------------------------------------
+
+/// What a `vaire release` run did, or would do (cli.md §4.7).
+#[derive(Debug, Serialize)]
+pub struct ReleaseOutput {
+    pub package: String,
+    pub status: ReleaseStatus,
+    /// The version released or planned; for `nothing`/`blocked`, the one already out.
+    pub version: String,
+    /// Absent for a first release (nothing to increment) and when nothing changed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bump: Option<crate::model::Bump>,
+    #[serde(flatten)]
+    pub classification: crate::release::classify::Classification,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Integrity warnings the release carried past — reported, never fatal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<usize>,
+    /// Changed entities a lot of others point at — the classifier saying "structure says
+    /// patch, but this is load-bearing". Advisory; the maintainer's answer stands.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub advisories: Vec<CitedEntity>,
+}
+
+/// A changed entity with an inbound-reference count worth mentioning.
+#[derive(Debug, Serialize)]
+pub struct CitedEntity {
+    pub id: String,
+    pub inbound: usize,
+}
+
+/// The four ways a release run ends. `blocked` is the one that is neither success nor
+/// failure: the classifier saw a MAJOR, which only a maintainer may declare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseStatus {
+    Released,
+    Planned,
+    Nothing,
+    Blocked,
+}
+
+impl ReleaseOutput {
+    fn base(
+        package: String,
+        status: ReleaseStatus,
+        version: crate::model::Version,
+        classification: crate::release::classify::Classification,
+    ) -> ReleaseOutput {
+        ReleaseOutput {
+            package,
+            status,
+            version: version.to_string(),
+            bump: None,
+            classification,
+            tag: None,
+            record: None,
+            commit: None,
+            warnings: None,
+            advisories: Vec::new(),
+        }
+    }
+
+    /// Attach the heavily-cited advisories (chainable — every constructor may carry them).
+    pub fn with_advisories(mut self, advisories: Vec<CitedEntity>) -> ReleaseOutput {
+        self.advisories = advisories;
+        self
+    }
+
+    pub fn nothing(
+        package: String,
+        version: crate::model::Version,
+        classification: crate::release::classify::Classification,
+    ) -> ReleaseOutput {
+        ReleaseOutput::base(package, ReleaseStatus::Nothing, version, classification)
+    }
+
+    pub fn blocked(
+        package: String,
+        version: crate::model::Version,
+        classification: crate::release::classify::Classification,
+    ) -> ReleaseOutput {
+        ReleaseOutput::base(package, ReleaseStatus::Blocked, version, classification)
+    }
+
+    pub fn planned(
+        package: String,
+        version: crate::model::Version,
+        bump: Option<crate::model::Bump>,
+        classification: crate::release::classify::Classification,
+        tag: String,
+        record: String,
+    ) -> ReleaseOutput {
+        ReleaseOutput {
+            bump,
+            tag: Some(tag),
+            record: Some(record),
+            ..ReleaseOutput::base(package, ReleaseStatus::Planned, version, classification)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn released(
+        package: String,
+        version: crate::model::Version,
+        bump: Option<crate::model::Bump>,
+        classification: crate::release::classify::Classification,
+        tag: String,
+        record: crate::release::record::Record,
+        commit: String,
+        warnings: usize,
+    ) -> ReleaseOutput {
+        ReleaseOutput {
+            bump,
+            tag: Some(tag),
+            record: Some(record.path),
+            commit: Some(commit),
+            warnings: Some(warnings),
+            ..ReleaseOutput::base(package, ReleaseStatus::Released, version, classification)
+        }
+    }
+}
+
+impl Output for ReleaseOutput {
+    fn render_human(&self) -> String {
+        let mut out = String::new();
+        match self.status {
+            ReleaseStatus::Nothing => {
+                return format!(
+                    "{} {}",
+                    dim("nothing to release —"),
+                    plain(&format!(
+                        "{} {} is current, and no entity has changed since",
+                        self.package, self.version
+                    ))
+                );
+            }
+            ReleaseStatus::Blocked => {
+                out.push_str(&yellow(&format!(
+                    "✗ this would be a MAJOR release of {} ({})\n",
+                    self.package,
+                    self.classification.evidence()
+                )));
+                out.push_str(&plain(
+                    "  a major says existing references may no longer hold, which is a \
+                     claim only you can make\n",
+                ));
+                for (label, ids) in [
+                    ("removed", &self.classification.removed),
+                    ("retired", &self.classification.retired),
+                ] {
+                    for id in ids {
+                        out.push_str(&format!("  {} {}\n", dim(label), plain(id)));
+                    }
+                }
+                out.push_str(&dim(
+                    "  re-run with `--major --notes <file>` once you have written what it \
+                     invalidates\n",
+                ));
+                return out.trim_end().to_string();
+            }
+            ReleaseStatus::Planned => {
+                out.push_str(&bold(&format!(
+                    "would release {} {}\n",
+                    self.package, self.version
+                )));
+            }
+            ReleaseStatus::Released => {
+                out.push_str(&green(&format!(
+                    "✓ released {} {}\n",
+                    self.package, self.version
+                )));
+            }
+        }
+        let bump = match self.bump {
+            Some(bump) => format!("{bump} — {}", self.classification.evidence()),
+            None => format!("first release — {}", self.classification.evidence()),
+        };
+        kv(&mut out, "bump", 9, &bump);
+        if let Some(tag) = &self.tag {
+            kv(&mut out, "tag", 9, tag);
+        }
+        if let Some(record) = &self.record {
+            kv(&mut out, "record", 9, record);
+        }
+        if let Some(commit) = &self.commit {
+            kv(&mut out, "commit", 9, &commit[..commit.len().min(12)]);
+        }
+        for (label, ids) in [
+            ("added", &self.classification.added),
+            ("changed", &self.classification.changed),
+            ("retired", &self.classification.retired),
+            ("removed", &self.classification.removed),
+        ] as [(&str, &Vec<String>); 4]
+        {
+            for id in ids.iter().take(10) {
+                out.push_str(&format!("  {} {}\n", dim(label), plain(id)));
+            }
+            if ids.len() > 10 {
+                out.push_str(&dim(&format!("  {label} … and {} more\n", ids.len() - 10)));
+            }
+        }
+        for cited in &self.advisories {
+            out.push_str(&yellow(&format!(
+                "  {} has {} inbound references — patch, really?\n",
+                cited.id, cited.inbound
+            )));
+        }
+        if let Some(warnings) = self.warnings
+            && warnings > 0
+        {
+            out.push_str(&yellow(&format!(
+                "  {} — `vaire check` for the detail\n",
+                pluralize(warnings, "warning")
+            )));
+        }
+        if self.status == ReleaseStatus::Released {
+            out.push_str(&dim("  push the commit and tag when you are ready\n"));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+/// The release `vaire status` says is pending — the ambient half of the classifier, so a
+/// release is never a surprise (registry.v2.md §3.1).
+#[derive(Debug, Serialize)]
+pub struct PendingRelease {
+    /// The last released version's tag, absent when the package has never been released.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// What a release would be: `initial`, `none`, or a bump.
+    pub would_be: String,
+    pub added: usize,
+    pub changed: usize,
+    pub retired: usize,
+    pub removed: usize,
+}
+
+impl PendingRelease {
+    pub fn from(
+        classification: crate::release::classify::Classification,
+        since: Option<String>,
+    ) -> PendingRelease {
+        use crate::release::classify::Outcome;
+        PendingRelease {
+            since,
+            would_be: match classification.outcome {
+                Outcome::Initial => "initial".to_string(),
+                Outcome::Nothing => "none".to_string(),
+                Outcome::Bump(bump) => bump.to_string(),
+            },
+            added: classification.added.len(),
+            changed: classification.changed.len(),
+            retired: classification.retired.len(),
+            removed: classification.removed.len(),
+        }
+    }
+
+    fn render(&self) -> String {
+        match self.would_be.as_str() {
+            "none" => "up to date".to_string(),
+            "initial" => {
+                "never released — `vaire release` publishes the declared version".to_string()
+            }
+            bump => {
+                let mut parts = Vec::new();
+                for (n, label) in [
+                    (self.added, "new"),
+                    (self.changed, "changed"),
+                    (self.retired, "retired"),
+                    (self.removed, "removed"),
+                ] {
+                    if n > 0 {
+                        parts.push(format!("{n} {label}"));
+                    }
+                }
+                format!("would be {bump} — {}", parts.join(", "))
+            }
+        }
     }
 }

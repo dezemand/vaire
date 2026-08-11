@@ -65,6 +65,172 @@ pub fn is_commit_oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// Reject a revision or ref name that Git would read as an option.
+///
+/// Every revision below reaches `git` as a positional argument. `--end-of-options` is
+/// passed wherever the subcommand supports it, but a name like `--upload-pack=…` must
+/// never get that far in the first place: these strings come from tag listings and from
+/// user input (`release --onto`), which are not the caller's own literals.
+fn require_safe_rev(value: &str) -> Result<()> {
+    if value.is_empty() || value.starts_with('-') {
+        return Err(crate::error::VaireError::Usage(format!(
+            "invalid git revision {value:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve `rev` (a tag, branch, or OID) to the full commit OID it names, or `None` if
+/// Git does not know it. `^{commit}` peels an annotated tag to its commit, so a tag
+/// object and a lightweight tag answer identically.
+pub fn resolve_rev(repo_root: &Path, rev: &str) -> Result<Option<String>> {
+    require_safe_rev(rev)?;
+    let spec = format!("{rev}^{{commit}}");
+    let out = run(
+        repo_root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &spec,
+        ],
+    )?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let oid = stdout_trimmed(&out);
+    Ok(is_commit_oid(&oid).then_some(oid))
+}
+
+/// Every tag in the repository, in Git's own (lexical) order. Callers that care about
+/// version order parse the names and sort themselves — `1.10.0` must not sort below
+/// `1.9.0`, which is exactly what a text sort here would do.
+pub fn tags(repo_root: &Path) -> Result<Vec<String>> {
+    let out = run(
+        repo_root,
+        &["for-each-ref", "--format=%(refname:short)", "refs/tags"],
+    )?;
+    if !out.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Create an annotated tag at HEAD. Annotated rather than lightweight: a release is an
+/// event with an author and a date, and `git describe` only considers annotated tags by
+/// default. Fails if the tag already exists — a published version is immutable, so
+/// re-tagging is never the right recovery.
+pub fn create_tag(repo_root: &Path, name: &str, message: &str) -> Result<()> {
+    require_safe_rev(name)?;
+    let out = run(
+        repo_root,
+        &["tag", "-a", "-m", message, "--end-of-options", name],
+    )?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(format!(
+            "git tag {name} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Delete a tag. Only ever used to unwind a release whose *own* commit could not be
+/// completed — never to retract a published one (that is yank, registry.v2.md §13).
+pub fn delete_tag(repo_root: &Path, name: &str) -> Result<()> {
+    require_safe_rev(name)?;
+    let _ = run(repo_root, &["tag", "-d", "--end-of-options", name])?;
+    Ok(())
+}
+
+/// Stage `paths` (repo-root-relative) and commit them with `message`.
+///
+/// Deliberately path-scoped rather than `git commit -a`: a release commit contains the
+/// manifest and the release record it just wrote, and nothing else a dirty tree might
+/// have lying around. (`release` refuses a dirty tree anyway; this keeps that guarantee
+/// true rather than merely likely.)
+pub fn commit_paths(repo_root: &Path, paths: &[String], message: &str) -> Result<String> {
+    let mut args = vec!["add", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let out = run(repo_root, &args)?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(format!(
+            "git add failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+        .into());
+    }
+
+    let mut args = vec!["commit", "-q", "-m", message, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let out = run(repo_root, &args)?;
+    if !out.status.success() {
+        // The overwhelmingly common cause in a fresh CI container is an unset
+        // user.identity, and git's own message says exactly how to fix it — so pass it
+        // through rather than replacing it with something vaguer.
+        return Err(std::io::Error::other(format!(
+            "git commit failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+        .into());
+    }
+    Ok(head(repo_root)?.unwrap_or_default())
+}
+
+/// The branch HEAD is on, or `None` when detached.
+pub fn current_branch(repo_root: &Path) -> Result<Option<String>> {
+    let out = run(repo_root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let branch = stdout_trimmed(&out);
+    Ok((!branch.is_empty()).then_some(branch))
+}
+
+/// The repository's default branch, if one can be determined: the remote's published
+/// HEAD first, then a local `main`/`master`.
+///
+/// `None` is a real answer, not a failure — a repository with no remote and no
+/// conventionally-named branch has no mainline to be off of, and a guard that refused
+/// in that case would be inventing a rule the repository never declared.
+pub fn default_branch(repo_root: &Path) -> Result<Option<String>> {
+    let out = run(
+        repo_root,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )?;
+    if out.status.success() {
+        let full = stdout_trimmed(&out);
+        if let Some(branch) = full.strip_prefix("origin/")
+            && !branch.is_empty()
+        {
+            return Ok(Some(branch.to_string()));
+        }
+    }
+    for candidate in ["main", "master"] {
+        let spec = format!("refs/heads/{candidate}");
+        let out = run(
+            repo_root,
+            &["show-ref", "--verify", "--quiet", "--end-of-options", &spec],
+        )?;
+        if out.status.success() {
+            return Ok(Some(candidate.to_string()));
+        }
+    }
+    Ok(None)
+}
+
 fn require_commit_oid(value: &str) -> Result<()> {
     if is_commit_oid(value) {
         Ok(())
@@ -84,10 +250,27 @@ fn require_commit_oid(value: &str) -> Result<()> {
 /// is absent from this set — would drop every changed file from the index instead of
 /// reindexing it.
 pub fn list_files_at_head(repo_root: &Path) -> Result<Vec<String>> {
-    let out = run(repo_root, &["ls-tree", "-r", "--name-only", "-z", "HEAD"])?;
+    list_files_at(repo_root, "HEAD")
+}
+
+/// [`list_files_at_head`] for an arbitrary revision — the file set of a release tag's
+/// tree, which is what the release classifier diffs the current tree against.
+pub fn list_files_at(repo_root: &Path, rev: &str) -> Result<Vec<String>> {
+    require_safe_rev(rev)?;
+    let out = run(
+        repo_root,
+        &[
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "-z",
+            "--end-of-options",
+            rev,
+        ],
+    )?;
     if !out.status.success() {
         return Err(std::io::Error::other(format!(
-            "git ls-tree failed: {}",
+            "git ls-tree {rev} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ))
         .into());
@@ -111,7 +294,16 @@ pub fn show_at_head(repo_root: &Path, rel_path: &str) -> Result<Option<String>> 
 /// path order. Lossy-UTF-8 view of [`show_many_at_head_bytes`] — the corpus reader wants
 /// text; artifact packing (`vaire pack`) reads the byte form so attachments survive intact.
 pub fn show_many_at_head(repo_root: &Path, rel_paths: &[String]) -> Result<Vec<Option<String>>> {
-    Ok(show_many_at_head_bytes(repo_root, rel_paths)?
+    show_many_at(repo_root, "HEAD", rel_paths)
+}
+
+/// [`show_many_at_head`] for an arbitrary revision.
+pub fn show_many_at(
+    repo_root: &Path,
+    rev: &str,
+    rel_paths: &[String],
+) -> Result<Vec<Option<String>>> {
+    Ok(show_many_at_bytes(repo_root, rev, rel_paths)?
         .into_iter()
         .map(|blob| blob.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
         .collect())
@@ -124,6 +316,17 @@ pub fn show_many_at_head_bytes(
     repo_root: &Path,
     rel_paths: &[String],
 ) -> Result<Vec<Option<Vec<u8>>>> {
+    show_many_at_bytes(repo_root, "HEAD", rel_paths)
+}
+
+/// [`show_many_at_head_bytes`] for an arbitrary revision. The revision reaches Git as
+/// `<rev>:<path>` on `cat-file`'s stdin, never as an argument.
+pub fn show_many_at_bytes(
+    repo_root: &Path,
+    rev: &str,
+    rel_paths: &[String],
+) -> Result<Vec<Option<Vec<u8>>>> {
+    require_safe_rev(rev)?;
     if rel_paths.is_empty() {
         return Ok(Vec::new());
     }
@@ -139,7 +342,7 @@ pub fn show_many_at_head_bytes(
 
     let input = rel_paths
         .iter()
-        .map(|path| format!("HEAD:{path}\n"))
+        .map(|path| format!("{rev}:{path}\n"))
         .collect::<String>();
     let mut stdin = child.stdin.take().expect("piped stdin");
     let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
@@ -285,10 +488,26 @@ pub fn commit_epoch(repo_root: &Path) -> Result<Option<i64>> {
 /// excluded: its self-contained `.gitignore` is derived state that may legitimately be
 /// untracked. A failed `git status` reports clean — this is a warning source, not truth.
 pub fn working_tree_dirty(repo_root: &Path) -> Result<bool> {
-    let out = run(
-        repo_root,
-        &["status", "--porcelain", "--", ":(exclude).vaire"],
-    )?;
+    working_tree_dirty_except(repo_root, &[])
+}
+
+/// [`working_tree_dirty`] ignoring `paths` as well (repo-root-relative).
+///
+/// `vaire release` uses it as a **gate**, not a warning, so what counts as "dirty" has to
+/// exclude the release's own inputs: a file supplying the invalidated-assumptions notes
+/// is an argument to the command, the way a commit-message file is to `git commit`, and
+/// writing it in the repository — which is where anyone would naturally write it — must
+/// not make the release refuse itself.
+pub fn working_tree_dirty_except(repo_root: &Path, paths: &[String]) -> Result<bool> {
+    let mut args = vec![
+        "status".to_string(),
+        "--porcelain".to_string(),
+        "--".to_string(),
+        ":(exclude).vaire".to_string(),
+    ];
+    args.extend(paths.iter().map(|p| format!(":(exclude){p}")));
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run(repo_root, &borrowed)?;
     if !out.status.success() {
         return Ok(false);
     }

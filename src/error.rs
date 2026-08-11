@@ -26,6 +26,12 @@ pub enum ExitCode {
     IdNotFound = 5,
     /// `6` — `vaire check` found violations (or warnings under `--strict`).
     CheckViolations = 6,
+    /// `7` — `vaire release` classified a MAJOR and stopped, because a MAJOR is a claim
+    /// about meaning that only a maintainer can make (registry.v2.md §3.1). Distinct from
+    /// a generic failure on purpose: an automated release pipeline must be able to tell
+    /// "this needs a human" from "this broke", and report the first as a pending decision
+    /// rather than a red build.
+    ReleaseBlocked = 7,
 }
 
 impl ExitCode {
@@ -48,6 +54,7 @@ pub enum ErrorKind {
     Dependency,
     Upgrade,
     Pack,
+    Release,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -95,6 +102,14 @@ pub enum VaireError {
     #[error("cannot pack: {0}")]
     Pack(String),
 
+    /// `vaire release` refused: a dirty tree, a branch that is not the mainline, a
+    /// corpus that is not its own repository, a version that already exists, or a MAJOR
+    /// missing its invalidated-assumptions notes. The message carries the exact fix.
+    /// Exit `1` — the *blocked-on-a-human* case is not an error at all, it is
+    /// [`ExitCode::ReleaseBlocked`] carrying a full classification.
+    #[error("cannot release: {0}")]
+    Release(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -136,6 +151,7 @@ impl VaireError {
             VaireError::Dependency(_) => ErrorKind::Dependency,
             VaireError::Upgrade(_) => ErrorKind::Upgrade,
             VaireError::Pack(_) => ErrorKind::Pack,
+            VaireError::Release(_) => ErrorKind::Release,
             _ => ErrorKind::Generic,
         }
     }

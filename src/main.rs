@@ -210,6 +210,49 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Status => {
             emit(&commands::status::run(&ctx)?, json);
         }
+        Command::Release {
+            major,
+            dry_run,
+            yes,
+            notes,
+            allow_branch,
+            push,
+            onto,
+        } => {
+            // Reserved grammar: the flags exist so the split they belong to has somewhere
+            // to grow, and are rejected rather than silently ignored.
+            if push {
+                return Err(VaireError::Usage(
+                    "`--push` is not implemented yet: releasing is a git act, and \
+                     uploading is `vaire push`, which arrives with the registry client"
+                        .into(),
+                ));
+            }
+            if onto.is_some() {
+                return Err(VaireError::Usage(
+                    "`--onto` (back-patching an older major line) is reserved, not yet \
+                     implemented"
+                        .into(),
+                ));
+            }
+            let out = commands::release::run(
+                &ctx,
+                commands::release::Options {
+                    major,
+                    dry_run,
+                    yes,
+                    notes: notes.as_deref(),
+                    allow_branch,
+                },
+            )?;
+            let blocked = out.status == vaire::output::ReleaseStatus::Blocked;
+            emit(&out, json);
+            if blocked {
+                // Not a failure: a decision waiting on a maintainer. Its own code so a
+                // pipeline can report it as pending rather than broken.
+                return Ok(ExitCode::ReleaseBlocked);
+            }
+        }
         #[cfg(feature = "pack")]
         Command::Pack { no_embeddings } => {
             emit(&commands::pack::run(&ctx, no_embeddings)?, json);
