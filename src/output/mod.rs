@@ -352,7 +352,7 @@ impl Output for StatusOutput {
             }
         }
         if let Some(pending) = &self.pending_release {
-            kv(&mut out, "release", 10, &pending.render());
+            kv(&mut out, "release", 13, &pending.render());
         }
         out.trim_end().to_string()
     }

@@ -110,13 +110,22 @@ struct EntityState {
     edges: BTreeSet<(String, String, String)>,
 }
 
-/// Diff two indexes of the same package. `release_type` names the entity type holding
-/// release records, which is **excluded from both sides**: every release adds one, so
-/// counting them would mean no release after the first could ever be a PATCH — the
-/// mechanism would eat itself.
-pub fn diff(baseline: &Index, current: &Index, release_type: &str) -> Result<Classification> {
-    let before = read_entities(baseline, release_type)?;
-    let after = read_entities(current, release_type)?;
+/// Diff two indexes of the same package, excluding release records from **both** sides:
+/// every release adds one, so counting them would mean no release after the first could
+/// ever be a PATCH — the mechanism would eat itself.
+///
+/// The two type names are passed separately because each side was parsed with its own
+/// manifest — the baseline with the one committed at its tag. A package that renamed
+/// `release_type` between releases would otherwise leave the baseline's records
+/// unexcluded, and they would present as *removed*, forcing a spurious MAJOR.
+pub fn diff(
+    baseline: &Index,
+    baseline_release_type: &str,
+    current: &Index,
+    current_release_type: &str,
+) -> Result<Classification> {
+    let before = read_entities(baseline, baseline_release_type)?;
+    let after = read_entities(current, current_release_type)?;
 
     let mut added = Vec::new();
     let mut changed = Vec::new();
