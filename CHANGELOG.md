@@ -34,7 +34,6 @@ uses [Semantic Versioning](https://semver.org).
 - **`vaire catalog scan <dir>`** — bulk import, and the one place the old discovery walk
   now lives (same depth and skip rules), demoted from resolution machinery to a one-shot
   import tool.
-
 - **`vaire release`** (cli.md §4.7) — cut a release in one command: classify what changed
   since the last one, compute the version, write the manifest and a release record,
   commit, tag. **The version is computed, not typed.** The classifier diffs the entity
@@ -54,9 +53,10 @@ uses [Semantic Versioning](https://semver.org).
 
   **Backlink weighting** is the one advisory: a PATCH touching an entity with ten or more
   inbound references reports it (`department:platform has 14 inbound references — patch,
-  really?`) and asks before proceeding, because structure is only a proxy for meaning. `--yes` skips the question (the CI
-  posture) and so does the absence of a terminal — a prompt that blocked an automated
-  release would be a bug — while the advisory still rides along in the output.
+  really?`) and asks before proceeding, because structure is only a proxy for meaning.
+  `--yes` skips the question (the CI posture) and so does the absence of a terminal — a
+  prompt that blocked an automated release would be a bug — while the advisory still
+  rides along in the output.
 
   Gated on a clean tree, HEAD on the mainline (`--allow-branch` escapes), the package
   being its own Git repository, and `vaire check` free of violations. Nothing to release
