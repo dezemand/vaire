@@ -1435,6 +1435,10 @@ pub struct CatalogRemoveOutput {
     pub catalog: String,
     pub removed: usize,
     pub target: String,
+    /// This was the `--missing` sweep rather than a named removal — which reads
+    /// differently when it matches nothing, since a clean catalog hits that every time.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub swept: bool,
 }
 
 impl Output for CatalogListOutput {
@@ -1511,9 +1515,12 @@ impl Output for CatalogRecordOutput {
 
 impl Output for CatalogRemoveOutput {
     fn render_human(&self) -> String {
-        match self.removed {
-            0 => dim(&format!("nothing in the catalog matched {}", self.target)).to_string(),
-            n => green(&format!("✓ forgot {}", pluralize(n, "sighting"))).to_string(),
+        match (self.removed, self.swept) {
+            (0, true) => dim("every sighting still answers — nothing to sweep").to_string(),
+            (0, false) => {
+                dim(&format!("nothing in the catalog matched {}", self.target)).to_string()
+            }
+            (n, _) => green(&format!("✓ forgot {}", pluralize(n, "sighting"))).to_string(),
         }
     }
 }

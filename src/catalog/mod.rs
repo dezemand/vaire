@@ -201,11 +201,28 @@ impl Catalog {
         let started = std::time::Instant::now();
         let mut attempt = 0u32;
         loop {
+            // Whether the file was already there decides what a version mismatch *means*,
+            // so it must be answered before connecting creates one.
+            let existed = path.exists();
             match Catalog::connect(&path) {
                 Ok(catalog) => {
-                    if catalog.schema_version()? != Some(SCHEMA_VERSION) {
+                    if !existed {
                         catalog.install_schema()?;
+                        return Ok(catalog);
                     }
+                    if catalog.schema_version()? == Some(SCHEMA_VERSION) {
+                        return Ok(catalog);
+                    }
+                    // A catalog from a different vaire. Installing over it would be the
+                    // worst outcome available: the `CREATE TABLE IF NOT EXISTS` statements
+                    // no-op against the old tables, the version row is then stamped as
+                    // current, and every later query fails against columns that were never
+                    // migrated. Recreate instead — dropping the handle first, because the
+                    // file is still locked by it.
+                    drop(catalog);
+                    remove_db_files(&path)?;
+                    let catalog = Catalog::connect(&path)?;
+                    catalog.install_schema()?;
                     return Ok(catalog);
                 }
                 Err(e) if is_locked(&e) && started.elapsed() < LOCK_WAIT => {
@@ -227,7 +244,7 @@ impl Catalog {
                     let catalog = Catalog::connect(&path)?;
                     catalog.install_schema()?;
                     return Ok(catalog);
-                }
+                } // no other arms: `is_locked` splits every remaining error above.
             }
         }
     }
@@ -244,20 +261,21 @@ impl Catalog {
         })
     }
 
+    /// Install the schema into a **fresh** file and stamp its version.
+    ///
+    /// Only ever called on a database known to have no tables — a new one, or one
+    /// [`Catalog::open`] has just recreated. It must not be used to "upgrade" an existing
+    /// catalog: the statements are `IF NOT EXISTS`, so against an older shape they would
+    /// silently no-op and then stamp the old tables as current.
     fn install_schema(&self) -> Result<()> {
         for stmt in SCHEMA_STMTS {
             self.db.execute(stmt, ())?;
         }
-        // A schema-version row that disagrees means an older catalog: the tables above are
-        // `IF NOT EXISTS`, so re-stamping is only honest once the shape is known to match.
-        let stamped = self.schema_version()?;
-        if stamped != Some(SCHEMA_VERSION) {
-            self.db.execute("DELETE FROM schema_version", ())?;
-            self.db.execute(
-                "INSERT INTO schema_version(version) VALUES(?1)",
-                [i64::from(SCHEMA_VERSION)],
-            )?;
-        }
+        self.db.execute("DELETE FROM schema_version", ())?;
+        self.db.execute(
+            "INSERT INTO schema_version(version) VALUES(?1)",
+            [i64::from(SCHEMA_VERSION)],
+        )?;
         Ok(())
     }
 
@@ -273,6 +291,17 @@ impl Catalog {
             })
             .unwrap_or(None)
             .map(|v| v as u32))
+    }
+
+    /// Overwrite the stamped schema version. A test seam, mirroring the one on the package
+    /// index: it is the only way to model a catalog written by a different vaire.
+    pub fn set_schema_version(&self, version: u32) -> Result<()> {
+        self.db.execute("DELETE FROM schema_version", ())?;
+        self.db.execute(
+            "INSERT INTO schema_version(version) VALUES(?1)",
+            [i64::from(version)],
+        )?;
+        Ok(())
     }
 
     /// Record (or refresh) a sighting. Idempotent by path, which is what makes it safe
@@ -343,12 +372,11 @@ impl Catalog {
 
     /// Forget one sighting by path. Returns whether a row was removed.
     pub fn forget(&self, path: &Path) -> Result<bool> {
-        // Canonicalize when the path still resolves, so `catalog rm .` matches the row a
-        // registration wrote; fall back to the literal string for a path that is gone,
-        // which is exactly when someone wants to remove it.
-        let key = canonical(path)
-            .map(|p| path_key(&p))
-            .unwrap_or_else(|_| path_key(path));
+        // Rows are keyed by canonicalized path, and the path being removed is very often
+        // gone — which is the whole reason someone is removing it. A literal fallback is
+        // not enough: on a system where `/var` is a symlink to `/private/var`, the stored
+        // key went through that link and the literal one did not, so they never match.
+        let key = path_key(&canonical_best_effort(path));
         Ok(self
             .db
             .execute("DELETE FROM workspaces WHERE path = ?1", [key.as_str()])?
@@ -368,10 +396,11 @@ impl Catalog {
             .execute("DELETE FROM workspaces WHERE state = 'missing'", ())
     }
 
-    /// Re-check every sighting's path and update its state. Cheap: one `lstat` per row,
-    /// no manifest reads — a path that exists is `live` again, one that does not is
-    /// `missing`. The manifest is only re-read when a row is actually selected for
-    /// resolution, which is a different question asked at a different time.
+    /// Re-check every sighting and update its state. Cheap: one stat per row, for the
+    /// package's `knowledge.toml` — a directory that survived but lost its manifest is no
+    /// longer a package, so it is `missing` too. The manifest is not *read* here; whether
+    /// it still declares the same name and version is a different question, asked only
+    /// when a row is actually selected for resolution.
     pub fn refresh(&self) -> Result<(usize, usize)> {
         let mut live = 0;
         let mut missing = 0;
@@ -438,6 +467,33 @@ fn path_key(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Canonicalize as much of `path` as still exists, keeping the rest verbatim.
+///
+/// For a path that resolves this is plain canonicalization. For one that does not — a
+/// deleted checkout — it resolves the nearest surviving ancestor and re-appends the
+/// missing tail, so the result matches the key a `record` wrote back when the directory
+/// was there.
+fn canonical_best_effort(path: &Path) -> PathBuf {
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return resolved;
+    }
+    let mut tail = Vec::new();
+    let mut cursor = path;
+    while let Some(parent) = cursor.parent() {
+        match cursor.file_name() {
+            Some(name) => tail.push(name.to_os_string()),
+            None => break,
+        }
+        if let Ok(base) = std::fs::canonicalize(parent) {
+            let mut resolved = base;
+            resolved.extend(tail.iter().rev());
+            return resolved;
+        }
+        cursor = parent;
+    }
+    path.to_path_buf()
+}
+
 fn canonical(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(path).map_err(|e| VaireError::Config(format!("{}: {e}", path.display())))
 }
@@ -446,7 +502,14 @@ fn canonical(path: &Path) -> Result<PathBuf> {
 /// the sidecars carry committed rows and a database file alone is not the database.
 fn remove_db_files(path: &Path) -> Result<()> {
     for suffix in ["", "-wal", "-shm"] {
-        let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
+        // Built from the OS string, not from `Display`: a path that is not valid UTF-8
+        // would come back lossily converted, and the `-wal` name we constructed would then
+        // name a file that does not exist. The removal would report success while the real
+        // sidecar survived — and a recreated database would pick the old committed rows
+        // straight back up, which is precisely what this function exists to prevent.
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        let sidecar = PathBuf::from(sidecar);
         match std::fs::remove_file(&sidecar) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

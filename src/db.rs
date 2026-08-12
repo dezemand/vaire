@@ -155,8 +155,15 @@ pub fn col_opt_i64(row: &Row, i: usize) -> Result<Option<i64>> {
 }
 
 /// A required `INTEGER` column narrowed to `u32` (line numbers, counts).
+///
+/// A value that does not fit is an error rather than a wrap: silently turning a negative
+/// or oversized row into a plausible line number would hide the corruption instead of
+/// reporting it.
 pub fn col_u32(row: &Row, i: usize) -> Result<u32> {
-    Ok(col_i64(row, i)? as u32)
+    let value = col_i64(row, i)?;
+    u32::try_from(value).map_err(|_| {
+        VaireError::IndexCorrupt(format!("column {i}: {value} is out of range for a u32"))
+    })
 }
 
 /// A required `REAL` column (e.g. `vector_distance_cos`, `fts_score`); an `INTEGER` widens.

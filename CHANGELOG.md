@@ -109,9 +109,9 @@ uses [Semantic Versioning](https://semver.org).
   — an `open` that treated every connect failure as corruption would have *deleted the
   catalog* whenever another process held it. Turso stays: that lock is the cross-process
   mutex, and an OS file lock cannot outlive its process, so contention is now retried with
-  bounded backoff and connections are short-lived. Eight processes writing 400 rows lose
-  nothing. The cost is recorded rather than hidden — catalog access is serialized
-  machine-wide, so nothing may hold a handle resident.
+  bounded backoff and connections are short-lived. Eight processes making 400 concurrent
+  writes now land every one of them. The cost is recorded rather than hidden — catalog
+  access is serialized machine-wide, so nothing may hold a handle resident.
 
 ## [0.2.1] — 2026-08-03
 

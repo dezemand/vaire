@@ -859,7 +859,9 @@ vaire catalog scan <dir>
 vaire catalog rm <path|name> | --missing
 ```
 
-What packages **this machine** knows, where they live, and whether they may be edited.
+What packages **this machine** knows and where they live. Every sighting is a working
+copy — a directory someone can edit — so editability is not yet a recorded property; it
+becomes one when the store lands and read-only materialized releases join the catalog.
 Machine-local state in the vaire home (`~/.vaire/catalog.db`, `VAIRE_HOME` overrides) —
 never in any manifest, and never entity content: the catalog holds package-level metadata
 only, and every per-package index still lives beside its package.
@@ -878,10 +880,10 @@ declares a dependency, `catalog add` records a package on this machine, `registr
   re-read and must still say the same thing. A corrupt catalog is **recreated rather than
   repaired** — losing it costs a rescan and nothing else.
 - **Two states, no clocks.** A sighting is `live` or `missing`; nothing expires on a timer
-  and nothing is removed behind your back. `list` re-checks every path as it goes (one
-  `lstat` each), so a vanished checkout shows `missing` and a returning one — a remounted
-  drive, a restored clone — flips straight back to `live`. Sweeping them is explicit:
-  `catalog rm --missing`.
+  and nothing is removed behind your back. `list` re-checks as it goes — one stat per row,
+  for the package's `knowledge.toml`, so a directory that survived but lost its manifest
+  counts as missing too — and a returning path — a remounted drive, a restored clone —
+  flips straight back to `live`. Sweeping them is explicit: `catalog rm --missing`.
 - **Registration is ambient.** `index`, `check`, and `add` record what they touched — the
   package itself plus every working copy in its dependency closure — so ordinary use fills
   the catalog and no workflow gains a ceremony step. `--no-register` on any of those three

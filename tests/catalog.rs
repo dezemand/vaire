@@ -277,3 +277,65 @@ fn a_broken_catalog_never_fails_the_command_that_touched_it() {
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains("catalog not updated"), "{warnings:?}");
 }
+
+#[test]
+fn a_catalog_from_a_different_schema_version_is_recreated_not_relabelled() {
+    let home = tmp();
+    let work = tmp();
+    let pkg = loose_package(work.path(), "acme-core");
+    {
+        let catalog = Catalog::open(home.path()).expect("catalog");
+        catalog
+            .record(&pkg, "acme-core", "1.0.0", Origin::Registered)
+            .expect("record");
+        // Simulate a catalog written by a vaire whose schema differs from ours.
+        catalog
+            .set_schema_version(vaire::catalog::SCHEMA_VERSION + 1)
+            .expect("stamp a foreign version");
+    }
+
+    // The tables are created `IF NOT EXISTS`, so installing over an older shape would
+    // no-op and then stamp it as current — leaving a database whose columns no query
+    // matches, now labelled as though it did. Recreating is the only honest answer.
+    let catalog = Catalog::open(home.path()).expect("open");
+    assert_eq!(
+        catalog.schema_version().unwrap(),
+        Some(vaire::catalog::SCHEMA_VERSION)
+    );
+    assert!(
+        catalog.sightings().expect("readable").is_empty(),
+        "a recreated catalog starts empty; a rescan refills it"
+    );
+}
+
+#[test]
+fn a_vanished_path_can_still_be_removed_by_path() {
+    let home = tmp();
+    let work = tmp();
+    let pkg = loose_package(work.path(), "acme-core");
+    cmd::add(home.path(), Some(&pkg)).expect("add");
+    std::fs::remove_dir_all(&pkg).expect("the checkout goes away");
+
+    // This is the case people actually reach for `rm <path>` in. Deciding path-vs-name by
+    // whether the path still exists would send it down the name branch, match nothing, and
+    // report success having done nothing.
+    let out = cmd::remove(home.path(), Some(&pkg.display().to_string()), false).expect("rm");
+    assert_eq!(out.removed, 1, "{out:?}");
+    assert!(names(home.path()).is_empty());
+}
+
+#[test]
+fn sweeping_a_clean_catalog_says_so_rather_than_reporting_a_failed_match() {
+    let home = tmp();
+    let work = tmp();
+    let pkg = loose_package(work.path(), "acme-core");
+    cmd::add(home.path(), Some(&pkg)).expect("add");
+
+    // A clean catalog reaches this every time the sweep runs, so it must not read like a
+    // lookup that found nothing.
+    let out = cmd::remove(home.path(), None, true).expect("sweep");
+    assert_eq!(out.removed, 0);
+    assert!(out.swept);
+    let rendered = vaire::output::Output::render_human(&out);
+    assert!(rendered.contains("still answers"), "{rendered}");
+}

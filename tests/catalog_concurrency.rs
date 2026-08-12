@@ -72,6 +72,11 @@ fn catalog_write_worker() {
     let root = home.join("packages");
 
     let catalog = Catalog::open(&home).expect("worker opens the shared catalog");
+    // The contended directory is created once by the parent. Eight processes rewriting one
+    // `knowledge.toml` is not an atomic operation, and a torn read of it would flake this
+    // test for a reason that has nothing to do with catalog concurrency — the contended
+    // *row* is the point, not the file behind it.
+    let shared = root.join("contended");
     for n in 0..PER_WORKER {
         let name = format!("pkg-{id}-{n}");
         let dir = package_at(&root, &name);
@@ -81,7 +86,6 @@ fn catalog_write_worker() {
 
         // Every worker also writes the *same* row, so the upsert path is genuinely
         // contended rather than merely concurrent.
-        let shared = package_at(&root, "contended");
         catalog
             .record(&shared, "contended", "1.0.0", Origin::Ambient)
             .expect("worker records the contended package");
@@ -95,6 +99,9 @@ fn eight_processes_writing_at_once_lose_nothing() {
     // Create the catalog up front so every worker opens an existing file — the realistic
     // case, and it keeps the test measuring writes rather than eight racing creations.
     drop(Catalog::open(&home).expect("catalog"));
+    // …and the contended package, so no worker has to write the file every other worker
+    // is reading.
+    package_at(&home.join("packages"), "contended");
 
     let exe = std::env::current_exe().expect("test binary path");
     let started = std::time::Instant::now();

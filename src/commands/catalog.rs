@@ -104,6 +104,7 @@ pub fn remove(home: &Path, target: Option<&str>, missing: bool) -> Result<Catalo
             catalog: catalog.path().display().to_string(),
             removed: removed as usize,
             target: "every sighting whose path no longer answers".to_string(),
+            swept: true,
         });
     }
     let target = target.ok_or_else(|| {
@@ -111,16 +112,18 @@ pub fn remove(home: &Path, target: Option<&str>, missing: bool) -> Result<Catalo
             "`vaire catalog rm` needs a path or a package name (or `--missing`)".into(),
         )
     })?;
-    let as_path = PathBuf::from(target);
-    let removed = if as_path.exists() {
-        u64::from(catalog.forget(&as_path)?)
-    } else {
-        catalog.forget_name(target)?
+    // Try the path first, then the name. Keying off `exists()` would be wrong in exactly
+    // the case people reach for this: a checkout that is *gone* is a path you still want
+    // removed, and treating it as a name silently matches nothing and reports success.
+    let removed = match catalog.forget(&PathBuf::from(target))? {
+        true => 1,
+        false => catalog.forget_name(target)? as usize,
     };
     Ok(CatalogRemoveOutput {
         catalog: catalog.path().display().to_string(),
-        removed: removed as usize,
+        removed,
         target: target.to_string(),
+        swept: false,
     })
 }
 
