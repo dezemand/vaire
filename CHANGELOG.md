@@ -6,6 +6,34 @@ uses [Semantic Versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- **The catalog** (cli.md §4.8) — machine-local state recording what packages this machine
+  knows and where they live, in the new **vaire home** (`~/.vaire/catalog.db`,
+  `VAIRE_HOME` overrides). `vaire catalog list | add [path] | scan <dir> | rm <path|name>
+  | rm --missing`. Package-level metadata only: every per-package index still lives beside
+  its package, and nothing here holds entity content.
+
+  A row is a **sighting** — "a package declaring *N* at *V* was seen at *P*" — keyed by
+  canonicalized path, with the name as an attribute, so two live paths declaring one name
+  are two observations rather than a conflict to resolve at write time. Rows are
+  observations throughout: a corrupt catalog is recreated rather than repaired, because
+  losing it costs a rescan and nothing else.
+
+  **Two states, no clocks**: `live` or `missing`. Nothing expires on a timer and nothing is
+  removed behind your back; `list` re-checks each path as it goes, so a vanished checkout
+  shows `missing` and a returning one flips back to `live`. Sweeping is explicit
+  (`rm --missing`).
+
+  **Registration is ambient** — `index`, `check`, and `add` record the package they ran in
+  plus every working copy in its dependency closure, so ordinary use fills the catalog and
+  no workflow gains a ceremony step. `--no-register` skips on all three; skipping never
+  forgets, and an ambient touch never demotes a hand-registered row. A catalog that cannot
+  be written warns and is otherwise ignored.
+
+  The catalog does **not** drive dependency resolution yet — that arrives with the resolver
+  change, and `local-packages` discovery is unchanged for now.
+- **`vaire catalog scan <dir>`** — bulk import, and the one place the old discovery walk
+  now lives (same depth and skip rules), demoted from resolution machinery to a one-shot
+  import tool.
 - **`vaire release`** (cli.md §4.7) — cut a release in one command: classify what changed
   since the last one, compute the version, write the manifest and a release record,
   commit, tag. **The version is computed, not typed.** The classifier diffs the entity
@@ -25,9 +53,10 @@ uses [Semantic Versioning](https://semver.org).
 
   **Backlink weighting** is the one advisory: a PATCH touching an entity with ten or more
   inbound references reports it (`department:platform has 14 inbound references — patch,
-  really?`) and asks before proceeding, because structure is only a proxy for meaning. `--yes` skips the question (the CI
-  posture) and so does the absence of a terminal — a prompt that blocked an automated
-  release would be a bug — while the advisory still rides along in the output.
+  really?`) and asks before proceeding, because structure is only a proxy for meaning.
+  `--yes` skips the question (the CI posture) and so does the absence of a terminal — a
+  prompt that blocked an automated release would be a bug — while the advisory still
+  rides along in the output.
 
   Gated on a clean tree, HEAD on the mainline (`--allow-branch` escapes), the package
   being its own Git repository, and `vaire check` free of violations. Nothing to release
@@ -65,6 +94,24 @@ uses [Semantic Versioning](https://semver.org).
   `--no-embeddings` strips section vectors.
 - **`repository` manifest field** (manifest.md §3) — where the package is authored, for
   the registry's pull-to-read vs clone-to-author choice (registry design v0.2).
+
+### Changed
+- **The Turso facade moved to `vaire::db`**, shared by the package index and the catalog,
+  so there is one async→sync bridge rather than two copies of its traps. `Index` keeps its
+  public surface.
+
+### Fixed
+- **Cross-process safety for shared state, measured rather than assumed.** The catalog
+  design assumed short WAL transactions made concurrent CLI invocations safe. They do not:
+  **Turso takes an exclusive lock when a database is opened**, so a second process cannot
+  open it at all — reads included. A multi-process test (`tests/catalog_concurrency.rs`)
+  proved it before anything relied on it, and caught a bug it would otherwise have shipped
+  — an `open` that treated every connect failure as corruption would have *deleted the
+  catalog* whenever another process held it. Turso stays: that lock is the cross-process
+  mutex, and an OS file lock cannot outlive its process, so contention is now retried with
+  bounded backoff and connections are short-lived. Eight processes making 400 concurrent
+  writes now land every one of them. The cost is recorded rather than hidden — catalog
+  access is serialized machine-wide, so nothing may hold a handle resident.
 
 ## [0.2.1] — 2026-08-03
 

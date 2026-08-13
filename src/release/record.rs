@@ -78,7 +78,7 @@ fn render(
     classification: &Classification,
     notes: Option<&str>,
 ) -> String {
-    let date = today();
+    let date = crate::clock::today_utc();
     let mut out = String::new();
     out.push_str("---\n");
     out.push_str(&format!("id: {}\n", slug(version)));
@@ -148,41 +148,9 @@ pub fn path_for(config: &Config, version: Version) -> PathBuf {
     ))
 }
 
-/// Today in UTC as `YYYY-MM-DD`.
-fn today() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
-    let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-/// Days since the Unix epoch → civil `(year, month, day)`. Howard Hinnant's `chrono`
-/// algorithm, inlined rather than taking a date dependency for one format call.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = era * 400 + yoe + i64::from(month <= 2);
-    (year, month, day)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn civil_dates_match_known_days() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(19_723), (2024, 1, 1)); // a leap year's start
-        assert_eq!(civil_from_days(19_783), (2024, 3, 1)); // just past leap day
-        assert_eq!(civil_from_days(-1), (1969, 12, 31));
-    }
 
     #[test]
     fn a_version_slug_drops_the_dots_the_id_grammar_forbids() {

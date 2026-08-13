@@ -8,6 +8,8 @@
 //!
 //! - [`model`]   — the type-agnostic node/edge domain: IDs, references, nodes, edges.
 //! - [`corpus`]  — reading the files: repo discovery, scanning, frontmatter, wikilinks.
+//! - [`catalog`] — what packages this machine knows and where they live.
+//! - [`db`]      — the Turso facade: one async→sync bridge, shared by index and catalog.
 //! - [`index`]   — the derived SQLite cache: build, query, integrity checks.
 //! - [`search`]  — hybrid FTS + vector retrieval.
 //! - [`embed`]   — pluggable, local-by-default embedding with a content-hash cache.
@@ -20,11 +22,17 @@
 //! - [`error`]   — [`error::VaireError`] and its mapping to documented exit codes.
 
 #[cfg(feature = "index")]
+pub mod catalog;
+#[cfg(feature = "index")]
 pub mod cli;
+#[cfg(feature = "index")]
+pub mod clock;
 #[cfg(feature = "index")]
 pub mod commands;
 pub mod config;
 pub mod corpus;
+#[cfg(feature = "index")]
+pub mod db;
 #[cfg(feature = "index")]
 pub mod embed;
 pub mod error;

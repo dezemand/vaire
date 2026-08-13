@@ -1402,3 +1402,125 @@ impl PendingRelease {
         }
     }
 }
+
+// ---- vaire catalog ---------------------------------------------------------
+
+/// `vaire catalog list` (cli.md §4.8).
+#[derive(Debug, Serialize)]
+pub struct CatalogListOutput {
+    pub catalog: String,
+    pub sightings: Vec<crate::catalog::Sighting>,
+}
+
+/// `vaire catalog add` / `scan` — what got recorded.
+#[derive(Debug, Serialize)]
+pub struct CatalogRecordOutput {
+    pub catalog: String,
+    pub recorded: Vec<crate::catalog::Sighting>,
+    /// The directory a `scan` walked; absent for a single `add`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scanned: Option<String>,
+    /// Directories holding an unreadable manifest — surfaced so a malformed one does not
+    /// look like an absent package.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<String>,
+    /// The walk stopped early, so "not found" may be wrong.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// `vaire catalog rm`.
+#[derive(Debug, Serialize)]
+pub struct CatalogRemoveOutput {
+    pub catalog: String,
+    pub removed: usize,
+    pub target: String,
+    /// This was the `--missing` sweep rather than a named removal — which reads
+    /// differently when it matches nothing, since a clean catalog hits that every time.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub swept: bool,
+}
+
+impl Output for CatalogListOutput {
+    fn render_human(&self) -> String {
+        if self.sightings.is_empty() {
+            return format!(
+                "{}\n{}",
+                dim("the catalog is empty"),
+                dim(
+                    "  `vaire catalog scan <dir>` imports a tree of packages; `index` and `check` record what they touch"
+                ),
+            );
+        }
+        let mut out = format!("{}\n", pluralize(self.sightings.len(), "package"));
+        let w = col_width(self.sightings.iter().map(|s| s.name.as_str()));
+        for s in &self.sightings {
+            let state = match s.state {
+                crate::catalog::State::Live => dim("live").to_string(),
+                crate::catalog::State::Missing => yellow("missing").to_string(),
+            };
+            out.push_str(&format!(
+                "  {}  {}  {}  {}  {}\n",
+                cyan(&format!("{:<w$}", s.name)),
+                plain(&format!("{:<9}", s.version)),
+                state,
+                dim(&format!("{:<10}", s.origin.as_str())),
+                dim(&s.path.display().to_string()),
+            ));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+impl Output for CatalogRecordOutput {
+    fn render_human(&self) -> String {
+        let mut out = match &self.scanned {
+            Some(dir) => format!(
+                "{}\n",
+                green(&format!(
+                    "✓ recorded {} from {dir}",
+                    pluralize(self.recorded.len(), "package")
+                ))
+            ),
+            None => match self.recorded.first() {
+                Some(s) => format!(
+                    "{}\n",
+                    green(&format!("✓ recorded {} {}", s.name, s.version))
+                ),
+                None => format!("{}\n", yellow("nothing recorded")),
+            },
+        };
+        if self.scanned.is_some() {
+            for s in &self.recorded {
+                out.push_str(&format!(
+                    "  {}  {}\n",
+                    cyan(&s.name),
+                    dim(&s.path.display().to_string())
+                ));
+            }
+        } else if let Some(s) = self.recorded.first() {
+            out.push_str(&format!("  {}\n", dim(&s.path.display().to_string())));
+        }
+        for note in &self.unreadable {
+            out.push_str(&yellow(&format!("  skipped: {note}\n")));
+        }
+        if self.truncated {
+            out.push_str(&yellow(
+                "  the walk stopped early — narrow the directory you scanned\n",
+            ));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+impl Output for CatalogRemoveOutput {
+    fn render_human(&self) -> String {
+        match (self.removed, self.swept) {
+            (0, true) => dim("every sighting still answers — nothing to sweep").to_string(),
+            (0, false) => {
+                dim(&format!("nothing in the catalog matched {}", self.target)).to_string()
+            }
+            (n, _) => green(&format!("✓ forgot {}", pluralize(n, "sighting"))).to_string(),
+        }
+    }
+}

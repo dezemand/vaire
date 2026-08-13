@@ -8,6 +8,7 @@
 
 pub mod add;
 pub mod backlinks;
+pub mod catalog;
 pub mod check;
 pub mod configure;
 pub mod deps;

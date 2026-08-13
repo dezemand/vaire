@@ -136,6 +136,9 @@ pub enum Command {
         /// this path (a package directory declaring the same name).
         #[arg(long)]
         link: Option<PathBuf>,
+        /// Do not record this package in the catalog. Skips, never forgets.
+        #[arg(long = "no-register")]
+        no_register: bool,
     },
 
     /// (Re)build the index from the committed files.
@@ -153,6 +156,10 @@ pub enum Command {
         /// Skip the linked-dependency ensure pass (index only this package).
         #[arg(long = "no-deps")]
         no_deps: bool,
+        /// Do not record this package in the catalog. Skips, never forgets — an existing
+        /// sighting is left exactly as it was.
+        #[arg(long = "no-register")]
+        no_register: bool,
     },
 
     /// Run the integrity guards ID-based discovery enables.
@@ -167,6 +174,9 @@ pub enum Command {
         /// dependency indexes as-is).
         #[arg(long = "no-deps")]
         no_deps: bool,
+        /// Do not record this package in the catalog. Skips, never forgets.
+        #[arg(long = "no-register")]
+        no_register: bool,
     },
 
     /// Report index state.
@@ -225,6 +235,12 @@ pub enum Command {
         check: bool,
     },
 
+    /// What packages this machine knows and where they live.
+    Catalog {
+        #[command(subcommand)]
+        action: CatalogAction,
+    },
+
     /// Configure global user settings. With no subcommand, opens an interactive prompt.
     Configure {
         #[command(subcommand)]
@@ -242,6 +258,31 @@ impl Command {
     pub fn supports_json(&self) -> bool {
         !matches!(self, Command::Mcp)
     }
+}
+
+/// Managing the catalog by hand. Most of it fills itself — `index`, `check`, and `add`
+/// record what they touch — so these cover what ambience cannot reach.
+#[derive(Debug, Subcommand)]
+pub enum CatalogAction {
+    /// Record a package explicitly (default: the current directory).
+    Add { path: Option<PathBuf> },
+
+    /// Forget a package: by path, by declared name, or every sighting whose path no
+    /// longer answers.
+    Rm {
+        /// A path or a package name.
+        target: Option<String>,
+        /// Forget every sighting whose path no longer answers.
+        #[arg(long)]
+        missing: bool,
+    },
+
+    /// List every package the catalog knows, re-checking whether each path still answers.
+    List,
+
+    /// Walk a directory once and record every package under it — the bulk import for a
+    /// tree you already have.
+    Scan { dir: PathBuf },
 }
 
 /// The sections `vaire configure <section>` can set non-interactively. Bare `vaire

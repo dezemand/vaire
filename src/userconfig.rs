@@ -85,6 +85,26 @@ pub fn config_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".vaire-config"))
 }
 
+/// The **vaire home**: `VAIRE_HOME` if set and non-empty, else `~/.vaire`.
+///
+/// Distinct from the config home on purpose. `config.toml`/`credentials.toml` are things
+/// a person writes and might sync between machines; the home holds state the tool
+/// maintains about *this* machine — starting with the catalog, and later the store. A
+/// plain `~/.vaire` rather than a platform-specific location because it is a working
+/// directory a user is expected to be able to find, delete, and watch grow.
+///
+/// Falls back to `.vaire-home` in the cwd only when there is no home directory at all.
+pub fn vaire_home() -> PathBuf {
+    if let Ok(dir) = std::env::var("VAIRE_HOME")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
+    }
+    directories::UserDirs::new()
+        .map(|d| d.home_dir().join(".vaire"))
+        .unwrap_or_else(|| PathBuf::from(".vaire-home"))
+}
+
 /// Resolve a secret (e.g. `OPENAI_API_KEY`): an existing **environment variable wins**,
 /// otherwise it is read from `<config-home>/credentials.toml`. Returns `None` if in neither.
 pub fn credential(key: &str) -> Option<String> {

@@ -850,6 +850,76 @@ references, present on `planned` and `released` alike, and absent when there are
 `status` is one of `released`, `planned` (`--dry-run`), `nothing`, or `blocked` (a MAJOR
 awaiting a maintainer, exit `7`).
 
+### 4.8 `vaire catalog`
+
+```text
+vaire catalog list
+vaire catalog add [<path>]
+vaire catalog scan <dir>
+vaire catalog rm <path|name> | --missing
+```
+
+What packages **this machine** knows and where they live. Every sighting is a working
+copy — a directory someone can edit — so editability is not yet a recorded property; it
+becomes one when the store lands and read-only materialized releases join the catalog.
+Machine-local state in the vaire home (`~/.vaire/catalog.db`, `VAIRE_HOME` overrides) —
+never in any manifest, and never entity content: the catalog holds package-level metadata
+only, and every per-package index still lives beside its package.
+
+A noun group rather than flat verbs, which keeps the three "add"s unambiguous: `add`
+declares a dependency, `catalog add` records a package on this machine, `registry add`
+(later) configures a remote.
+
+- **A row is a sighting, not a package.** It records that a package declaring name *N* at
+  version *V* was observed at path *P*, keyed by the **canonicalized** path so two routes
+  to one directory cannot register twice. Name is an attribute: two live paths declaring
+  one name — a fork beside its original, two worktrees — are two sightings, and which one
+  is "the" package is a resolution question, not a write-time guess.
+- **An index, never truth.** Rows are observations, so the catalog is always rebuildable
+  and never believed on its own: before anything resolves from a sighting, the manifest is
+  re-read and must still say the same thing. A corrupt catalog is **recreated rather than
+  repaired** — losing it costs a rescan and nothing else.
+- **Two states, no clocks.** A sighting is `live` or `missing`; nothing expires on a timer
+  and nothing is removed behind your back. `list` re-checks as it goes — one stat per row,
+  for the package's `knowledge.toml`, so a directory that survived but lost its manifest
+  counts as missing too — and a returning path — a remounted drive, a restored clone —
+  flips straight back to `live`. Sweeping them is explicit: `catalog rm --missing`.
+- **Registration is ambient.** `index`, `check`, and `add` record what they touched — the
+  package itself plus every working copy in its dependency closure — so ordinary use fills
+  the catalog and no workflow gains a ceremony step. `--no-register` on any of those three
+  skips it; skipping never *forgets*, and an ambient touch never demotes a row you
+  registered by hand. A catalog that cannot be written warns and is otherwise ignored: it
+  is a convenience over rebuildable state, never a reason for `vaire index` to fail.
+- **`scan` is the bulk import**, and the only place the old discovery walk survives (same
+  depth and skip rules): it runs once, on request, over a tree you already have.
+
+> **Cross-process cost.** Turso takes an exclusive lock when a database is opened, so
+> catalog access is serialized machine-wide: a second vaire process waits (briefly, with
+> backoff) rather than failing. Commands therefore open the catalog, do one thing, and
+> close it — nothing holds a handle across an index build, and nothing may hold one
+> resident.
+
+JSON (`list`):
+
+```json
+{
+  "catalog": "/Users/you/.vaire/catalog.db",
+  "sightings": [
+    {
+      "path": "/Users/you/Knowledge/acme-core",
+      "name": "acme-core",
+      "version": "1.4.0",
+      "state": "live",
+      "origin": "registered",
+      "last_seen": 1786000000
+    }
+  ]
+}
+```
+
+`origin` is `registered` (you said so), `scanned` (a bulk import), or `ambient` (a command
+touched it).
+
 ## 5. MCP server
 
 ```
