@@ -6,6 +6,48 @@ uses [Semantic Versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- **`vaire release`** (cli.md §4.7) — cut a release in one command: classify what changed
+  since the last one, compute the version, write the manifest and a release record,
+  commit, tag. **The version is computed, not typed.** The classifier diffs the entity
+  index of the last release — rebuilt from that release's tag, so no old artifact needs
+  retaining — against the current tree: addresses added → MINOR, content changed →
+  PATCH, addresses removed or a `superseded_by:` appeared → MAJOR. "Content" is what a
+  reader notices (sections, edges, aliases); a moved file or a touched `updated:` is
+  bookkeeping and never a release. A rename needs no special case — an address *is* the
+  identity, so it presents as a removal plus an addition. A package with no prior tag
+  publishes the version its manifest already declares.
+
+  **MAJOR is never automatic**: it exits `7` — its own code, so an automated pipeline
+  reports *pending a maintainer* rather than *broken* — and requires `--major` together
+  with `--notes <file>`, the invalidated assumptions dependents read to decide about
+  re-confirmation. `--major` also escalates a small edit that reverses a truth, because
+  the maintainer owns meaning while the tool owns structure.
+
+  **Backlink weighting** is the one advisory: a PATCH touching an entity with ten or more
+  inbound references reports it (`department:platform has 14 inbound references — patch,
+  really?`) and asks before proceeding, because structure is only a proxy for meaning. `--yes` skips the question (the CI
+  posture) and so does the absence of a terminal — a prompt that blocked an automated
+  release would be a bug — while the advisory still rides along in the output.
+
+  Gated on a clean tree, HEAD on the mainline (`--allow-branch` escapes), the package
+  being its own Git repository, and `vaire check` free of violations. Nothing to release
+  is a clean no-op, exit `0`. It never runs `git push` and never uploads: git transport
+  stays the maintainer's, and publishing is `vaire push` (not yet implemented), so a
+  flaky upload re-runs an upload rather than a ritual and CI can publish a tag it did not
+  cut. `--push`/`--onto` are reserved grammar, rejected as not yet implemented.
+- **Release records** — the changelog, written as corpus. Each release writes
+  `releases/<version>.md`: an entity carrying the date, the bump, and **edges** to what
+  was added, changed, and retired, so "which releases touched this entity?" is
+  `vaire backlinks <id> --type release` and a consumer's adopted-changes digest becomes
+  an intersection rather than a diff. Removed addresses are recorded as text — a deleted
+  entity has no address left to point at. The classifier **excludes** release records
+  from its own diff, or no release after the first could ever be a PATCH. New manifest
+  keys `release_type`/`release_dir` (defaults `release`/`releases`) rename them for a
+  package whose own vocabulary already means something by the word.
+- **`vaire status` reports the pending release** — `release: would be minor — 3 new, 12
+  changed` — so a release is never a surprise. Best-effort and cheap: the common "nothing
+  new since the last release" case is a commit count, and it stays silent while the index
+  is behind HEAD, where the answer would describe neither tree.
 - **`vaire pack`** (cli.md §4.6) — **behind the non-default `pack` feature**, so it
   is not compiled into the released binary: the artifact format is still settling and
   the registry that consumes it does not exist yet. Build with `--features pack` to

@@ -172,6 +172,36 @@ pub enum Command {
     /// Report index state.
     Status,
 
+    /// Cut a release: classify what changed since the last one, compute the version,
+    /// write the manifest and a release record, commit, and tag. Never pushes.
+    Release {
+        /// Consent to a MAJOR — required when the classifier sees one (removed or
+        /// retired entities), and enough on its own to escalate a small edit that
+        /// reverses a truth the classifier cannot see.
+        #[arg(long)]
+        major: bool,
+        /// Classify and report what would happen; write nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Accept advisory prompts without asking (the CI posture).
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// File holding the invalidated-assumptions notes a MAJOR must carry — what
+        /// dependents read to decide whether their references still hold.
+        #[arg(long)]
+        notes: Option<PathBuf>,
+        /// Release from a branch that is not the repository's mainline.
+        #[arg(long = "allow-branch")]
+        allow_branch: bool,
+        /// Reserved: upload to a registry after releasing. Transport is `vaire push`,
+        /// which does not exist yet.
+        #[arg(long, hide = true)]
+        push: bool,
+        /// Reserved: back-patch an older major line.
+        #[arg(long, hide = true)]
+        onto: Option<String>,
+    },
+
     /// Build this package's distributable artifact from the committed tree
     /// (`.vaire/dist/<name>-<version>.tgz`: manifest, corpus files, every file
     /// they reference, pre-built index).

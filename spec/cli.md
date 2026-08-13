@@ -767,6 +767,89 @@ JSON:
 }
 ```
 
+### 4.7 `vaire release`
+
+```text
+vaire release [--major] [--dry-run] [--notes <file>] [--allow-branch] [--yes] [--json]
+```
+
+Cut a release: classify what changed since the last one, compute the version, write the
+manifest and a release record, commit, tag. **The user never types a version number** —
+except to declare a major dependency, or to deliberately cut a major.
+
+- **The bump is computed, not typed.** The classifier diffs the entity index of the last
+  release against the current tree, rebuilding the baseline from that release's tag (a
+  pack is byte-deterministic from a commit, so nothing needs the old artifact retained):
+
+  | observed                                                  | bump               |
+  |-----------------------------------------------------------|--------------------|
+  | entity addresses added; none removed or retired            | **MINOR**          |
+  | content changed, address set identical                     | **PATCH**          |
+  | addresses removed, or a `superseded_by:` appeared          | **MAJOR** — gated  |
+  | mixed                                                      | highest applicable |
+
+  "Content" is what a reader notices — sections, edges, aliases. A moved file or a
+  touched `updated:` is bookkeeping and never a release. A **rename** needs no special
+  case: an address *is* the identity, so a rename is one removal plus one addition, and
+  the removal already forces MAJOR. A package with **no prior tag** publishes the version
+  its manifest already declares — a first release is a declaration, not an increment.
+- **MAJOR is never automatic** (exit `7`, distinct so a pipeline can report *pending*
+  rather than *broken*). It needs `--major` **and** `--notes <file>`, the human-written
+  invalidated assumptions dependents read to decide about re-confirmation. `--major` also
+  *escalates*: a one-word edit reversing a truth is a semantic act the classifier cannot
+  see, and the maintainer owns meaning while the tool owns structure.
+- **The release record is the changelog, written as corpus.** `releases/<version>.md`, an
+  entity carrying the date, the bump, and **edges** to what was added, changed, and
+  retired — so "which releases touched this entity?" is `vaire backlinks <id> --type
+  release`, and a consumer's adopted-changes digest is an intersection rather than a diff.
+  Removed addresses are recorded as text, not references: a deleted entity has no address
+  left to point at. The type and directory are `release_type`/`release_dir` in the
+  manifest — conventions, not reserved words. **The classifier excludes release records
+  from its own diff**, or no release after the first could ever be a PATCH.
+- **Gates.** A clean working tree (the release commit contains the release and nothing
+  else — the `--notes` file is an input, not stray work), HEAD on the repository's
+  mainline (`--allow-branch` escapes; a tag cut on a topic branch names a commit the
+  mainline may never contain), the package as its own Git repository, a version whose tag
+  does not already exist, a record path the include globs actually select, and `vaire
+  check` free of violations — a published version with dangling references ships them to
+  every consumer. Warnings are reported, never fatal.
+- **Nothing to release is a clean no-op, exit `0`.** An automated pipeline runs this on
+  every merge and most merges warrant no version.
+- **It never runs `git push`, and never uploads.** Git transport stays yours; publishing
+  to a registry is `vaire push` (not yet implemented) — so a flaky upload re-runs an
+  upload rather than a ritual, and CI can publish a tag it did not cut. `--push` and
+  `--onto` are reserved grammar, rejected as not yet implemented.
+
+`vaire status` reports the same classification ambiently (`release: would be minor — 3
+new, 12 changed`), so a release is never a surprise.
+
+JSON:
+
+```json
+{
+  "package": "acme-core",
+  "status": "released",
+  "version": "1.5.0",
+  "bump": "minor",
+  "outcome": {"kind": "bump", "bump": "minor"},
+  "added": ["system:ingest"],
+  "changed": ["department:platform"],
+  "retired": [],
+  "removed": [],
+  "tag": "v1.5.0",
+  "record": "releases/1-5-0.md",
+  "commit": "d8ecc979227…",
+  "warnings": 3,
+  "advisories": [{ "id": "department:platform", "inbound": 14 }]
+}
+```
+
+`advisories` carries the backlink weighting — changed entities with ten or more inbound
+references, present on `planned` and `released` alike, and absent when there are none.
+
+`status` is one of `released`, `planned` (`--dry-run`), `nothing`, or `blocked` (a MAJOR
+awaiting a maintainer, exit `7`).
+
 ## 5. MCP server
 
 ```

@@ -205,19 +205,9 @@ pub fn run(
             std::fs::read_to_string(root.join(rel)).ok()
         };
         if let Some(content) = content
-            && let Some(doc) = frontmatter::split(&content)
+            && let Some(node) = prepare_node(rel, &content, config, &configured)
         {
-            let prose_start = doc.prose_start_line;
-            if let Some(mut node) = frontmatter::to_node(rel, doc) {
-                node.edges.retain(|e| match &e.origin {
-                    crate::model::edge::RefOrigin::Inline => true,
-                    crate::model::edge::RefOrigin::Frontmatter(_) => {
-                        e.to.package().is_some() || configured.contains(e.to.node_type.as_str())
-                    }
-                });
-                apply_scoping(&mut node, &config.scope_field);
-                prepared.push(PreparedNode { node, prose_start });
-            }
+            prepared.push(node);
         }
     }
     // Read cached vectors from the live index when updating in place, or from the previous
@@ -238,7 +228,7 @@ pub fn run(
                 &prepared.node,
                 &config.name,
                 prepared.prose_start,
-                &vectors,
+                Some(&vectors),
             )?;
         }
         // Now that every node is present, resolve relative scoped references scope-first.
@@ -448,6 +438,87 @@ pub fn reembed(repo: &Repo, embedder: &dyn Embedder) -> Result<IndexSummary> {
     })
 }
 
+/// Parse one file into an indexable node, applying the classification and scoping rules
+/// (design.md §6, cli.md §6.1) every build path must apply identically.
+///
+/// Shared by the live build and [`snapshot`] on purpose: the release classifier compares
+/// a snapshot against the live index, so any divergence between the two parse paths would
+/// show up as a phantom entity change and mis-classify a release.
+fn prepare_node(
+    rel: &str,
+    content: &str,
+    config: &Config,
+    configured: &HashSet<&str>,
+) -> Option<PreparedNode> {
+    let doc = frontmatter::split(content)?;
+    let prose_start = doc.prose_start_line;
+    let mut node = frontmatter::to_node(rel, doc)?;
+    node.edges.retain(|e| match &e.origin {
+        crate::model::edge::RefOrigin::Inline => true,
+        crate::model::edge::RefOrigin::Frontmatter(_) => {
+            e.to.package().is_some() || configured.contains(e.to.node_type.as_str())
+        }
+    });
+    apply_scoping(&mut node, &config.scope_field);
+    Some(PreparedNode { node, prose_start })
+}
+
+/// Build an index of the corpus **as it stood at `rev`**, into `db_path`.
+///
+/// The release classifier's baseline (registry.v2.md §3.1): rather than keeping the last
+/// release's artifact around to read its index out of, the tree at that release's tag is
+/// re-indexed with today's code. `vaire pack` is byte-deterministic from a commit, so
+/// this reproduces what that release shipped without any artifact archaeology — and it
+/// keeps working for a package whose artifacts were never retained.
+///
+/// Three deliberate differences from a live build, all because the result is read once
+/// and deleted:
+///
+/// * **No embeddings.** Vectors cost money and API calls and answer no question a diff
+///   asks, so nothing here needs an embedding provider configured — which is what lets
+///   `release` run in a bare CI container.
+/// * **No FTS structure.** The diff reads `nodes`/`sections`/`edges` directly.
+/// * **No promotion and no derived dir.** `db_path` is a scratch file the caller owns;
+///   the package's own `.vaire/` is never touched, so a snapshot cannot disturb the live
+///   index's incremental eligibility.
+///
+/// `config` is the manifest to parse *with* — the caller passes the one committed at
+/// `rev`, since a package's own include globs and vocabulary at that release are what
+/// decided which files were nodes.
+pub fn snapshot(root: &Path, config: &Config, rev: &str, db_path: &Path) -> Result<()> {
+    let scanner = Scanner::from_config(config)?;
+    let files: Vec<String> = crate::git::list_files_at(root, rev)?
+        .into_iter()
+        .filter(|rel| scanner.is_match(Path::new(rel)))
+        .collect();
+    let contents = crate::git::show_many_at(root, rev, &files)?;
+    let configured: HashSet<&str> = config.types.iter().map(String::as_str).collect();
+
+    let prepared: Vec<PreparedNode> = files
+        .iter()
+        .zip(contents)
+        .filter_map(|(rel, content)| prepare_node(rel, &content?, config, &configured))
+        .collect();
+
+    remove_db_files(db_path)?;
+    let index = Index::create_for_bulk_load(db_path)?;
+    index.with_tx(|index| {
+        for prepared in &prepared {
+            index_node(
+                index,
+                &prepared.node,
+                &config.name,
+                prepared.prose_start,
+                None,
+            )?;
+        }
+        resolve_scoped_edges(index)?;
+        Ok(())
+    })?;
+    index.set_meta("package_name", &config.name)?;
+    Ok(())
+}
+
 /// Drop the index file (and its WAL sidecars) and recreate the schema. Also guarantees
 /// the derived dir carries its self-contained `.gitignore` (design.md §9) — an index can
 /// be created in a package that never ran `vaire init` (notably a linked dependency built
@@ -560,12 +631,16 @@ fn partition_changed(
 /// Insert one node and all its derived rows. `package` is the owning package (the manifest
 /// `name`) — every node this build produces belongs to it (M4); cross-package *targets*
 /// carry their own package on the edge.
+/// `vectors` is `None` for a build that carries no embeddings at all ([`snapshot`]) —
+/// sections are still stored (the diff and the FTS index are built over them), only the
+/// vector rows are skipped. Within an embedding build a *missing* vector stays a hard
+/// error: it would mean the prepare pass and this loop disagreed about the section set.
 fn index_node(
     index: &Index,
     node: &Node,
     package: &str,
     prose_start: u32,
-    vectors: &HashMap<cache::ContentHash, Vec<f32>>,
+    vectors: Option<&HashMap<cache::ContentHash, Vec<f32>>>,
 ) -> Result<()> {
     let id = node.id.to_string();
 
@@ -656,13 +731,6 @@ fn index_node(
     let hashes: Vec<[u8; 32]> = sections.iter().map(|s| cache::hash_text(&s.body)).collect();
 
     for (i, section) in sections.iter().enumerate() {
-        let vector = vectors.get(&hashes[i]).ok_or_else(|| {
-            crate::error::VaireError::Config(format!(
-                "no prepared embedding vector for section at {}:{}",
-                node.path, section.line
-            ))
-        })?;
-        cache_put(index, &hashes[i], vector)?;
         index.execute(
             "INSERT INTO sections(node_id, heading, line, body) VALUES(?1, ?2, ?3, ?4)",
             turso::params![
@@ -672,6 +740,16 @@ fn index_node(
                 section.body.as_str(),
             ],
         )?;
+        let Some(vectors) = vectors else {
+            continue;
+        };
+        let vector = vectors.get(&hashes[i]).ok_or_else(|| {
+            crate::error::VaireError::Config(format!(
+                "no prepared embedding vector for section at {}:{}",
+                node.path, section.line
+            ))
+        })?;
+        cache_put(index, &hashes[i], vector)?;
         index.execute(
             "INSERT INTO embeddings(node_id, section_line, content_hash, vector)
              VALUES(?1, ?2, ?3, ?4)",

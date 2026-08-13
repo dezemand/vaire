@@ -74,13 +74,15 @@ version = "1.0.0"
 | `version` | **yes** | semver | — | `MAJOR.MINOR.PATCH` |
 | `description` | no | string | *(none)* | one line |
 | `repository` | no | string (URL) | *(none)* | where this package is **authored** (its source repo); rides the manifest into artifacts and registry records so a consumer can choose pull-to-read or clone-to-author |
-| `include` | no | glob[] | `["knowledge/**/*.md", "projects/**/*.md"]` | corpus scope (what can be a node); files referenced from packed Markdown ship in artifacts as payload regardless — `exclude` still vetoes |
+| `include` | no | glob[] | `["knowledge/**/*.md", "projects/**/*.md", "releases/**/*.md"]` | corpus scope (what can be a node); files referenced from packed Markdown ship in artifacts as payload regardless — `exclude` still vetoes |
 | `exclude` | no | glob[] | `["**/node_modules/**", "**/drafts/**", "**/archive/**"]` | |
 | `types` | no | slug[] | *(empty)* | the entity types this package **defines** |
 | `vocabulary_strict` | no | bool | `false` | when set, `vaire check` warns on a type not in `types` |
 | `scoped_types_whitelist` | no | slug[] | `["*"]` | lint: types permitted to be scoped (`"*"` = any) |
 | `scoped_types_blacklist` | no | slug[] | *(empty)* | lint: types **not** permitted to be scoped (`"*"` = none) |
 | `scope_field` | no | string | `"scope"` | frontmatter field carrying the container id |
+| `release_type` | no | slug | `"release"` | the type `vaire release` gives release records; excluded from its own classifier |
+| `release_dir` | no | path | `"releases"` | where release records are written; must be selected by `include` |
 | `[dependencies]` | no | table `name → "^MAJOR"` | *(empty)* | see §5 |
 
 All keys except `name`/`version` are optional; their defaults make a single-package corpus
@@ -89,6 +91,17 @@ work from a two-line manifest.
 > **`types` default.** A manifest that omits `types` defines **none** — the field defaults to
 > empty, so declaring nothing means the package exports no vocabulary. (This differs from the
 > internal `Config::default()`, which carries a starter vocabulary for unconfigured use.)
+
+> **`version` is tool-managed output.** Once a package releases through `vaire release`
+> (cli.md §4.7), the version is written by the tool at release time rather than edited by
+> hand, and the release **tag** — not this field — is what the next release counts from.
+> Editing it by hand is not an error; it is simply overwritten by the next release.
+
+<!-- markdownlint MD028: separates two adjacent blockquotes -->
+
+> **`release_type`/`release_dir` are conventions, not reserved words.** A type name is
+> package vocabulary, so a knowledge base whose own subject matter means something by
+> "release" renames these rather than losing the word.
 
 ## 4. Validation
 

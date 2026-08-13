@@ -38,6 +38,7 @@ pub fn run(ctx: &Ctx) -> Result<StatusOutput> {
             },
             embed_provider: None,
             dependencies,
+            pending_release: None,
         });
     }
 
@@ -65,6 +66,8 @@ pub fn run(ctx: &Ctx) -> Result<StatusOutput> {
         None => 0,
     };
 
+    let pending_release = pending_release(ctx, &index, commits_behind_head);
+
     Ok(StatusOutput {
         repo: repo_path,
         index_path,
@@ -80,7 +83,80 @@ pub fn run(ctx: &Ctx) -> Result<StatusOutput> {
         },
         embed_provider,
         dependencies,
+        pending_release,
     })
+}
+
+/// What `vaire release` would do right now, so a release is never a surprise
+/// (registry.v2.md §3.1).
+///
+/// Wholly best-effort: `status` reports, it never fails, so every step that could go
+/// wrong — no git, no tags, an unreadable baseline — simply yields `None`. Two things
+/// keep it cheap enough to run unconditionally: the common "nothing new since the last
+/// release" case is answered by a commit count without building anything, and the
+/// baseline snapshot it does build carries no embeddings.
+///
+/// It stays silent while the index is behind HEAD. The classification would then describe
+/// neither what was released nor what is committed, and `status` is already saying, one
+/// line above, that the index needs rebuilding.
+fn pending_release(
+    ctx: &Ctx,
+    index: &Index,
+    commits_behind_head: u32,
+) -> Option<crate::output::PendingRelease> {
+    if commits_behind_head > 0 {
+        return None;
+    }
+    let root = ctx.repo.root();
+    let Some((tag, _)) = crate::release::latest_release(root, &ctx.config.name).ok()? else {
+        // Never released: the manifest's version is what a first release would publish.
+        return Some(crate::output::PendingRelease::from(
+            crate::release::classify::initial(),
+            None,
+        ));
+    };
+
+    // The cheap answer first — no commits since the release means no release to compute.
+    let oid = crate::git::resolve_rev(root, &tag).ok()??;
+    if crate::git::commits_ahead(root, &oid).ok()? == 0 {
+        return Some(crate::output::PendingRelease::from(
+            crate::release::classify::nothing(),
+            Some(tag),
+        ));
+    }
+
+    let baseline_manifest = crate::git::show_many_at(root, &tag, &["knowledge.toml".to_string()])
+        .ok()?
+        .pop()?;
+    let config = baseline_manifest
+        .and_then(|text| {
+            crate::config::Config::parse(&text, "knowledge.toml at the last release").ok()
+        })
+        .unwrap_or_else(|| ctx.config.clone());
+
+    let scratch = Repo::prepare_derived_dir(root)
+        .ok()?
+        .join(format!(".status-baseline-{}.db", std::process::id()));
+    let classification = crate::index::build::snapshot(root, &config, &tag, &scratch)
+        .ok()
+        .and_then(|()| Index::open(&scratch).ok())
+        .and_then(|before| {
+            // Each side is excluded by the release type *its own* manifest declared, so a
+            // renamed type does not present the old records as removals.
+            crate::release::classify::diff(
+                &before,
+                &config.release_type,
+                index,
+                &ctx.config.release_type,
+            )
+            .ok()
+        });
+    let _ = crate::index::build::remove_db_files(&scratch);
+
+    Some(crate::output::PendingRelease::from(
+        classification?,
+        Some(tag),
+    ))
 }
 
 /// One row per declared dependency (transitive closure), fully tolerant — status never

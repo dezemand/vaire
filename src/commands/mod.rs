@@ -16,6 +16,7 @@ pub mod init;
 #[cfg(feature = "pack")]
 pub mod pack;
 pub mod refs;
+pub mod release;
 pub mod render;
 pub mod resolve;
 pub mod search;
