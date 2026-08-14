@@ -53,6 +53,42 @@ uses [Semantic Versioning](https://semver.org).
   registration and the catalog do not.
 
 ### Added
+- **Remote registries** (cli.md §4.9–§4.11, registry.v2.md §8–§9) — `vaire registry add |
+  list | show | rm`, `vaire push`, `vaire yank`, and the `Registry` seam behind them. The
+  first implementation needs **no server**: a registry is a handful of JSON documents and
+  some tarballs under one base URL, so a bucket, a web root, or a plain directory over
+  `file://` are all first-class. `vaire registry add lab ./registry` is the entire setup.
+
+  **The two guarantees a registry has to make are properties of a write, not of a policy
+  check.** A create-only `PUT` makes a published `(name, version)` immutable because storage
+  itself refuses the second one; a compare-and-swap on the index document turns two
+  simultaneous publishers into a retry instead of a lost release. Over `file://` the first is
+  exact (`O_CREAT|O_EXCL`) and the second is compare-then-rename with a documented window —
+  a lock file would need stale-lock detection, and that heuristic breaks locks it should not.
+  Server *behaviors* beyond those are capabilities the registry declares, never assumptions,
+  so a static host says `search: none` and the client degrades rather than failing.
+
+  **`push` publishes tags, not the working tree.** It enumerates this package's release tags
+  and rebuilds each artifact from that tag's own tree, which makes `.vaire/dist/` a cache and
+  never a requirement — a container that cloned the repository thirty seconds ago can
+  publish. That works because `pack` is deterministic: the artifact rebuilt from `v1.4.2` is
+  byte-for-byte the one that tag produced, so the checksum a lockfile will pin belongs to the
+  release rather than to whoever uploaded it. It needs no embedder and re-runs no `check`
+  (the tag was already gated when it was cut), so CI publishes with no embedding
+  configuration at all. Re-running it is a clean no-op, and one bad tag is reported and
+  stepped over rather than stopping the rest.
+
+  **`yank` is an index edit and nothing else.** The artifact never moves, so a lockfile
+  pinning that version keeps resolving; what changes is only what a *new* resolution would
+  choose. `--undo` exists because the reason for a yank is usually a mistake about a release
+  rather than a fact about it.
+
+  Access (`--access open | restricted | unlisted`) is per (package, registry) and sticky.
+  On a static host it is **advisory** and says so at the moment it is set: restricted-listed
+  is a routing workflow — its `hint` is carried verbatim into the refusal — not a wall.
+- **`vaire release --push`** stops being reserved: it runs the upload once the tag exists.
+  A convenience over the release/push split, not a merge of it — the tag is already cut, so
+  a failed upload is one `vaire push` away.
 - **The catalog** (cli.md §4.8) — machine-local state recording what packages this machine
   knows and where they live, in the new **vaire home** (`~/.vaire/catalog.db`,
   `VAIRE_HOME` overrides). `vaire catalog list | add [path] | scan <dir> | rm <path|name>

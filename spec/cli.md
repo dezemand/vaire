@@ -814,10 +814,12 @@ except to declare a major dependency, or to deliberately cut a major.
   every consumer. Warnings are reported, never fatal.
 - **Nothing to release is a clean no-op, exit `0`.** An automated pipeline runs this on
   every merge and most merges warrant no version.
-- **It never runs `git push`, and never uploads.** Git transport stays yours; publishing
-  to a registry is `vaire push` (not yet implemented) — so a flaky upload re-runs an
-  upload rather than a ritual, and CI can publish a tag it did not cut. `--push` and
-  `--onto` are reserved grammar, rejected as not yet implemented.
+- **It never runs `git push`, and uploads only when asked.** Git transport stays yours;
+  publishing to a registry is `vaire push` (§4.10) — so a flaky upload re-runs an upload
+  rather than a ritual, and CI can publish a tag it did not cut. `--push` runs that upload
+  once the tag exists, which is a convenience over the split and not a merge of it: the tag
+  is already cut, so a failed upload is one `vaire push` away. `--onto` (back-patching an
+  older major line) stays reserved grammar, rejected as not yet implemented.
 
 `vaire status` reports the same classification ambiently (`release: would be minor — 3
 new, 12 changed`), so a release is never a surprise.
@@ -918,6 +920,94 @@ JSON (`list`):
 
 `origin` is `registered` (you said so), `scanned` (a bulk import), or `ambient` (a command
 touched it).
+
+### 4.9 `vaire registry`
+
+```text
+vaire registry list
+vaire registry add <name> <url> [--priority <n>] [--no-search]
+vaire registry show <name>
+vaire registry rm <name>
+```
+
+The remotes this machine publishes to and pulls from (registry.v2.md §8). The third of the
+three "add"s, and the last one the grammar had to keep apart.
+
+- **A registry is a decision, never an observation.** Nothing ambient writes these rows: a
+  package can be stumbled across — it is a directory that happens to carry a manifest — but
+  a registry is present because someone named it, and it leaves when it is removed. There is
+  no state machine and no self-healing here, and none is wanted.
+- **The location may be a URL or a directory.** `vaire registry add lab ./registry` is the
+  whole setup for a static registry; a bare path is stored as an absolute `file://` URL, so
+  the row never means something different depending on where it was typed.
+- **Reachability is probed, not required.** `add` reports what answered and records the row
+  either way. Configuring a remote you cannot reach right now — a VPN is down, the bucket
+  is not created yet — is ordinary, and a tool that insists the network exist before it will
+  remember a URL is a tool people work around.
+- **`--priority` is fan-out order and the tiebreaker** for commands that need exactly one
+  registry and were not told which. Higher first.
+- **`show` is also the diagnostic.** It is the one command that reads the wire without
+  writing to it, so a descriptor that will not parse, a schema this vaire is too old for,
+  and a URL that answers nothing all surface here rather than at the moment someone pushes.
+  It distinguishes *cannot enumerate* from *serves nothing* — they look identical in a count
+  and mean opposite things.
+- **Removing a registry cascades nothing.** Releases already pulled from it stay in the
+  store: "stop asking here" is not "unlearn what it told me".
+
+An `https://` registry is readable today and not publishable — writing to object storage
+needs that provider's own credentials, which arrive with the S3 step. `show` says so rather
+than letting a push fail somewhere less obvious.
+
+### 4.10 `vaire push`
+
+```text
+vaire push [<version>] [--registry <name>] [--access <state>] [--access-hint <text>] [--dry-run]
+```
+
+Uploads released versions (registry.v2.md §3.4). **Split from `release` deliberately**:
+cutting a version is a git act, uploading is idempotent plumbing. A failed upload must not
+re-run a ritual, and CI must be able to publish a tag it did not cut.
+
+- **Tags are the source, not `.vaire/dist/`.** `push` enumerates this package's release tags
+  and rebuilds each artifact from the tag's own tree, so it works in a container that cloned
+  the repository thirty seconds ago. That is sound only because `pack` is deterministic: the
+  artifact rebuilt from `v1.4.2` is byte-for-byte the one that tag produced, so the checksum
+  a lockfile pins belongs to the release rather than to whoever uploaded it.
+- **No embedder, and no `check` re-run.** The tag's index is built by the same embedder-free
+  snapshot the release classifier uses, and stripped artifacts are the publish default — so
+  CI needs no embedding configuration. `release` already ran `check` before it created the
+  tag; re-running it would judge an old tree by today's rules for a tag nobody can edit in
+  response.
+- **Idempotent.** Versions the registry already lists are skipped, and re-running is a
+  clean no-op. A version whose upload storage refuses was published by someone else between
+  the question and the write — reported, never overwritten.
+- **One version's failure is stepped over.** A tag from two years ago with a broken relative
+  link is reported and the push carries on; that tag alone stays unpublished, and the exit
+  code is `1` so a pipeline can branch on it.
+- **`--access`** sets `open` | `restricted` | `unlisted` for the (package, registry) pair,
+  and is **sticky** — omitting it keeps what the registry already records. On a registry
+  whose enforcement is `advisory` (every static host), `--access restricted` warns that it
+  records intent and routes people to you, but that anything the host serves, its readers
+  can fetch. `--access-hint` carries where to ask, verbatim, into that refusal.
+
+Which registry: the only one configured, else the one with strictly the highest priority,
+else `--registry`. It refuses to guess, because publishing to the wrong registry cannot be
+taken back — the artifact is immutable, and the only remedy is a yank that stays visible.
+
+### 4.11 `vaire yank`
+
+```text
+vaire yank <name>@<version> [--registry <name>] [--undo]
+```
+
+Marks a published release as one nobody should newly adopt. **An edit to the index
+document, and nothing else**: the artifact stays exactly where it was, so a lockfile
+pinning that version keeps resolving and a build that already depends on it keeps building.
+What changes is only what a *new* resolution will choose. `--undo` clears it, because the
+reason for a yank is usually a mistake about a release rather than a fact about it.
+
+Corpus-independent: after a bad publish, the package being withdrawn is often not the
+directory you are standing in.
 
 ## 5. MCP server
 
