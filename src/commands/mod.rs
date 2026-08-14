@@ -37,6 +37,10 @@ use crate::error::Result;
 pub struct Ctx {
     pub repo: Repo,
     pub config: Config,
+    /// The vaire home holding the catalog. Resolved once per invocation rather than read
+    /// from the environment at each use, so a test (or a future `--home`) can point one
+    /// run at its own catalog without touching process-global state.
+    home: PathBuf,
     /// The linked-package view (cli.md §6.5), built lazily on first cross-package need —
     /// a standalone package never constructs it.
     workspace: std::cell::OnceCell<crate::workspace::Workspace>,
@@ -55,9 +59,23 @@ impl Ctx {
         Ok(Ctx {
             repo,
             config,
+            home: crate::userconfig::vaire_home(),
             workspace: std::cell::OnceCell::new(),
             embedder: std::cell::OnceCell::new(),
         })
+    }
+
+    /// Point this invocation at a different vaire home. The seam in-process tests use to
+    /// get their own catalog: the alternative — one process-global environment variable —
+    /// would have every test in a binary sharing (and serializing on) one catalog file.
+    pub fn with_home(mut self, home: PathBuf) -> Ctx {
+        self.home = home;
+        self
+    }
+
+    /// The vaire home this invocation reads and writes the catalog in.
+    pub fn home(&self) -> &std::path::Path {
+        &self.home
     }
 
     /// The linked-package view rooted at this package (memoized).

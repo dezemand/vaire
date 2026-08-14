@@ -13,6 +13,7 @@ use std::rc::Rc;
 
 use crate::commands::Ctx;
 use crate::error::Result;
+use crate::model::Version;
 use crate::output::{DepNode, DepsOutput};
 use crate::workspace::{PackageHandle, Workspace};
 
@@ -58,9 +59,14 @@ fn children(
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| handle.root.display().to_string())
                 };
-                let satisfied = constraint
-                    .strip_prefix('^')
-                    .map(|major| handle.config.version.split('.').next() == Some(major));
+                // Parsed, not string-compared: `^1` against a declared `1.10.0` is a
+                // numeric question, and the textual form got `^1` vs `01` subtly wrong.
+                let satisfied = handle
+                    .config
+                    .version
+                    .parse::<Version>()
+                    .ok()
+                    .map(|version| version.satisfies_caret(constraint));
                 let cycle = !visited.insert(handle.root.clone());
                 let dependencies = if cycle {
                     Vec::new()

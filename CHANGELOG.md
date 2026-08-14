@@ -5,6 +5,53 @@ uses [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Changed
+- **Dependency resolution goes through the catalog, and the `^MAJOR` constraint now
+  *selects*** (cli.md §6.6). A declared dependency with no `.vaire/packages/<name>` entry
+  is satisfied by asking the catalog for a package declaring that name **in the
+  constrained major line** — where v0.2.0 walked a configured root and matched on the name
+  alone. Two clones of one package at 1.4 and 2.0 therefore stop being an ambiguity: a
+  consumer declaring `^1` has already said which it wants, and the `^2` consumer beside it
+  gets the other. Versions compare as parsed triples (`1.10.0` above `1.9.0`, and `^0` is
+  a major line like any other) — the string-prefix comparisons in `deps` and `check` are
+  gone with it.
+
+  **The catalog is an index, never truth**, so a candidate's `knowledge.toml` is re-read
+  before anything is linked and what it says is written back: a version bumped by a release
+  is adopted on the spot, a renamed package stops matching its old name (its row follows it
+  rather than being deleted), and a path that no longer answers is marked `missing`.
+  Nothing needs a rescan to heal.
+
+  **What survives the constraint is refused, not tiebroken.** Two live paths that both
+  satisfy are a fork beside its original, or two worktrees — and a fork routinely outruns
+  what it forked from, so picking the higher version would be a guess dressed as
+  arithmetic. Both paths are named. One tier applies first: a path explicitly
+  `vaire catalog add`-ed outranks one a scan or a passing command noticed, which settles an
+  ambiguity without editing any consumer's links.
+
+  **Constraints across a closure are intersected.** One directory is linked per name, so
+  when several members constrain one dependency they must agree on the major. Disjoint
+  majors are reported naming both declarers — and any link the pass had already made for
+  that name is withdrawn, since leaving an answer wired up that one declarer cannot use
+  would be worse than the version-blind lint this replaces. Conflicts are judged after the
+  links settle, over the whole closure: judged mid-walk, one would be invisible whenever
+  the first constraint seen happened to resolve, making the outcome depend on link order.
+  An explicit `--link` is the escape hatch and is never withdrawn.
+
+  Everything downstream is untouched: `.vaire/packages/<name>` still points at a directory,
+  the resolver and every read command neither know nor care who put it there, and reads
+  still never materialize a link (nor take the catalog's lock).
+
+### Removed
+- **`local-packages` is retired** — the `vaire configure local-packages` command, the
+  setting, and the discovery walk on the resolution path (cli.md §6.7). The walk survives
+  only inside `vaire catalog scan`, demoted from resolution machinery to an import tool.
+  The first maintain command after upgrading **migrates itself**: whatever the old root
+  held is imported into the catalog once, the `[packages] local` key is dropped, and the
+  run says so. Dependencies keep resolving across the upgrade, and nothing walks anything
+  again. The walk conflated "on my disk somewhere" with "I author this"; ambient
+  registration and the catalog do not.
+
 ### Added
 - **The catalog** (cli.md §4.8) — machine-local state recording what packages this machine
   knows and where they live, in the new **vaire home** (`~/.vaire/catalog.db`,
@@ -29,8 +76,8 @@ uses [Semantic Versioning](https://semver.org).
   forgets, and an ambient touch never demotes a hand-registered row. A catalog that cannot
   be written warns and is otherwise ignored.
 
-  The catalog does **not** drive dependency resolution yet — that arrives with the resolver
-  change, and `local-packages` discovery is unchanged for now.
+  Dependency resolution consults it (see *Changed*), and it is the enumerable scope the
+  rootless reader will fan out over.
 - **`vaire catalog scan <dir>`** — bulk import, and the one place the old discovery walk
   now lives (same depth and skip rules), demoted from resolution machinery to a one-shot
   import tool.

@@ -186,6 +186,52 @@ pub fn register_path(home: &Path, root: &Path, no_register: bool) -> Vec<String>
     }
 }
 
+/// One-shot migration of the retired `local-packages` root into the catalog
+/// (registry.v2.md §14).
+///
+/// v0.2.0 kept a configured root and re-walked it on every maintain command. The catalog
+/// replaces both halves — ambient registration for what you author, the store for what you
+/// consume — so the setting is removed rather than reinterpreted. On the first maintain
+/// command after upgrading, whatever that root held is imported once and the key is
+/// dropped: the packages stay resolvable, and nothing walks anything again.
+///
+/// Returns a line to print when it ran. Never fatal, for the same reason ambient
+/// registration is not: a failed convenience must not stop `vaire index`.
+pub fn migrate_local_packages(config_home: &Path, home: &Path) -> Option<String> {
+    let mut user = crate::userconfig::UserConfig::load_from(config_home).ok()?;
+    let root = user.packages.local.take()?;
+
+    // Drop the key **first**. If the import fails — an unreadable root, a locked catalog —
+    // retrying it on every later command would reintroduce exactly the per-command walk
+    // this migration exists to retire. The message says what to re-run by hand.
+    let dropped = user.save_to(config_home);
+    let imported = match dropped {
+        Ok(_) => scan_dir(home, &root),
+        Err(e) => {
+            return Some(format!(
+                "local-packages is retired, but {} could not be rewritten ({e}) — \
+                 remove the `[packages] local` key and run `vaire catalog scan {}`",
+                config_home.join("config.toml").display(),
+                root.display()
+            ));
+        }
+    };
+    Some(match imported {
+        Ok(out) => format!(
+            "local-packages is retired: imported {} package(s) from {} into the catalog \
+             (`vaire catalog list` shows them)",
+            out.recorded.len(),
+            root.display()
+        ),
+        Err(e) => format!(
+            "local-packages is retired, and importing {} failed ({e}) — \
+             run `vaire catalog scan {}` when you can",
+            root.display(),
+            root.display()
+        ),
+    })
+}
+
 fn try_register_ambient(home: &Path, ctx: &Ctx) -> Result<()> {
     let catalog = Catalog::open(home)?;
     catalog.record(

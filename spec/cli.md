@@ -446,8 +446,7 @@ vaire index [--full] [--working-tree] [--re-embed] [--no-deps]
   records whether it is a `committed` or `working-tree` snapshot; incremental requires a
   prior committed one.)
 - **Linked dependencies** (§6.5): a declared dependency that is not linked yet is first
-  satisfied from the local-packages root when one is configured (§6.6) — reported as a
-  `linked → <path>` line. Then each package in the linked closure gets its own index
+  satisfied from the catalog (§6.6) — reported as a `linked → <path>` line. Then each package in the linked closure gets its own index
   built/refreshed — with *its* manifest, repo, and
   commit anchor, written into *its* `.vaire/` (the federated model, design.md §9;
   incremental per dependency; a dependency embedded by a different provider is fully
@@ -552,17 +551,17 @@ constraint in place — idempotent. A malformed name or constraint is a usage er
 caught before the manifest is touched. Needs the package root but not the index.
 
 Declaring is the whole job; **wiring is a convenience on top** and never fails the
-command. Without `--link`, the dependency is satisfied from the local-packages root if it
-can be found there (§6.6) — the JSON then carries `"discovered": true`. If it cannot (no
-root configured, nothing declaring that name, or an ambiguous name), the dependency is
-declared but unlinked — a first-class state, reported as a `note` — and `vaire index` will
+command. Without `--link`, the dependency is satisfied from the catalog if
+something there settles it (§6.6) — the JSON then carries `"discovered": true`. If it
+cannot (nothing declaring that name, nothing in the constrained major line, or two
+candidates that both satisfy), the dependency is declared but unlinked — a first-class state, reported as a `note` — and `vaire index` will
 try again.
 
 `--link <path>` instead wires it explicitly, creating (or replacing) the
 **`.vaire/packages/<name>`** symlink pointing at `<path>` (§6.5). The target must be a
 package whose `knowledge.toml` declares that same `name` (usage error otherwise — identity
 is declared, never path-derived; a bad `--link` leaves the manifest untouched). An explicit
-link always wins over discovery. The manifest never carries the path either way: the
+link always wins over the catalog. The manifest never carries the path either way: the
 committed contract stays machine-independent, the link is per-checkout state under
 gitignored `.vaire/`.
 
@@ -1100,18 +1099,13 @@ vaire configure                       # interactive: pick a section, then guided
 vaire configure embeddings [--provider local|command|openai] [--model <m>]
                            [--dimensions <n>] [--command <cmd>]
                            [--api-key-stdin] [--api-url <url>]
-vaire configure local-packages [<path>] [--unset]
 ```
 
-- Bare `vaire configure` opens an interactive prompt (sections: **Embeddings**, **Local
-  packages**). Cancelling (Esc / Ctrl-C) exits cleanly and writes nothing.
+- Bare `vaire configure` opens an interactive prompt. Cancelling (Esc / Ctrl-C) exits
+  cleanly and writes nothing. Embeddings are the only section: where packages live stopped
+  being a setting when the catalog replaced it (§6.7).
 - `vaire configure embeddings` sets the same settings non-interactively.
-- `vaire configure local-packages <path>` records where your local packages live (§6.6);
-  with no argument it reports the current setting, `--unset` clears it. The path is stored
-  canonical, and must exist (a typo is rejected here rather than surfacing later as a
-  dependency that cannot be found).
-- Non-secret settings (embedding provider, model, dimensions, command, local-packages
-  root) → `config.toml`.
+- Non-secret settings (embedding provider, model, dimensions, command) → `config.toml`.
 - Credentials (`--api-key-stdin`, `--api-url`) → `credentials.toml` (§6.3).
 - Only the flags you pass are changed; the rest are preserved.
 
@@ -1120,9 +1114,6 @@ vaire configure local-packages [<path>] [--unset]
 [embeddings]
 provider = "local"
 dimensions = 384
-
-[packages]
-local = "/Users/you/Documents/Knowledge"
 ```
 
 The **config home** is `VAIRE_CONFIG_HOME` if set, else the platform config directory for
@@ -1163,46 +1154,66 @@ through the link; reads never build.
 ### 6.6 Local packages — satisfying a declared dependency
 
 A manifest declares *what* a package depends on. **Where** that dependency lives is a
-property of this machine — one clone here, another there — so it is a user setting, never
-a manifest key. Point Vairë at the directory your packages live in:
-
-```bash
-vaire configure local-packages ~/Documents/Knowledge     # §6.4
-```
-
-With that set, a declared dependency with no `.vaire/packages/<name>` entry is satisfied
-automatically: the root is searched for a package **declaring** that name, and the link
-(§6.5) is materialized. A fresh clone needs no wiring step —
+property of this machine — one clone here, another there — so it is never a manifest key.
+The **catalog** (§4.8) is what knows: a declared dependency with no
+`.vaire/packages/<name>` entry is satisfied from it, and the link (§6.5) is materialized.
+A fresh clone needs no wiring step —
 
 ```bash
 git clone git@github.com:acme/acme-web && cd acme-web
-vaire index          # links every declared dependency it can find, then builds
+vaire index          # links every declared dependency the catalog can settle, then builds
 ```
+
+Registration is ambient, so the catalog usually already knows: running `vaire index` in a
+package records it. `vaire catalog add <path>` and `vaire catalog scan <dir>` cover what
+ambience cannot reach.
 
 The rules:
 
-- **Matching is by declared name, at any depth.** Directory names are irrelevant, so a
-  knowledge base that is one component of a larger repo
-  (`~/Documents/Knowledge/platform-docs/docs/kb` declaring `acme-handbook`) is found like
-  any other package. The walk skips dotted directories and the usual build/vendor trees,
-  does not descend into a directory that is already a package, and is depth-capped.
-- **Ambiguity is reported, never guessed.** If two packages under the root declare one
-  name (a fork beside its original), the dependency stays unsatisfied and both paths are
-  named — link the one you want explicitly.
+- **Matching is by declared name.** Directory names are irrelevant — a knowledge base that
+  is one component of a larger repository is found like any other package.
+- **The constraint selects.** `^MAJOR` is no longer a lint reported after the fact: a
+  candidate satisfies it or is not a candidate. Two clones of one package at 1.4 and 2.0
+  are no longer an ambiguity — a consumer declaring `^1` has said which it wants. Versions
+  are compared as parsed triples, so `1.10.0` outranks `1.9.0`, and `^0` is a major line
+  like any other.
+- **The catalog is an index, never truth.** A candidate's `knowledge.toml` is re-read
+  before anything is linked, and what it says is written back: a version bumped by a
+  release is adopted, a renamed package stops matching its old name, a path that no longer
+  answers is marked `missing`. Nothing needs a rescan to heal.
+- **Ambiguity is reported, never guessed.** Two live paths that *both* satisfy the
+  constraint — a fork beside its original, two worktrees — leave the dependency
+  unsatisfied with both paths named. A version tiebreak would be a guess dressed as
+  arithmetic, since a fork routinely outruns what it forked from. One tier applies first:
+  a path explicitly `vaire catalog add`-ed outranks one a scan or a passing command
+  noticed, which is how an ambiguity is settled without editing any consumer's links.
+- **Constraints across the closure must agree.** When several members constrain one
+  dependency, the demands are intersected. Same major → fine. **Disjoint majors are a
+  conflict**: one directory is linked per name, so the pass reports it naming both
+  declarers and withdraws any link it had already made for that name. An explicit
+  `--link` is the escape hatch and is never withdrawn.
 - **Only gaps are filled.** An existing, resolvable entry is never rewritten, so an
-  explicit `--link` always wins. A *broken* entry is re-discovered, healing a package that
-  moved or was renamed.
+  explicit `--link` always wins. A *broken* entry is re-selected, healing a package that
+  moved.
 - **Links land in the run-root's `.vaire/packages/`**, never inside a dependency's
   directory — a transitive dependency is resolved from there by the run-root fallback
   (§6.5).
-- **Only commands that already write links discover**: `vaire add`, and the ensure pass of
-  `vaire index` / `vaire check`. A read command can never materialize a link.
-- Nothing here is fatal. An unsatisfiable name keeps its ordinary "not linked" reporting,
-  with a note saying what the root held. Unset (the default), no discovery happens at all.
+- **Only commands that already write links consult the catalog**: `vaire add`, and the
+  ensure pass of `vaire index` / `vaire check`. A read command can never materialize a
+  link, and never takes the catalog's lock.
+- Nothing here is fatal. An unsatisfiable name keeps its ordinary "not linked" reporting
+  with a note explaining what the catalog had; a catalog that cannot be opened at all
+  degrades to one warning and no links.
 
-This is also the v0.3 seam: `vaire install` will populate the same entries from a fetched
-cache, and the same by-declared-name search is what locates a package inside a repository
-fetched from a registry or git remote.
+### 6.7 Migrating from `local-packages`
+
+v0.2.x kept a configured root (`vaire configure local-packages`) and re-walked it on every
+maintain command. Both are gone: the option, the setting, and the walk on the resolution
+path. The walk itself survives only inside `vaire catalog scan`.
+
+The first maintain command after upgrading migrates automatically — whatever the old root
+held is imported into the catalog once, the `[packages] local` key is dropped, and the run
+says so. Dependencies keep resolving across the upgrade; nothing walks anything again.
 
 ## 7. Exit codes
 

@@ -23,8 +23,8 @@ use crate::config::{is_caret_major, is_slug};
 use crate::corpus::repo::Repo;
 use crate::error::{Result, VaireError};
 use crate::output::AddOutput;
-use crate::workspace::discover;
 use crate::workspace::link::{self, LinkError, LinkPlan};
+use crate::workspace::satisfy;
 
 /// Add (or update) a dependency. `spec` is `<name>` or `<name>@<constraint>` (e.g.
 /// `acme-core`, `acme-core@^2`); `link` is the `--link <path>` target, resolved against
@@ -77,32 +77,30 @@ pub fn run(
 
     let mut linked = link_plan.map(link::commit).transpose()?;
 
-    // No explicit `--link`: satisfy the dependency from the local-packages root, exactly
-    // as the ensure pass would. Declaring is what this command does; wiring is a
-    // convenience on top, so nothing here can fail the run — a name that cannot be found
-    // (or is ambiguous) comes back as a note.
+    // No explicit `--link`: satisfy the dependency from the catalog, exactly as the ensure
+    // pass would. Declaring is what this command does; wiring is a convenience on top, so
+    // nothing past the manifest write may fail the run — a name the catalog does not know
+    // (or cannot settle) comes back as a note.
     let mut discovered = false;
     let mut note = None;
     if linked.is_none() {
-        // The manifest is already written, so nothing past this point may fail the run —
-        // including an unreadable user config, which becomes a note like any other reason
-        // the dependency could not be wired.
-        match crate::userconfig::UserConfig::load() {
-            Ok(user) => {
-                let satisfied =
-                    discover::satisfy_name(&root, &name, user.packages.local.as_deref());
-                if let Some(dep) = satisfied.linked.first() {
-                    linked = Some(dep.target.clone());
-                    discovered = true;
-                } else {
-                    note = satisfied
-                        .notes
-                        .get(&name)
-                        .cloned()
-                        .or_else(|| satisfied.warnings.first().cloned());
-                }
-            }
-            Err(e) => note = Some(format!("could not read the user config: {e}")),
+        let home = crate::userconfig::vaire_home();
+        if let Some(migrated) = crate::commands::catalog::migrate_local_packages(
+            &crate::userconfig::config_home(),
+            &home,
+        ) {
+            eprintln!("note: {migrated}");
+        }
+        let satisfied = satisfy::satisfy_name(&root, &name, &constraint, &home);
+        if let Some(dep) = satisfied.linked.first() {
+            linked = Some(dep.target.clone());
+            discovered = true;
+        } else {
+            note = satisfied
+                .notes
+                .get(&name)
+                .cloned()
+                .or_else(|| satisfied.warnings.first().cloned());
         }
     }
 

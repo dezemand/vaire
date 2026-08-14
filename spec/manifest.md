@@ -135,7 +135,13 @@ package's own `.vaire/packages/<name>`, the run-root itself, or the run-root's l
 | **missing dependency** | error | a declared dependency that is unavailable (not linked / broken link / name mismatch); once per name, with the fix |
 | undeclared type | warning | a value matching the reference grammar whose `type` is not in `types` (quote it, or declare the type) |
 | unused dependency | warning | declared in `[dependencies]` but never referenced |
-| version mismatch | warning | a linked dependency whose MAJOR falls outside the `^N` constraint — surfaced only; *enforcement* is v0.3 |
+| version mismatch | warning | an **explicitly linked** dependency whose version falls outside the `^N` constraint. Still a warning, because an explicit link is a deliberate override; a dependency the catalog resolved cannot land here, since the constraint is what selected it (cli.md §6.6) |
+
+Since v0.3 the constraint is a **selector**, not only a lint: the catalog picks the package
+whose declared version satisfies `^N`, comparing parsed `MAJOR.MINOR.PATCH` triples rather
+than text. Where several members of one closure constrain the same dependency, their
+demands are intersected — one major line resolves, disjoint majors are a reported conflict,
+because a closure links one directory per package name.
 
 `vaire deps` (cli.md §3.8) prints the resolved tree these constraints declare.
 
