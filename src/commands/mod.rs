@@ -32,6 +32,22 @@ use crate::config::Config;
 use crate::corpus::repo::Repo;
 use crate::error::Result;
 
+/// Reject a bare id in a rootless session.
+///
+/// A bare `type:id` means "in this package", and outside one there is no this package —
+/// so the address is not merely unfound but unaskable. Said plainly rather than answered
+/// with "no node with id", which would suggest the node is missing.
+pub(crate) fn require_qualified(ctx: &Ctx, id: &crate::model::id::NodeId) -> Result<()> {
+    if ctx.is_rootless() && id.package().is_none() {
+        return Err(crate::error::VaireError::Usage(format!(
+            "'{id}' is a bare id and there is no package to read it against — qualify it as \
+             `@<package>/{id}`, or run this inside a package (`vaire catalog list` shows \
+             what this machine knows)"
+        )));
+    }
+    Ok(())
+}
+
 /// Resolved per-invocation context shared by every command: the located repo and the
 /// loaded config. Built once from the global flags before dispatch.
 pub struct Ctx {
@@ -63,6 +79,37 @@ impl Ctx {
             workspace: std::cell::OnceCell::new(),
             embedder: std::cell::OnceCell::new(),
         })
+    }
+
+    /// A **rootless** context: no package to stand in, scope taken from the catalog
+    /// (registry.v2.md §9). Built when a read command runs outside any package, and by
+    /// `--all` from inside one.
+    ///
+    /// The catalog is read once here and the handle dropped immediately — Turso locks a
+    /// database exclusively on open, so holding it for the life of a session (an `mcp`
+    /// server runs for hours) would lock every other vaire process on the machine out of
+    /// it. What the session keeps is the answer, not the connection.
+    ///
+    /// `repo` is a placeholder rooted at the vaire home: read commands never touch it, and
+    /// the maintain commands that do are never rootless.
+    pub fn rootless(home: PathBuf) -> Result<Ctx> {
+        let packages = crate::catalog::Catalog::open(&home)?.live_packages()?;
+        let workspace = std::cell::OnceCell::new();
+        let _ = workspace.set(crate::workspace::Workspace::rootless(packages));
+        Ok(Ctx {
+            repo: Repo::at(home.clone()),
+            config: Config::default(),
+            home,
+            workspace,
+            embedder: std::cell::OnceCell::new(),
+        })
+    }
+
+    /// Whether this context has no package to stand in.
+    pub fn is_rootless(&self) -> bool {
+        self.workspace
+            .get()
+            .is_some_and(crate::workspace::Workspace::is_rootless)
     }
 
     /// Point this invocation at a different vaire home. The seam in-process tests use to

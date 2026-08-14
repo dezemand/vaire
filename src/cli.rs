@@ -88,8 +88,12 @@ pub enum Command {
         #[arg(long, default_value_t = 10)]
         limit: usize,
         /// Search only this package (skip linked dependencies).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         local: bool,
+        /// Search every package in the catalog, not just this one's dependencies.
+        /// Implied when run outside a package.
+        #[arg(long)]
+        all: bool,
     },
 
     /// Suggest existing node IDs a descriptor might refer to (lookup-before-reference).
@@ -101,8 +105,12 @@ pub enum Command {
         #[arg(long, default_value_t = 5)]
         limit: usize,
         /// Suggest only from this package (skip linked dependencies).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         local: bool,
+        /// Suggest from every package in the catalog, not just this one's dependencies.
+        /// Implied when run outside a package.
+        #[arg(long)]
+        all: bool,
     },
 
     /// Print the resolved local dependency tree (live link inspection; no index needed).
@@ -253,6 +261,29 @@ pub enum Command {
 }
 
 impl Command {
+    /// Whether this is a read command — the class that can run without a package to
+    /// stand in, against the catalog (cli.md §6.8).
+    pub fn is_read(&self) -> bool {
+        matches!(
+            self,
+            Command::Resolve { .. }
+                | Command::Render { .. }
+                | Command::Backlinks { .. }
+                | Command::Refs { .. }
+                | Command::Search { .. }
+                | Command::Suggest { .. }
+        )
+    }
+
+    /// Whether the command asked for the whole catalog rather than this package's
+    /// closure (`--all`).
+    pub fn wants_all(&self) -> bool {
+        matches!(
+            self,
+            Command::Search { all: true, .. } | Command::Suggest { all: true, .. }
+        )
+    }
+
     /// Whether `--json` is meaningful for this command (read commands + index/check/
     /// status emit JSON; `mcp` does not).
     pub fn supports_json(&self) -> bool {

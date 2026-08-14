@@ -5,6 +5,45 @@ uses [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+- **Reading without a package to stand in** (cli.md §6.8). Every read command has assumed
+  an author: scope is the package you are in, plus what its manifest declares. That serves
+  the person writing a package and offers nothing to the larger audience who authors
+  nothing and just wants to ask questions across everything they have. Run a read command
+  where there is no `knowledge.toml` above you and the scope becomes the **catalog** —
+  every live package this machine knows:
+
+  ```bash
+  cd ~
+  vaire search "incident review"            # every catalogued package
+  vaire resolve @acme-core/team:platform    # by name, declared by nobody
+  vaire mcp                                 # the same scope, served to an agent
+  ```
+
+  `vaire mcp` outside a package is the point of the whole thing: an agent gets pointed at
+  the machine rather than at one checkout, with no manifest and no install. From *inside* a
+  package, `search --all` / `suggest --all` reach past the closure the same way — useful
+  when the answer lives somewhere you never declared a dependency on.
+
+  Everything is package-qualified, because with no package you are standing in, nothing is
+  local. A **bare id is refused rather than reported missing**: `type:id` means "in this
+  package", and there is no this package, so the error says that and shows the qualified
+  form instead of implying the node does not exist.
+
+  **A package's own references still mean what its author meant.** Following a reference
+  out of a catalogued package uses *that* package's `[dependencies]` and its own links
+  first; the catalog is consulted only where an ordinary session would have run out of
+  places to look. And the fallback runs one way only: **author mode never reaches the
+  catalog.** A declared-but-unlinked dependency, or a reference to an undeclared package,
+  fails exactly as before even when the catalog could answer — a manifest that silently
+  resolved from ambient machine state would stop meaning anything to the next person who
+  clones it, and `vaire check` would be a different question on every machine. Reading is
+  rescued only where there is no manifest to betray.
+
+  A catalogued package whose index cannot be read is skipped and named, never fatal.
+  Maintain commands are untouched: without a package they still report *no corpus found*,
+  because there is nothing there for them to maintain.
+
 ### Changed
 - **Dependency resolution goes through the catalog, and the `^MAJOR` constraint now
   *selects*** (cli.md §6.6). A declared dependency with no `.vaire/packages/<name>` entry

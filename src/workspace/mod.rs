@@ -122,7 +122,18 @@ pub struct Workspace {
     run_root_id: PackageId,
     /// Canonical root → handle. `BTreeMap` for deterministic iteration.
     handles: RefCell<BTreeMap<PathBuf, Rc<PackageHandle>>>,
+    /// Rootless only: declared name → package root, from the catalog. `None` in an
+    /// ordinary session, which is what keeps author-mode resolution deterministic — a
+    /// package's references resolve through *its* declarations and links, never through
+    /// whatever happens to be on this machine.
+    catalog: Option<BTreeMap<String, PathBuf>>,
 }
+
+/// The synthetic run-root's package id in a rootless session. Empty deliberately: manifest
+/// names are slugs matching `[a-z][a-z0-9-]*`, so no real package can collide with it, and
+/// `qualify` therefore marks every node as cross-package — which is exactly right when
+/// there is no package you are standing in.
+const NO_PACKAGE: &str = "";
 
 impl Workspace {
     /// Build the view for the current (run-root) package. `config` is the already-loaded
@@ -134,6 +145,7 @@ impl Workspace {
             run_root: run_root.clone(),
             run_root_id: run_root_id.clone(),
             handles: RefCell::new(BTreeMap::new()),
+            catalog: None,
         };
         ws.handles.borrow_mut().insert(
             run_root.clone(),
@@ -146,6 +158,63 @@ impl Workspace {
             }),
         );
         Ok(ws)
+    }
+
+    /// The view for a **rootless** session: no package to stand in, scope taken from the
+    /// catalog instead of from a manifest (registry.v2.md §9).
+    ///
+    /// Modelled as a synthetic run-root that declares every catalogued package as a
+    /// dependency, with the catalog supplying where each one lives. That is not a trick to
+    /// avoid a second session type — it is the semantics, stated in the one place
+    /// resolution already reads:
+    ///
+    /// * A real package's `@pkg/…` reference still resolves through **its own**
+    ///   `[dependencies]` and its own links first ([`Workspace::locate`]), so a file means
+    ///   the same thing here as it does to its author.
+    /// * The catalog is consulted only where an ordinary session would have run out of
+    ///   places to look — never ahead of an author's own wiring.
+    ///
+    /// The synthetic root owns no index and is never consulted as a member
+    /// ([`Workspace::consult_closure`]); ask it for one and you get the error that names
+    /// the real problem, which is that a bare id has no package to be relative to.
+    pub fn rootless(packages: Vec<(String, PathBuf)>) -> Workspace {
+        let run_root = PathBuf::new();
+        let run_root_id = PackageId(NO_PACKAGE.to_string());
+        let catalog: BTreeMap<String, PathBuf> = packages.into_iter().collect();
+        // Declaring every catalogued name is what lets `step_into` walk out of the
+        // synthetic root: the declaration check is the reader's entitlement question
+        // ("may I see this package?"), and here the answer is everything registered.
+        let config = Config {
+            name: NO_PACKAGE.to_string(),
+            dependencies: catalog
+                .keys()
+                .map(|n| (n.clone(), "^0".to_string()))
+                .collect(),
+            ..Config::default()
+        };
+
+        let ws = Workspace {
+            run_root: run_root.clone(),
+            run_root_id: run_root_id.clone(),
+            handles: RefCell::new(BTreeMap::new()),
+            catalog: Some(catalog),
+        };
+        ws.handles.borrow_mut().insert(
+            run_root.clone(),
+            Rc::new(PackageHandle {
+                id: run_root_id,
+                root: run_root,
+                config,
+                is_run_root: true,
+                index: OnceCell::new(),
+            }),
+        );
+        ws
+    }
+
+    /// Whether this session has no package to stand in.
+    pub fn is_rootless(&self) -> bool {
+        self.catalog.is_some()
     }
 
     /// The run-root (current) package's handle.
@@ -163,7 +232,12 @@ impl Workspace {
     /// could not be located — one shared definition so the skip/dedup semantics stay
     /// identical across backlinks, search, suggest, and unresolved.
     pub fn consult_closure(&self) -> (Vec<Rc<PackageHandle>>, Vec<String>) {
-        let mut members = vec![self.current()];
+        // The synthetic rootless root is not a package and owns no index; the members are
+        // exactly the catalogued ones its "dependencies" name.
+        let mut members = match self.is_rootless() {
+            true => Vec::new(),
+            false => vec![self.current()],
+        };
         let mut skipped = Vec::new();
         for (id, entry) in self.closure() {
             match entry {
@@ -199,11 +273,27 @@ impl Workspace {
         if entry_exists(&fallback) {
             return self.open(name, &fallback);
         }
-        Err(VaireError::Dependency(format!(
-            "dependency '{name}' (declared by '{}') is not linked — run `vaire add {name} --link <path>` in {}",
-            source.id,
-            display_root(&source.root),
-        )))
+        // Rootless only, and deliberately last: a reader has no manifest of its own to be
+        // reproducible against, so it resolves by declared name across what this machine
+        // knows. An author's session never reaches here — `catalog` is `None` — because a
+        // dependency silently resolving from ambient machine state is exactly how a
+        // manifest stops meaning anything.
+        if let Some(catalog) = &self.catalog
+            && let Some(root) = catalog.get(name)
+        {
+            return self.open(name, root);
+        }
+        Err(match self.is_rootless() {
+            true => VaireError::Dependency(format!(
+                "no package declaring '{name}' is in your catalog — record one with \
+                 `vaire catalog add <path>`, or import a tree with `vaire catalog scan <dir>`"
+            )),
+            false => VaireError::Dependency(format!(
+                "dependency '{name}' (declared by '{}') is not linked — run `vaire add {name} --link <path>` in {}",
+                source.id,
+                display_root(&source.root),
+            )),
+        })
     }
 
     /// Open (memoized) the package behind a `.vaire/packages/<name>` entry.

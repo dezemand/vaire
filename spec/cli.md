@@ -220,7 +220,8 @@ Hybrid full-text + vector search over the corpus. Returns files (the file is the
 unit) with the matching section anchors.
 
 ```
-vaire search <query> [--type <T>] [--scope <container-id>] [--limit <N>] [--local] [--json]
+vaire search <query> [--type <T>] [--scope <container-id>] [--limit <N>]
+             [--local | --all] [--json]
 ```
 
 - `--type <T>` — restrict to nodes of a type.
@@ -237,7 +238,8 @@ vaire search <query> [--type <T>] [--scope <container-id>] [--limit <N>] [--loca
   your knowledge. The query is embedded once and reused per member; a dependency indexed
   with different embedding dimensions contributes FTS/alias hits only (vector recall
   silently absent for it — `status` surfaces the mismatch). `--local` restricts to this
-  package; `--scope @pkg/container` searches inside a dependency's container.
+  package and `--all` widens to every catalogued package (§6.8, implied outside a
+  package); `--scope @pkg/container` searches inside a dependency's container.
   Cross-package hits carry `package` in JSON; unavailable dependencies are listed in
   `skipped`.
 
@@ -351,7 +353,7 @@ turn a prose mention into an ID (then write `[[type:id]]`), or to confirm nothin
 (then write `[[?type: descriptor]]`).
 
 ```
-vaire suggest <descriptor> [--type <T>] [--limit <N>] [--local] [--json]
+vaire suggest <descriptor> [--type <T>] [--limit <N>] [--local | --all] [--json]
 ```
 
 - Matches the descriptor against each node's `name`/`aliases` first (high precision), with
@@ -361,7 +363,8 @@ vaire suggest <descriptor> [--type <T>] [--limit <N>] [--local] [--json]
 - Sorted by descending score; ties broken by (qualified) `id` ascending.
 - **Cross-package** (§6.5): candidates come from this package and its linked dependency
   closure — a dependency hit arrives pre-qualified (`@pkg/type:id`), ready to paste as a
-  reference. `--local` restricts to this package; unavailable dependencies are listed in
+  reference. `--local` restricts to this package and `--all` widens to every catalogued
+  package (§6.8, implied outside a package); unavailable dependencies are listed in
   `skipped`.
 
 JSON:
@@ -1214,6 +1217,63 @@ path. The walk itself survives only inside `vaire catalog scan`.
 The first maintain command after upgrading migrates automatically — whatever the old root
 held is imported into the catalog once, the `[packages] local` key is dropped, and the run
 says so. Dependencies keep resolving across the upgrade; nothing walks anything again.
+
+### 6.8 Reading without a package: the rootless session
+
+Everything above assumes an author — someone inside a package, whose scope is that
+package's declared dependency closure. The larger audience is the opposite: somebody who
+authors nothing and wants to ask questions across everything they have. That is a second
+kind of session, scoped by the **catalog** (§4.8) rather than by a manifest.
+
+It is entered by *not being in a package*. Run a read command from anywhere with no
+`knowledge.toml` above it, and the scope is every live catalogued package:
+
+```bash
+cd ~                                        # no package here, or anywhere above
+vaire search "incident review"              # every package this machine knows
+vaire resolve @acme-core/team:platform      # any catalogued package, by name
+vaire mcp                                   # the same scope, served to an agent
+```
+
+From *inside* a package, `search --all` / `suggest --all` do the same thing deliberately —
+useful when the answer is somewhere you have not declared a dependency on. `--local` and
+`--all` are opposites and cannot be combined.
+
+The rules:
+
+- **Everything is package-qualified.** With no package you are standing in, nothing is
+  local, so every result carries its `@pkg/`. A **bare id is refused**, not "not found":
+  `type:id` means "in this package", and there is no this package — the error says so and
+  shows the qualified form, rather than implying the node is missing.
+- **The scope is the catalog, so a name is enough.** `@acme-core/…` resolves because the
+  catalog knows a package declaring `acme-core`, not because anything declared a
+  dependency on it. An unknown name points at `vaire catalog list`, never at a manifest
+  the reader does not have.
+- **A package's own references still resolve through its own manifest.** Following
+  `@acme-wiki/page:onboarding` into what *it* references uses acme-wiki's
+  `[dependencies]` and its own links first — a file means the same thing to a reader as
+  it does to its author. The catalog is consulted only where an ordinary session would
+  have run out of places to look.
+- **Author mode never falls back to it.** A declared dependency that is not linked, or a
+  reference to an undeclared package, fails exactly as before even when the catalog could
+  answer. A manifest that silently resolved from ambient machine state would stop meaning
+  anything to the next person who clones the package, and `vaire check` would be a
+  different question on every machine. The fallback exists only where there is no
+  manifest to betray.
+- **Unreadable packages are surfaced, never fatal.** A catalogued package with no index
+  is skipped and named, so a query answers from what it can read.
+- **Reads still write nothing to any package.** The catalog's own row states are updated
+  (a path that has gone away is marked `missing`), which is user-global state, not a
+  checkout — the refinement stated in §1.
+- **Maintain commands are unchanged.** `index`, `check`, `release` and the rest still
+  require a package; without one they report *no corpus found*, because there is nothing
+  for them to maintain.
+
+Ranking across packages is deliberately unclever: results are merged and ranked by score,
+and scores are only comparable because every member index is built by the same code with
+the same scoring. When registries join the fan-out, remote scores will *not* be
+comparable — that is where grouping by source and refusing to normalize arrives, with the
+answering source labelled.
 
 ## 7. Exit codes
 

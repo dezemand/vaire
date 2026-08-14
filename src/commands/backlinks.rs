@@ -17,6 +17,7 @@ pub fn run(
     let id: NodeId = id
         .parse()
         .map_err(|e| VaireError::Usage(format!("bad id '{id}': {e}")))?;
+    crate::commands::require_qualified(ctx, &id)?;
     let ty = type_filter.map(NodeType::new);
     let ws = ctx.workspace()?;
     let cross = resolver::backlinks(ws, &id, ty.as_ref(), limit)?;
@@ -40,6 +41,7 @@ pub fn run(
         })
         .collect();
     Ok(BacklinksOutput {
+        rootless: ws.is_rootless(),
         id: id.to_string(),
         count: backlinks.len(),
         backlinks,

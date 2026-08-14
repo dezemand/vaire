@@ -311,10 +311,20 @@ pub(crate) fn step_into(
     alias: &str,
 ) -> Result<Rc<PackageHandle>> {
     if !source.config.dependencies.contains_key(alias) {
-        return Err(VaireError::Dependency(format!(
-            "package '{alias}' is not a declared dependency of '{}' — see [dependencies] in knowledge.toml (or run `vaire add {alias} --link <path>`)",
-            source.id
-        )));
+        // Same check, two different questions. For an author it is "did you declare
+        // this?"; for a reader standing outside every package it is "does this machine
+        // know that name?" — and answering the reader with advice about a manifest they
+        // do not have would send them to fix the wrong thing.
+        return Err(VaireError::Dependency(match ws.is_rootless() {
+            true => format!(
+                "no package named '{alias}' is in your catalog — `vaire catalog list` shows \
+                 what this machine knows, `vaire catalog add <path>` records another"
+            ),
+            false => format!(
+                "package '{alias}' is not a declared dependency of '{}' — see [dependencies] in knowledge.toml (or run `vaire add {alias} --link <path>`)",
+                source.id
+            ),
+        }));
     }
     ws.locate(source, alias)
 }
