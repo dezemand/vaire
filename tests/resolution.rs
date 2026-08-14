@@ -424,12 +424,19 @@ fn a_fully_linked_package_needs_nothing_from_the_catalog() {
     ws.add_package_named("know/acme-core", "acme-core", &["team"], &[]);
     ws.link_to("acme-web", "acme-core", "know/acme-core");
 
-    // The catalog is empty and never consulted: nothing is missing.
+    // Nothing is missing, so no name is ever looked up — and the catalog is therefore
+    // never even opened. That laziness is the point: Turso locks a database exclusively
+    // on open, so a steady-state `vaire index` must not queue behind every other one to
+    // ask nothing.
     let out = satisfy(&ws, "acme-web");
 
     assert!(out.linked.is_empty());
     assert!(out.notes.is_empty());
     assert!(out.warnings.is_empty(), "{out:?}");
+    assert!(
+        !ws.home().join("catalog.db").exists(),
+        "the catalog was not so much as created, let alone locked"
+    );
 }
 
 #[test]
@@ -603,10 +610,7 @@ fn an_old_local_packages_root_migrates_itself_into_the_catalog_once() {
     // A config written by v0.2.x, with the setting this release retires.
     std::fs::write(
         home.path().join("config.toml"),
-        format!(
-            "[packages]\nlocal = \"{}\"\n",
-            ws.dir.path().join("know").display()
-        ),
+        format!("[packages]\nlocal = \"{}\"\n", ws.root("know").display()),
     )
     .unwrap();
 

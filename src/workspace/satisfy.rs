@@ -75,16 +75,16 @@ struct Demand {
 /// at all degrades to exactly that, one warning and no links.
 pub fn satisfy(repo: &Repo, config: &Config, home: &Path) -> Satisfied {
     let mut out = Satisfied::default();
-    // Opened once for the whole pass and dropped on return: Turso takes an exclusive lock
-    // on open, so a handle held across the index build that follows would lock every other
-    // vaire process on the machine out of the catalog for its duration.
-    let catalog = match Catalog::open(home) {
-        Ok(catalog) => catalog,
-        Err(e) => {
-            out.warnings.push(format!("catalog unavailable: {e}"));
-            return out;
-        }
-    };
+    // Opened on the first name that actually needs looking up, once, and dropped on
+    // return. Both halves of that are load-bearing, and for the same reason: Turso takes
+    // an **exclusive** lock when a database is opened.
+    //
+    // * Lazily, because the steady state — every dependency already linked — is the common
+    //   case, and it has nothing to ask. Opening regardless would have every `vaire index`
+    //   on the machine queue behind every other one to answer no question at all.
+    // * Once, because a handle held across the index build that follows would lock every
+    //   other vaire process out of the catalog for that whole time.
+    let mut catalog: Option<Catalog> = None;
 
     loop {
         let Ok(ws) = Workspace::new(repo, config) else {
@@ -121,7 +121,18 @@ pub fn satisfy(repo: &Repo, config: &Config, home: &Path) -> Satisfied {
                     continue;
                 }
             };
-            match satisfy_one(&catalog, repo.root(), &name, &constraint) {
+            // First name that genuinely needs the catalog: open it now (see above).
+            let catalog = match &catalog {
+                Some(catalog) => catalog,
+                None => match Catalog::open(home) {
+                    Ok(opened) => catalog.insert(opened),
+                    Err(e) => {
+                        out.warnings.push(format!("catalog unavailable: {e}"));
+                        return out;
+                    }
+                },
+            };
+            match satisfy_one(catalog, repo.root(), &name, &constraint) {
                 Outcome::Linked(dep) => {
                     out.linked.push(dep);
                     progress = true;
