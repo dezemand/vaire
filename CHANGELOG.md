@@ -77,10 +77,13 @@ uses [Semantic Versioning](https://semver.org).
   changed` — so a release is never a surprise. Best-effort and cheap: the common "nothing
   new since the last release" case is a commit count, and it stays silent while the index
   is behind HEAD, where the answer would describe neither tree.
-- **`vaire pack`** (cli.md §4.6) — **behind the non-default `pack` feature**, so it
-  is not compiled into the released binary: the artifact format is still settling and
-  the registry that consumes it does not exist yet. Build with `--features pack` to
-  work on it. Build the package's distributable artifact
+- **`vaire pack` ships in the binary** (cli.md §4.6). It landed in 0.2.1 behind a
+  non-default feature, because the artifact format was still settling and nothing
+  consumed it. Both reasons are spent: the rest of the registry line is built against
+  this contract — `release` tags what `pack` builds, and publishing re-packs from a tag
+  — so it is on by default and compiled into every released binary. The feature name
+  survives, so a dependent that only reads a corpus can still compile the artifact layer
+  out. Build the package's distributable artifact
   (`.vaire/dist/<name>-<version>.tgz`) from the committed tree: the manifest, the
   corpus files the include/exclude globs select, **every file those reference** by
   relative link or image (inline and reference-style, transitively through referenced
