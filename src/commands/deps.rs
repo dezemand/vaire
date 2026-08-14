@@ -12,13 +12,24 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::commands::Ctx;
-use crate::error::Result;
+use crate::error::{Result, VaireError};
 use crate::model::Version;
 use crate::output::{DepNode, DepsOutput};
 use crate::workspace::{PackageHandle, Workspace};
 
 pub fn run(ctx: &Ctx) -> Result<DepsOutput> {
     let ws = ctx.workspace()?;
+    // Unlike the fan-out reads, this one has no rootless form to widen into: it reports
+    // *a package's* links, and the synthetic root has neither a name nor a `.vaire/`. The
+    // machine-wide question it looks like it might answer is a different command's.
+    if ws.is_rootless() {
+        return Err(VaireError::Usage(
+            "`deps` reports the dependency tree of the package you are standing in, and \
+             there is none here — run it inside a package, or use `vaire catalog list` to \
+             see what this machine knows"
+                .into(),
+        ));
+    }
     let current = ws.current();
     let mut visited: BTreeSet<PathBuf> = [current.root.clone()].into();
     let dependencies = children(ws, &current, &current, &mut visited);

@@ -380,11 +380,22 @@ fn read_ctx(
     all: bool,
 ) -> Result<Ctx> {
     let home = vaire::userconfig::vaire_home();
+    // `--all` widens the closure query, so whatever package you are standing in stays in
+    // scope — including one the catalog has never been told about. Standing nowhere is not
+    // an error here: `--all` is exactly as valid from `~` as from inside a package.
     if all {
-        return Ctx::rootless(home);
+        let standing_in = Ctx::new(repo, config)
+            .ok()
+            .map(|ctx| (ctx.config.name.clone(), ctx.repo.root().to_path_buf()));
+        return Ctx::rootless_with(home, standing_in);
     }
+    // An explicit `--repo` / `VAIRE_REPO` naming something that is not a package is a
+    // mistake to report, not the ambient "no package anywhere above me" the fallback is
+    // for. Both arrive as `NoRepo`; only the ambient one may be answered with a different
+    // scope, or a typo'd override would silently return results from the whole machine.
+    let overridden = repo.is_some() || std::env::var_os("VAIRE_REPO").is_some();
     match Ctx::new(repo, config) {
-        Err(VaireError::NoRepo) => Ctx::rootless(home),
+        Err(VaireError::NoRepo) if !overridden => Ctx::rootless(home),
         other => other,
     }
 }

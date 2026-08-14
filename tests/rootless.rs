@@ -387,3 +387,261 @@ fn mcp_serves_the_catalog_when_started_outside_a_package() {
     // The agent surface is the whole point: pointed at the machine, not at a checkout.
     assert!(stdout.contains("@acme-core/team:platform"), "{stdout}");
 }
+
+// ---- the scope's edges ------------------------------------------------------
+
+#[test]
+fn all_keeps_the_package_you_are_standing_in_even_when_uncatalogued() {
+    let ws = two_strangers();
+    let home = tempfile::tempdir().unwrap();
+    // acme-app is deliberately never catalogued. Reads record no sightings, so a checkout
+    // nobody has indexed, checked, or `catalog add`ed is genuinely absent from it — and
+    // `--all` widens the query rather than redirecting it, so "search everything" that
+    // silently excluded *here* would be the one answer nobody would read as correct.
+    ws.add_package_named("app", "acme-app", &["service"], &[])
+        .add_file(
+            "app",
+            "knowledge/checkout.md",
+            "---\nid: checkout\ntype: service\n---\n# Checkout\n\nFeeds the shared ingest pipeline.\n",
+        )
+        .commit("app")
+        .build("app");
+
+    let out = vaire_cli(&ws, home.path(), &ws.root("app"))
+        .args(["--json", "search", "ingest pipeline", "--all"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let ids: Vec<&str> = json["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&"@acme-app/service:checkout"),
+        "widened, not redirected: {ids:?}"
+    );
+    assert!(ids.contains(&"@acme-core/team:platform"), "{ids:?}");
+    // Still qualified: `--all` is the rootless scope, where nothing is local.
+    assert!(ids.iter().all(|id| id.starts_with('@')), "{ids:?}");
+}
+
+#[test]
+fn fan_out_stops_at_the_catalog_and_does_not_follow_links_out_of_it() {
+    let ws = Ws::new();
+    ws.add_package_named("know/acme-secret", "acme-secret", &["team"], &[])
+        .add_file(
+            "know/acme-secret",
+            "knowledge/skunkworks.md",
+            "---\nid: skunkworks\ntype: team\n---\n# Skunkworks\n\nRuns the shared ingest pipeline.\n",
+        )
+        .commit("know/acme-secret")
+        .build("know/acme-secret");
+    // acme-wiki declares and links acme-secret, so its own references resolve. But nobody
+    // catalogued acme-secret, and a reader's scope is the catalog: whether a package shows
+    // up in a search must not depend on wiring inside some *other* package.
+    ws.add_package_named(
+        "know/acme-wiki",
+        "acme-wiki",
+        &["page"],
+        &[("acme-secret", "^1")],
+    )
+    .add_file(
+        "know/acme-wiki",
+        "knowledge/onboarding.md",
+        "---\nid: onboarding\ntype: page\n---\n# Onboarding\n\nJoin the shared ingest pipeline rota.\n",
+    )
+    .link_to("know/acme-wiki", "acme-secret", "know/acme-secret")
+    .commit("know/acme-wiki")
+    .build("know/acme-wiki");
+    catalog(&ws, &["know/acme-wiki"]);
+    let ctx = rootless(&ws);
+
+    let out = vaire::commands::search::run(&ctx, "ingest pipeline", None, None, Some(10), false)
+        .expect("search");
+
+    let ids: Vec<&str> = out.results.iter().map(|r| r.id.as_str()).collect();
+    assert!(ids.contains(&"@acme-wiki/page:onboarding"), "{ids:?}");
+    assert!(
+        !ids.iter().any(|id| id.starts_with("@acme-secret/")),
+        "reachable through acme-wiki's links, but not in the catalog: {ids:?}"
+    );
+    assert!(
+        !out.skipped.contains(&"acme-secret".to_string()),
+        "not skipped either — it was never in scope to skip: {:?}",
+        out.skipped
+    );
+}
+
+#[test]
+fn two_checkouts_declaring_one_name_are_refused_not_ranked() {
+    let ws = two_strangers();
+    // A fork beside its original. Picking the higher version would be a guess dressed as
+    // arithmetic, and a fork is routinely newer than what it forked from.
+    ws.add_package_named("fork/acme-core", "acme-core", &["team"], &[])
+        .add_file(
+            "fork/acme-core",
+            "knowledge/platform.md",
+            "---\nid: platform\ntype: team\n---\n# Platform\n",
+        )
+        .commit("fork/acme-core")
+        .build("fork/acme-core");
+    catalog(&ws, &["fork/acme-core"]);
+    let ctx = rootless(&ws);
+
+    let err = vaire::commands::resolve::run(&ctx, "@acme-core/team:platform")
+        .expect_err("two live checkouts declare acme-core");
+
+    let msg = err.to_string();
+    assert!(msg.contains("more than one"), "{msg}");
+    assert!(msg.contains("catalog rm"), "names a way out: {msg}");
+    assert!(
+        msg.contains("fork") && msg.contains("know"),
+        "names both paths, or it cannot be acted on: {msg}"
+    );
+}
+
+#[test]
+fn the_catalog_is_not_shadowed_by_whatever_sits_beside_the_shell() {
+    let ws = two_strangers();
+    let home = tempfile::tempdir().unwrap();
+    // A directory that is not a package but happens to hold a `.vaire/packages/` entry —
+    // a stale derived directory, or another tool's. The synthetic rootless root has no
+    // directory of its own, so a relative probe would resolve against the process working
+    // directory and let this answer in the catalog's place. A reader's scope must not
+    // depend on which directory they ran from.
+    let nowhere = tempfile::tempdir().unwrap();
+    let packages = nowhere.path().join(".vaire").join("packages");
+    std::fs::create_dir_all(&packages).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(ws.root("know/acme-wiki"), packages.join("acme-core")).unwrap();
+
+    let out = vaire_cli(&ws, home.path(), nowhere.path())
+        .args(["--json", "resolve", "@acme-core/team:platform"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "the catalog answers, not the decoy beside the shell: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["package"].as_str(), Some("acme-core"));
+}
+
+// ---- the catalog's own state ------------------------------------------------
+
+#[test]
+fn a_path_that_answers_again_is_promoted_back_to_live() {
+    let ws = two_strangers();
+    let root = ws.root("know/acme-core");
+    {
+        // Marked missing by an earlier run (the checkout was away), and now it is back.
+        let catalog = Catalog::open(&ws.home()).expect("catalog");
+        catalog
+            .set_state(&root, vaire::catalog::State::Missing)
+            .expect("demote");
+    }
+
+    {
+        let ctx = rootless(&ws);
+        vaire::commands::resolve::run(&ctx, "@acme-core/team:platform")
+            .expect("a returned checkout still answers");
+    }
+
+    let catalog = Catalog::open(&ws.home()).expect("catalog");
+    let sighting = catalog
+        .sightings()
+        .expect("sightings")
+        .into_iter()
+        .find(|s| s.name == "acme-core")
+        .expect("row");
+    // Demoting without promoting would leave `catalog rm --missing` deleting the row for a
+    // package the session had just served.
+    assert_eq!(
+        sighting.state,
+        vaire::catalog::State::Live,
+        "two states with no clocks only works if both transitions are taken"
+    );
+}
+
+// ---- commands that have no rootless form ------------------------------------
+
+#[test]
+fn unresolved_widens_to_the_catalog_instead_of_failing() {
+    let ws = two_strangers();
+    ws.add_file(
+        "know/acme-wiki",
+        "knowledge/rota.md",
+        "---\nid: rota\ntype: page\n---\n# Rota\n\nOwned by [[?team: Platform]].\n",
+    )
+    .commit("know/acme-wiki")
+    .build("know/acme-wiki");
+    let ctx = rootless(&ws);
+
+    // Its default scope is the current package, and there is none — so the widened form
+    // is the only one there is, rather than an error about a missing index.
+    let out = vaire::commands::unresolved::run(&ctx, None, None, false).expect("unresolved");
+
+    let records: Vec<&str> = out.unresolved.iter().map(|i| i.record.as_str()).collect();
+    assert!(
+        records.iter().any(|r| r.starts_with("@acme-wiki/")),
+        "package-qualified, like every rootless result: {records:?}"
+    );
+}
+
+#[test]
+fn unresolved_refuses_a_scope_with_no_package_to_be_relative_to() {
+    let ws = two_strangers();
+    let ctx = rootless(&ws);
+
+    let err = vaire::commands::unresolved::run(&ctx, None, Some("team:platform"), false)
+        .expect_err("a scope is one package's container");
+
+    assert!(err.to_string().contains("--scope"), "{err}");
+}
+
+#[test]
+fn deps_has_no_rootless_form_and_says_so() {
+    let ws = two_strangers();
+    let ctx = rootless(&ws);
+
+    let err = vaire::commands::deps::run(&ctx).expect_err("no package to report on");
+
+    let msg = err.to_string();
+    // Not an empty tree named "": it reports *a package's* links, and there is none here.
+    assert!(msg.contains("catalog list"), "points somewhere real: {msg}");
+}
+
+#[test]
+fn an_explicit_repo_that_is_not_a_package_is_reported_not_widened() {
+    let ws = two_strangers();
+    let home = tempfile::tempdir().unwrap();
+    let nowhere = tempfile::tempdir().unwrap();
+
+    let out = vaire_cli(&ws, home.path(), nowhere.path())
+        .args([
+            "--json",
+            "--repo",
+            nowhere.path().to_str().unwrap(),
+            "search",
+            "ingest pipeline",
+        ])
+        .output()
+        .unwrap();
+
+    // Both arrive as `NoRepo`, and only the ambient one may be answered with a different
+    // scope — otherwise a typo'd override silently returns results from the whole machine.
+    assert!(
+        !out.status.success(),
+        "a bad --repo must not fall through to the catalog: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}

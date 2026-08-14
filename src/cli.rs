@@ -263,6 +263,13 @@ pub enum Command {
 impl Command {
     /// Whether this is a read command — the class that can run without a package to
     /// stand in, against the catalog (cli.md §6.8).
+    ///
+    /// The test is "does this question still mean something with no package to stand in?",
+    /// not "does this mutate?". `unresolved` qualifies because it already has a widened
+    /// form (`--all-packages`), which is what it takes rootless. `deps` does not and is
+    /// deliberately absent: it reports one package's link tree, so outside a package the
+    /// honest answer is *no corpus found* rather than a tree belonging to nobody. `mcp` is
+    /// in the class too, but is dispatched before this is consulted.
     pub fn is_read(&self) -> bool {
         matches!(
             self,
@@ -272,6 +279,7 @@ impl Command {
                 | Command::Refs { .. }
                 | Command::Search { .. }
                 | Command::Suggest { .. }
+                | Command::Unresolved { .. }
         )
     }
 

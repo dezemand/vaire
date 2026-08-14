@@ -98,6 +98,11 @@ pub fn select(catalog: &Catalog, name: &str, constraint: &str) -> Result<Selecti
                 &config.version,
                 sighting.origin,
             );
+        } else if sighting.state != State::Live {
+            // Unchanged, but it answered — so the row saying `missing` is now wrong.
+            // Demoting without promoting would let `catalog rm --missing` delete the row
+            // for a package this very selection is about to link.
+            let _ = catalog.set_state(&sighting.path, State::Live);
         }
         if config.name != name {
             continue;

@@ -93,7 +93,20 @@ impl Ctx {
     /// `repo` is a placeholder rooted at the vaire home: read commands never touch it, and
     /// the maintain commands that do are never rootless.
     pub fn rootless(home: PathBuf) -> Result<Ctx> {
-        let packages = crate::catalog::Catalog::open(&home)?.live_packages()?;
+        Ctx::rootless_with(home, None)
+    }
+
+    /// [`Ctx::rootless`], plus a package the catalog may not have heard of.
+    ///
+    /// The one caller that passes `Some` is `--all` from inside a package: that flag
+    /// *widens* a closure query (cli.md §3.4), so the package you are standing in has to
+    /// stay in scope. Reads never record sightings, so a checkout that has not yet been
+    /// indexed, checked, or `catalog add`ed is genuinely absent from the catalog — and
+    /// "search everything" quietly excluding *here* is the one result nobody would read as
+    /// correct. Seeded last, so a catalogued path for the same name is not displaced.
+    pub fn rootless_with(home: PathBuf, also: Option<(String, PathBuf)>) -> Result<Ctx> {
+        let mut packages = crate::catalog::Catalog::open(&home)?.live_packages()?;
+        packages.extend(also);
         let workspace = std::cell::OnceCell::new();
         let _ = workspace.set(crate::workspace::Workspace::rootless(packages));
         Ok(Ctx {

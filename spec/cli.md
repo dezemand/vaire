@@ -1237,7 +1237,12 @@ vaire mcp                                   # the same scope, served to an agent
 
 From *inside* a package, `search --all` / `suggest --all` do the same thing deliberately —
 useful when the answer is somewhere you have not declared a dependency on. `--local` and
-`--all` are opposites and cannot be combined.
+`--all` are opposites and cannot be combined. `--all` **widens** the query rather than
+redirecting it, so the package you are standing in stays in scope even when the catalog
+has never heard of it — reads record no sightings, so a checkout that has not been
+indexed, checked, or `catalog add`ed is genuinely absent from the catalog, and "search
+everything" excluding *here* is the one result nobody would read as correct. Its results
+are package-qualified like every other, because in this scope nothing is local.
 
 The rules:
 
@@ -1249,6 +1254,14 @@ The rules:
   catalog knows a package declaring `acme-core`, not because anything declared a
   dependency on it. An unknown name points at `vaire catalog list`, never at a manifest
   the reader does not have.
+- **The scope is the catalog, and stops there.** Fan-out consults the catalogued packages
+  and does not expand their dependency closures: a package nobody catalogued must not turn
+  up in a search because some *other* package happened to link it, or which results you
+  get would depend on wiring you cannot see. Following a reference into such a package
+  still works — that is resolution, not scope.
+- **Two checkouts declaring one name are refused, not ranked.** The catalog reports both
+  (§4.8) and resolution says so, naming both paths; `vaire catalog rm <path>` settles it.
+  Picking the newer would be a guess, and a fork is routinely newer than its original.
 - **A package's own references still resolve through its own manifest.** Following
   `@acme-wiki/page:onboarding` into what *it* references uses acme-wiki's
   `[dependencies]` and its own links first — a file means the same thing to a reader as
@@ -1265,9 +1278,16 @@ The rules:
 - **Reads still write nothing to any package.** The catalog's own row states are updated
   (a path that has gone away is marked `missing`), which is user-global state, not a
   checkout — the refinement stated in §1.
+- **Reads correct the catalog in both directions.** A path that has gone away is marked
+  `missing`; one that answers again flips straight back to `live`. Demoting alone would
+  leave `catalog rm --missing` deleting rows for packages the session is actively serving.
 - **Maintain commands are unchanged.** `index`, `check`, `release` and the rest still
   require a package; without one they report *no corpus found*, because there is nothing
-  for them to maintain.
+  for them to maintain. `deps` sits with them despite reading nothing: it reports one
+  package's link tree, and there is no package here for it to be about.
+- **`unresolved` widens instead of failing.** Its default scope is the current package, so
+  with none it behaves as `--all-packages` over the catalog. `--scope` is refused, since a
+  scope is a container id relative to a package.
 
 Ranking across packages is deliberately unclever: results are merged and ranked by score,
 and scores are only comparable because every member index is built by the same code with
