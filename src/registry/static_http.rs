@@ -58,6 +58,10 @@ pub struct StaticHttp {
     name: String,
     transport: Box<dyn Transport>,
     descriptor: Descriptor,
+    /// Whether a descriptor document was actually found, as opposed to synthesized for a
+    /// location that has never received a push. The difference matters to a human: an
+    /// empty registry and a directory that is not a registry yet both serve nothing.
+    initialized: bool,
 }
 
 impl StaticHttp {
@@ -77,6 +81,7 @@ impl StaticHttp {
         let fetched = transport
             .get(DESCRIPTOR_PATH)
             .map_err(|e| translate(name, &url, e))?;
+        let initialized = fetched.is_some();
         let descriptor = match fetched {
             Some(fetched) => {
                 let descriptor: Descriptor =
@@ -105,7 +110,15 @@ impl StaticHttp {
             name: name.to_string(),
             transport,
             descriptor,
+            initialized,
         })
+    }
+
+    /// Whether this location already carries a registry descriptor. `false` means nothing
+    /// has ever been published here — which a writable registry fixes on its first push,
+    /// and a read-only one simply is not.
+    pub fn initialized(&self) -> bool {
+        self.initialized
     }
 
     fn index_path(name: &str) -> String {

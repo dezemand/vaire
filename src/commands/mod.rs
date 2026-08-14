@@ -16,7 +16,10 @@ pub mod index;
 pub mod init;
 #[cfg(feature = "pack")]
 pub mod pack;
+#[cfg(feature = "pack")]
+pub mod push;
 pub mod refs;
+pub mod registry;
 pub mod release;
 pub mod render;
 pub mod resolve;
@@ -25,6 +28,7 @@ pub mod status;
 pub mod suggest;
 pub mod unresolved;
 pub mod upgrade;
+pub mod yank;
 
 use std::path::PathBuf;
 
