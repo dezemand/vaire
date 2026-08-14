@@ -15,6 +15,7 @@ pub fn run(ctx: &Ctx, id: &str, depth: u32, type_filter: Option<&str>) -> Result
     let id: NodeId = id
         .parse()
         .map_err(|e| VaireError::Usage(format!("bad id '{id}': {e}")))?;
+    crate::commands::require_qualified(ctx, &id)?;
     let ty = type_filter.map(NodeType::new);
     let ws = ctx.workspace()?;
     let cross = resolver::refs(ws, &id, depth, ty.as_ref())?;
@@ -38,6 +39,7 @@ pub fn run(ctx: &Ctx, id: &str, depth: u32, type_filter: Option<&str>) -> Result
         })
         .collect();
     Ok(RefsOutput {
+        rootless: ws.is_rootless(),
         id: id.to_string(),
         depth,
         count: refs.len(),

@@ -27,6 +27,13 @@ pub fn run(
         scope_field: ctx.config.scope_field.clone(),
     };
     let ws = ctx.workspace()?;
+    if local && ws.is_rootless() {
+        return Err(VaireError::Usage(
+            "--local means \"only the package I am standing in\", and there is none here — \
+             drop it, or run inside a package"
+                .into(),
+        ));
+    }
     let embedder = ctx.embedder()?;
     let (hits, skipped) = search::search_workspace(ws, embedder, query, &opts, local)?;
 
@@ -63,6 +70,7 @@ pub fn run(
         })
         .collect();
     Ok(SearchOutput {
+        rootless: ws.is_rootless(),
         query: query.to_string(),
         count: results.len(),
         results,

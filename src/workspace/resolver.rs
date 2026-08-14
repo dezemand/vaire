@@ -311,10 +311,25 @@ pub(crate) fn step_into(
     alias: &str,
 ) -> Result<Rc<PackageHandle>> {
     if !source.config.dependencies.contains_key(alias) {
-        return Err(VaireError::Dependency(format!(
-            "package '{alias}' is not a declared dependency of '{}' — see [dependencies] in knowledge.toml (or run `vaire add {alias} --link <path>`)",
-            source.id
-        )));
+        // Same check, two different questions. For an author it is "did you declare
+        // this?"; for a reader standing outside every package it is "does this machine
+        // know that name?" — and answering the reader with advice about a manifest they
+        // do not have would send them to fix the wrong thing.
+        //
+        // Keyed on the *source*, not the session: a rootless session still contains real
+        // packages, and an undeclared reference inside one is its author's missing
+        // `[dependencies]` entry no matter who is reading it. Keying on the session would
+        // blame the reader's catalog for someone else's manifest.
+        return Err(VaireError::Dependency(match ws.is_synthetic(source) {
+            true => format!(
+                "no package named '{alias}' is in your catalog — `vaire catalog list` shows \
+                 what this machine knows, `vaire catalog add <path>` records another"
+            ),
+            false => format!(
+                "package '{alias}' is not a declared dependency of '{}' — see [dependencies] in knowledge.toml (or run `vaire add {alias} --link <path>`)",
+                source.id
+            ),
+        }));
     }
     ws.locate(source, alias)
 }

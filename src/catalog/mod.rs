@@ -354,6 +354,36 @@ impl Catalog {
         )
     }
 
+    /// Every live package as `(declared name, root)` — the scope of a rootless session
+    /// (registry.v2.md §9).
+    ///
+    /// Paths are checked as they are read, so a checkout that has gone away is neither
+    /// returned nor left claiming to be live. A name sighted at two live paths yields two
+    /// entries: which one is "the" package is a resolution-time question, and answering it
+    /// here would be the write-time guess sightings exist to avoid.
+    ///
+    /// The check runs **both ways**. Demoting alone would leave a returned checkout being
+    /// served by every read while its row still said `missing` — and `catalog rm --missing`
+    /// would then delete a row for a package the session was using. Two states with no
+    /// clocks only works if both transitions are taken wherever the path is probed
+    /// (cli.md §4.8).
+    pub fn live_packages(&self) -> Result<Vec<(String, std::path::PathBuf)>> {
+        let mut out = Vec::new();
+        for sighting in self.sightings()? {
+            if !sighting.path.join("knowledge.toml").is_file() {
+                if sighting.state != State::Missing {
+                    let _ = self.set_state(&sighting.path, State::Missing);
+                }
+                continue;
+            }
+            if sighting.state != State::Live {
+                let _ = self.set_state(&sighting.path, State::Live);
+            }
+            out.push((sighting.name, sighting.path));
+        }
+        Ok(out)
+    }
+
     /// Mark a path `missing` (it did not answer) or `live` (it did).
     pub fn set_state(&self, path: &Path, state: State) -> Result<()> {
         let key = path_key(path);

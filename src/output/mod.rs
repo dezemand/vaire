@@ -115,7 +115,7 @@ impl Output for BacklinksOutput {
             return format!(
                 "{}{}",
                 dim(&format!("no nodes reference {}", self.id)),
-                skipped_note(&self.skipped)
+                skipped_note(&self.skipped, self.rootless)
             );
         }
         let mut out = format!(
@@ -133,7 +133,7 @@ impl Output for BacklinksOutput {
             ));
         }
         let mut out = out.trim_end().to_string();
-        out.push_str(&skipped_note(&self.skipped));
+        out.push_str(&skipped_note(&self.skipped, self.rootless));
         out
     }
 }
@@ -144,7 +144,7 @@ impl Output for RefsOutput {
             return format!(
                 "{}{}",
                 dim(&format!("{} references nothing", self.id)),
-                skipped_note(&self.skipped)
+                skipped_note(&self.skipped, self.rootless)
             );
         }
         let mut out = format!(
@@ -170,7 +170,7 @@ impl Output for RefsOutput {
             ));
         }
         let mut out = out.trim_end().to_string();
-        out.push_str(&skipped_note(&self.skipped));
+        out.push_str(&skipped_note(&self.skipped, self.rootless));
         out
     }
 }
@@ -181,7 +181,7 @@ impl Output for SearchOutput {
             return format!(
                 "{}{}",
                 dim(&format!("no results for \"{}\"", self.query)),
-                skipped_note(&self.skipped)
+                skipped_note(&self.skipped, self.rootless)
             );
         }
         let mut out = format!(
@@ -205,7 +205,7 @@ impl Output for SearchOutput {
             }
         }
         let mut out = out.trim_end().to_string();
-        out.push_str(&skipped_note(&self.skipped));
+        out.push_str(&skipped_note(&self.skipped, self.rootless));
         out
     }
 }
@@ -216,7 +216,7 @@ impl Output for UnresolvedOutput {
             return format!(
                 "{}{}",
                 dim("no unresolved references"),
-                skipped_note(&self.skipped)
+                skipped_note(&self.skipped, false)
             );
         }
         let mut out = format!("{}\n", pluralize(self.count, "unresolved reference"));
@@ -244,7 +244,7 @@ impl Output for UnresolvedOutput {
             ));
         }
         let mut out = out.trim_end().to_string();
-        out.push_str(&skipped_note(&self.skipped));
+        out.push_str(&skipped_note(&self.skipped, false));
         out
     }
 }
@@ -702,6 +702,10 @@ pub struct BacklinksOutput {
     /// surfaced, never silently dropped.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Display only: whether this ran without a package to stand in, which decides
+    /// whether the skip note calls these dependencies or catalogued packages.
+    #[serde(skip)]
+    pub rootless: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -732,18 +736,25 @@ impl EdgeRef {
 }
 
 /// The shared "skipped dependencies" trailer for fan-out reads.
-fn skipped_note(skipped: &[String]) -> String {
+fn skipped_note(skipped: &[String], rootless: bool) -> String {
     if skipped.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n{}",
-            yellow(&format!(
-                "  note: skipped unavailable dependencies: {} (run `vaire index`)",
-                skipped.join(", ")
-            ))
-        )
+        return String::new();
     }
+    // Outside a package these are not anyone's dependencies — they are packages this
+    // machine knows whose index could not be read, and the fix is in each of them rather
+    // than here.
+    let note = match rootless {
+        true => format!(
+            "  note: skipped catalogued packages with no readable index: {} \
+             (run `vaire index` in each)",
+            skipped.join(", ")
+        ),
+        false => format!(
+            "  note: skipped unavailable dependencies: {} (run `vaire index`)",
+            skipped.join(", ")
+        ),
+    };
+    format!("\n{}", yellow(&note))
 }
 
 // ---- refs (cli.md §3.3) ----------------------------------------------------
@@ -757,6 +768,10 @@ pub struct RefsOutput {
     /// Dependencies that could not be consulted — surfaced, never silently dropped.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Display only: whether this ran without a package to stand in, which decides
+    /// whether the skip note calls these dependencies or catalogued packages.
+    #[serde(skip)]
+    pub rootless: bool,
 }
 
 // ---- search (cli.md §3.4) --------------------------------------------------
@@ -769,6 +784,10 @@ pub struct SearchOutput {
     /// Dependencies that could not be consulted — surfaced, never silently dropped.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Display only: whether this ran without a package to stand in, which decides
+    /// whether the skip note calls these dependencies or catalogued packages.
+    #[serde(skip)]
+    pub rootless: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -806,6 +825,10 @@ pub struct SuggestOutput {
     /// Dependencies that could not be consulted — surfaced, never silently dropped.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Display only: whether this ran without a package to stand in, which decides
+    /// whether the skip note calls these dependencies or catalogued packages.
+    #[serde(skip)]
+    pub rootless: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -831,7 +854,7 @@ impl Output for SuggestOutput {
             return format!(
                 "{}{}",
                 dim(&format!("no suggestions for \"{}\"", self.descriptor)),
-                skipped_note(&self.skipped)
+                skipped_note(&self.skipped, self.rootless)
             );
         }
         let mut out = format!(
@@ -850,7 +873,7 @@ impl Output for SuggestOutput {
             ));
         }
         let mut out = out.trim_end().to_string();
-        out.push_str(&skipped_note(&self.skipped));
+        out.push_str(&skipped_note(&self.skipped, self.rootless));
         out
     }
 }

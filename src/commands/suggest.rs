@@ -9,7 +9,7 @@
 //! `[[@pkg/type:id]]`); `--local` restricts to this package.
 
 use crate::commands::Ctx;
-use crate::error::Result;
+use crate::error::{Result, VaireError};
 use crate::model::id::NodeType;
 use crate::output::{SuggestOutput, SuggestionItem};
 use crate::search;
@@ -23,6 +23,13 @@ pub fn run(
 ) -> Result<SuggestOutput> {
     let ty = type_filter.map(NodeType::new);
     let ws = ctx.workspace()?;
+    if local && ws.is_rootless() {
+        return Err(VaireError::Usage(
+            "--local means \"only the package I am standing in\", and there is none here — \
+             drop it, or run inside a package"
+                .into(),
+        ));
+    }
     let (found, skipped) =
         search::suggest_workspace(ws, descriptor, ty.as_ref(), limit.unwrap_or(5), local)?;
 
@@ -43,6 +50,7 @@ pub fn run(
         })
         .collect();
     Ok(SuggestOutput {
+        rootless: ws.is_rootless(),
         descriptor: descriptor.to_string(),
         count: suggestions.len(),
         suggestions,
