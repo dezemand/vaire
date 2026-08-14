@@ -76,8 +76,8 @@ uses [Semantic Versioning](https://semver.org).
   forgets, and an ambient touch never demotes a hand-registered row. A catalog that cannot
   be written warns and is otherwise ignored.
 
-  The catalog does **not** drive dependency resolution yet — that arrives with the resolver
-  change, and `local-packages` discovery is unchanged for now.
+  Dependency resolution consults it (see *Changed*), and it is the enumerable scope the
+  rootless reader will fan out over.
 - **`vaire catalog scan <dir>`** — bulk import, and the one place the old discovery walk
   now lives (same depth and skip rules), demoted from resolution machinery to a one-shot
   import tool.
