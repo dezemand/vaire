@@ -15,6 +15,7 @@
 //! - [`embed`]   — pluggable, local-by-default embedding with a content-hash cache.
 //! - [`git`]     — the provenance layer: repo root, HEAD, diffs, last-indexed commit.
 //! - [`release`] — computing a version bump from what changed, and recording it.
+//! - [`registry`]— the client seam for remote registries, and the static-file wire contract.
 //! - [`commands`]— one module per CLI command, each returning a typed [`output::Output`].
 //! - [`output`]  — the returned unit: paths + IDs, rendered as human text or JSON.
 //! - [`mcp`]     — the STDIO MCP server that re-exposes the read commands as tools.
@@ -47,6 +48,8 @@ pub mod mcp;
 pub mod model;
 #[cfg(feature = "index")]
 pub mod output;
+#[cfg(feature = "index")]
+pub mod registry;
 #[cfg(feature = "index")]
 pub mod release;
 #[cfg(feature = "index")]

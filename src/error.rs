@@ -55,6 +55,7 @@ pub enum ErrorKind {
     Upgrade,
     Pack,
     Release,
+    Registry,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,6 +111,13 @@ pub enum VaireError {
     #[error("cannot release: {0}")]
     Release(String),
 
+    /// A registry operation failed. The typed [`crate::registry::RegistryError`] is what a
+    /// fan-out dispatches on and is kept intact for as long as it is useful; this variant
+    /// is where it lands once the decision has been made and only a person is left to tell.
+    /// Exit `1`.
+    #[error("registry error: {0}")]
+    Registry(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -152,6 +160,7 @@ impl VaireError {
             VaireError::Upgrade(_) => ErrorKind::Upgrade,
             VaireError::Pack(_) => ErrorKind::Pack,
             VaireError::Release(_) => ErrorKind::Release,
+            VaireError::Registry(_) => ErrorKind::Registry,
             _ => ErrorKind::Generic,
         }
     }

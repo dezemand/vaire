@@ -23,8 +23,13 @@ pub const DEFAULT_RELEASE_TYPE: &str = "release";
 pub const DEFAULT_RELEASE_DIR: &str = "releases";
 
 /// A parsed `MAJOR.MINOR.PATCH`. Ordering is numeric, component by component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
-#[serde(into = "String")]
+///
+/// Serde round-trips through the string form, in both directions: the registry wire
+/// contract writes `"version": "1.4.2"`, and reading it back as a [`Version`] rather than a
+/// `String` means a malformed version in a published index document is caught at the
+/// document boundary instead of somewhere downstream that assumed it had parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(into = "String", try_from = "String")]
 pub struct Version {
     pub major: u64,
     pub minor: u64,
@@ -113,6 +118,14 @@ impl fmt::Display for Version {
 impl From<Version> for String {
     fn from(v: Version) -> String {
         v.to_string()
+    }
+}
+
+impl TryFrom<String> for Version {
+    type Error = ParseVersionError;
+
+    fn try_from(s: String) -> Result<Version, ParseVersionError> {
+        s.parse()
     }
 }
 
