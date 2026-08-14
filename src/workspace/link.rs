@@ -119,6 +119,18 @@ pub fn commit(plan: LinkPlan) -> Result<String> {
     Ok(plan.stored.display().to_string())
 }
 
+/// Withdraw an entry this run created — used when a link turns out to satisfy one
+/// declarer at another's expense (`satisfy`'s conflict pass). Deliberately narrow: it
+/// removes a **symlink**, never a real directory, so it can only ever undo something
+/// `commit` wrote and never deletes content someone put there.
+pub fn remove(entry: &Path) -> std::io::Result<()> {
+    match entry.symlink_metadata() {
+        Ok(meta) if meta.file_type().is_symlink() => remove_symlink(entry),
+        Ok(_) => Err(std::io::Error::other("entry is not a symlink")),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(unix)]
 fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)

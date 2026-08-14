@@ -561,7 +561,8 @@ impl Output for AddOutput {
 #[derive(Debug, Serialize)]
 pub struct ConfigureOutput {
     pub config_path: String,
-    /// Which section this run reports on: `"embeddings"` or `"local-packages"`.
+    /// Which section this run reports on. Only `"embeddings"` remains — where packages
+    /// live stopped being a setting when the catalog replaced the local-packages root.
     pub section: String,
     pub provider: String,
     pub dimensions: usize,
@@ -570,29 +571,12 @@ pub struct ConfigureOutput {
     /// The interactive flow was cancelled (Esc/Ctrl-C); nothing was written.
     #[serde(default)]
     pub cancelled: bool,
-    /// The local-packages root in effect after this run; absent when unset.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub local_packages: Option<String>,
 }
 
 impl Output for ConfigureOutput {
     fn render_human(&self) -> String {
         if self.cancelled {
             return "Cancelled — no changes written.".to_string();
-        }
-        if self.section == "local-packages" {
-            return match &self.local_packages {
-                Some(root) => format!(
-                    "{} local packages\n  root:   {root}\n  config: {}",
-                    green("✓"),
-                    self.config_path,
-                ),
-                None => format!(
-                    "local packages: not set — declared dependencies are not discovered \
-                     automatically\n  config: {}",
-                    self.config_path,
-                ),
-            };
         }
         let mut s = format!(
             "{} configured embeddings\n  provider:   {}\n  dimensions: {}\n  config:     {}",

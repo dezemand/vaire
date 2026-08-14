@@ -149,9 +149,15 @@ fn resolution_lints(
                 package: name.clone(),
             });
         }
+        // Parsed rather than string-compared, so `1.10.0` against `^1` is a numeric
+        // question. A version that does not parse at all fails the constraint: the
+        // manifest is malformed, and reporting it here beats silently passing.
         if let Ok(handle) = ws.locate(&current, name)
-            && let Some(major) = constraint.strip_prefix('^')
-            && handle.config.version.split('.').next() != Some(major)
+            && !handle
+                .config
+                .version
+                .parse::<crate::model::Version>()
+                .is_ok_and(|version| version.satisfies_caret(constraint))
         {
             report.warnings.push(Warning::DependencyVersionMismatch {
                 package: name.clone(),

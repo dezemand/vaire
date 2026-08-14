@@ -311,15 +311,4 @@ pub enum ConfigureSection {
         #[arg(long = "api-url")]
         api_url: Option<String>,
     },
-
-    /// Set the directory where your local packages live. Declared dependencies are
-    /// satisfied from here automatically (by declared name, at any depth).
-    #[command(name = "local-packages")]
-    LocalPackages {
-        /// The directory to search. Omit to show the current setting.
-        path: Option<String>,
-        /// Clear the setting (no automatic discovery).
-        #[arg(long)]
-        unset: bool,
-    },
 }

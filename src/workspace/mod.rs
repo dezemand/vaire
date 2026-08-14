@@ -12,9 +12,10 @@
 //! standalone package — no `[dependencies]`, no `@pkg/` references — never constructs
 //! any of this.
 
-pub mod discover;
 pub mod link;
 pub mod resolver;
+pub mod satisfy;
+pub mod select;
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;

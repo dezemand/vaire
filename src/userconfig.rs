@@ -26,15 +26,16 @@ pub struct UserConfig {
     pub packages: PackagesConfig,
 }
 
-/// Where packages live on **this machine** (cli.md §6.6) — a consumer setting, never part
-/// of a package manifest: the same dependency is one clone here and another there.
+/// The retired `[packages]` section (registry.v2.md §14).
+///
+/// Kept **readable only**, so the one-shot migration can find an old root, import it into
+/// the catalog, and drop the key. Nothing writes it any more: where a package lives is an
+/// observation the catalog records, not a setting to maintain, and a configured root that
+/// had to be re-walked on every maintain command is exactly what the catalog replaced.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PackagesConfig {
-    /// The local-packages root: a directory holding packages you have locally. Maintain
-    /// commands satisfy a declared dependency by finding the package **declaring** that
-    /// name underneath it (at any depth — a knowledge base inside a bigger repo counts)
-    /// and materializing the `.vaire/packages/<name>` link. `None` disables discovery.
+    /// The former local-packages root. `Some` only until the migration has run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local: Option<PathBuf>,
 }

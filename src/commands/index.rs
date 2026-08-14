@@ -59,12 +59,16 @@ pub fn run(
 /// mismatch) are tolerated as warning rows; build failures propagate. Shared with
 /// `vaire check`, whose resolution lints need commit-fresh dependency indexes.
 pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepIndexed>> {
-    // Satisfy links first: a dependency that is merely *declared* is linked from the
-    // local-packages root if it can be found there, so a fresh clone needs no wiring
-    // step. Runs before the closure walk below, which then sees the new links.
-    let user = crate::userconfig::UserConfig::load()?;
-    let satisfied =
-        crate::workspace::discover::satisfy(&ctx.repo, &ctx.config, user.packages.local.as_deref());
+    // Satisfy links first: a dependency that is merely *declared* is linked from whatever
+    // the catalog knows about, so a fresh clone needs no wiring step. Runs before the
+    // closure walk below, which then sees the new links.
+    if let Some(note) = crate::commands::catalog::migrate_local_packages(
+        &crate::userconfig::config_home(),
+        ctx.home(),
+    ) {
+        eprintln!("note: {note}");
+    }
+    let satisfied = crate::workspace::satisfy::satisfy(&ctx.repo, &ctx.config, ctx.home());
     for warning in &satisfied.warnings {
         eprintln!("warning: {warning}");
     }
