@@ -390,8 +390,7 @@ pub struct DepIndexed {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// The package directory this run linked the dependency to, when the ensure pass
-    /// satisfied it from the local-packages root (cli.md §6.6); absent when the link
-    /// already existed.
+    /// satisfied it from the catalog (cli.md §6.6); absent when the link already existed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linked: Option<String>,
 }
@@ -423,7 +422,7 @@ impl Output for IndexRunOutput {
                             "  dep {}: linked → {}  {}\n",
                             dep.name,
                             target,
-                            dim("(local-packages)")
+                            dim("(catalog)")
                         ));
                     }
                     out.push_str(&format!(
@@ -518,15 +517,15 @@ pub struct AddOutput {
     /// True when the dependency already existed and its constraint was updated in place.
     pub updated: bool,
     /// The `.vaire/packages/<name>` link target: the path stored by `--link`, or the
-    /// package directory discovery found under the local-packages root.
+    /// package directory the catalog selected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linked: Option<String>,
-    /// The link was materialized by discovery (cli.md §6.6) rather than by `--link`.
+    /// The link was materialized from the catalog (cli.md §6.6) rather than by `--link`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub discovered: bool,
-    /// Why the dependency is declared but not linked — nothing found under the
-    /// local-packages root, an ambiguous name, or no root configured. Never an error:
-    /// declaring succeeded, and the link can arrive later.
+    /// Why the dependency is declared but not linked — the catalog knows nothing
+    /// declaring that name, nothing in the constrained major line, or two candidates that
+    /// both satisfy. Never an error: declaring succeeded, and the link can arrive later.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -547,7 +546,7 @@ impl Output for AddOutput {
                 self.name, target
             ));
             if self.discovered {
-                s.push_str(&format!("  {}", dim("(local-packages)")));
+                s.push_str(&format!("  {}", dim("(catalog)")));
             }
         }
         if let Some(note) = &self.note {
