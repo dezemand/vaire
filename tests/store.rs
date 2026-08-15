@@ -206,7 +206,8 @@ fn the_shipped_index_is_rebuilt_rather_than_trusted() {
 
     let entry = consumer
         .store()
-        .entry("acme-glossary", Version::new(1, 0, 0));
+        .entry("acme-glossary", Version::new(1, 0, 0))
+        .expect("a usable name");
     let index = vaire::index::Index::open(&entry.join(".vaire/index.db")).expect("index opens");
     // Built here, by this vaire, from the shipped Markdown — the trust decision the whole
     // store rests on.
@@ -229,7 +230,8 @@ fn a_store_entry_is_sealed_against_editing() {
     consumer.pull(None);
     let entry = consumer
         .store()
-        .entry("acme-glossary", Version::new(1, 0, 0));
+        .entry("acme-glossary", Version::new(1, 0, 0))
+        .expect("a usable name");
 
     // The corpus is what "this is release 1.0.0" is a claim about, so that is what is
     // sealed.
@@ -267,6 +269,7 @@ fn the_ensure_pass_never_rebuilds_a_store_entry() {
     let index_db = consumer
         .store()
         .entry("acme-glossary", Version::new(1, 0, 0))
+        .expect("a usable name")
         .join(".vaire/index.db");
 
     let before = std::fs::metadata(&index_db).unwrap().modified().unwrap();
@@ -440,7 +443,7 @@ fn an_artifact_whose_bytes_do_not_match_is_never_unpacked() {
         !consumer
             .store()
             .entry("acme-glossary", Version::new(1, 0, 0))
-            .exists(),
+            .is_some_and(|entry| entry.exists()),
         "nothing was written"
     );
 }

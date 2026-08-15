@@ -108,21 +108,33 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<PullOutput> {
             None => "no registry is configured — `vaire registry add <name> <url>`".to_string(),
         }));
     }
-    let clients: Vec<(String, String, Box<dyn Registry>)> = registries
-        .iter()
-        .filter_map(|row| {
-            crate::commands::registry::open(row)
-                .ok()
-                .map(|client| (row.name.clone(), row.url.clone(), client))
-        })
-        .collect();
+    // A row this build cannot open is **reported**, never dropped quietly: otherwise the
+    // registry the user expected to answer leaves the fan-out invisibly, and the failure
+    // they eventually see lists only the ones that did open.
+    let mut warnings = Vec::new();
+    let mut clients: Vec<(String, String, Box<dyn Registry>)> = Vec::new();
+    for row in &registries {
+        match crate::commands::registry::open(row) {
+            Ok(client) => clients.push((row.name.clone(), row.url.clone(), client)),
+            Err(e) => warnings.push(format!("registry '{}' was skipped: {e}", row.name)),
+        }
+    }
+    if clients.is_empty() {
+        // The check above tested the configured *rows*; this tests the clients. Without it a
+        // run where every registry failed to open would report "no registry serves X —
+        // looked in " with an empty list, which describes nothing that happened.
+        return Err(VaireError::Registry(format!(
+            "no configured registry could be opened:\n  {}",
+            warnings.join("\n  ")
+        )));
+    }
 
     let mut out = PullOutput {
         pulled: Vec::new(),
         already: Vec::new(),
         failed: Vec::new(),
         dry_run: options.dry_run,
-        warnings: Vec::new(),
+        warnings,
         store: store.root().display().to_string(),
     };
 
@@ -448,13 +460,19 @@ fn retain(
 
 /// `acme-core` or `acme-core@1.4.2`.
 fn parse_spec(spec: &str) -> Result<Wanted> {
-    let plain = |name: &str, want: Want| Wanted {
-        name: name.to_string(),
-        want,
-        expect: None,
+    // Checked at the boundary where a typed name first becomes a path segment under the
+    // store. The registry client checks the same grammar, but only once a registry is being
+    // asked — and the store is consulted before that.
+    let named = |name: &str, want: Want| -> Result<Wanted> {
+        crate::registry::wire::checked_name(name).map_err(VaireError::Usage)?;
+        Ok(Wanted {
+            name: name.to_string(),
+            want,
+            expect: None,
+        })
     };
     match spec.rsplit_once('@') {
-        None => Ok(plain(spec, Want::Constraint("^1".to_string()))),
+        None => named(spec, Want::Constraint("^1".to_string())),
         Some((name, version)) => {
             // `name@^1` is the manifest's own spelling and reads as a constraint; a bare
             // triple is an exact version. Accepting both means the two forms someone might
@@ -467,7 +485,7 @@ fn parse_spec(spec: &str) -> Result<Wanted> {
                     ))
                 })?),
             };
-            Ok(plain(name, want))
+            named(name, want)
         }
     }
 }
@@ -526,6 +544,9 @@ mod tests {
         );
 
         assert!(parse_spec("acme-core@1.4").is_err());
+        // A name is about to become a directory under the user's home; `../../etc` is not
+        // one this tool will construct.
+        assert!(parse_spec("../../etc@1.0.0").is_err());
     }
 
     #[test]

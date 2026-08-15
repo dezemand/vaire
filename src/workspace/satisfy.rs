@@ -356,8 +356,11 @@ fn satisfy_one(
             );
         }
         Selection::Unknown | Selection::Unsatisfied(_) => {
-            match store.satisfying(name, constraint) {
-                Some(version) => store.entry(name, version),
+            match store
+                .satisfying(name, constraint)
+                .and_then(|version| store.entry(name, version))
+            {
+                Some(entry) => entry,
                 None => {
                     return Outcome::Note(unsatisfiable(name, constraint, &selection));
                 }
