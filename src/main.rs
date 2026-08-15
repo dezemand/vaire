@@ -186,6 +186,35 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         ));
     }
 
+    // `pull <name>` is a store operation, not a corpus one: "put this package on this
+    // machine" means the same thing from anywhere, and requiring a package to stand in
+    // would make the obvious first command fail on a fresh machine. Bare `vaire pull`
+    // stays package-scoped, because it works from the manifest's dependencies.
+    #[cfg(feature = "pack")]
+    if let Command::Pull {
+        spec: Some(spec),
+        registry,
+        dry_run,
+    } = &cli.command
+        && Ctx::new(cli.repo.clone(), cli.config.clone()).is_err()
+    {
+        let ctx = Ctx::rootless(vaire::userconfig::vaire_home())?;
+        let out = commands::pull::run(
+            &ctx,
+            commands::pull::Options {
+                spec: Some(spec),
+                registry: registry.as_deref(),
+                dry_run: *dry_run,
+            },
+        )?;
+        let failed = !out.failed.is_empty();
+        emit(&out, json);
+        return Ok(match failed {
+            true => ExitCode::Generic,
+            false => ExitCode::Success,
+        });
+    }
+
     // Read commands fall back to the catalog when there is no package to stand in;
     // maintain commands keep erroring, because there is nothing for them to maintain.
     let ctx = match cli.command.is_read() {

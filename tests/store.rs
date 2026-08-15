@@ -389,6 +389,33 @@ fn a_working_copy_outranks_a_pulled_release_of_the_same_name() {
 // ---- trust ------------------------------------------------------------------------------
 
 #[test]
+fn a_working_copy_displaces_the_store_entry_of_the_same_name_in_a_rootless_session() {
+    let registry = temp();
+    let publisher = Publisher::new(registry.path());
+    publisher.publish();
+
+    let consumer = Consumer::new(registry.path());
+    consumer.pull(None);
+    // Both worlds now hold `acme-glossary`. Keeping both in a rootless session would not
+    // express the two-worlds rule — it would be reported as two packages declaring one
+    // name, and `catalog rm` cannot even reach the store path to clear it.
+    vaire::commands::catalog::add(consumer.home.path(), Some(publisher.root()))
+        .expect("catalog add");
+
+    let ctx = vaire::commands::Ctx::rootless(consumer.home.path().to_path_buf())
+        .expect("a rootless session");
+    let ws = ctx.workspace().expect("the rootless view");
+    let located = ws
+        .locate(&ws.current(), "acme-glossary")
+        .expect("the working copy answers, rather than an ambiguity being reported");
+    assert_eq!(
+        located.root,
+        std::fs::canonicalize(publisher.root()).unwrap(),
+        "the working copy should win over the store entry"
+    );
+}
+
+#[test]
 fn an_artifact_whose_bytes_do_not_match_is_never_unpacked() {
     let registry = temp();
     let publisher = Publisher::new(registry.path());

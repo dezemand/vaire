@@ -518,23 +518,39 @@ impl Catalog {
     }
 
     /// Every recorded store entry, by name then version.
+    ///
+    /// A row whose version text does not parse is **dropped, never defaulted**. Reporting it
+    /// as `0.0.0` would be a fabricated fact with teeth: retention collects the versions of
+    /// pinned rows and protects exactly those, so a pinned row reading as `0.0.0` would stop
+    /// protecting the version it names and the next pull would delete it. The store's own
+    /// `source.toml` is the fact here, so losing an index row costs a walk.
     pub fn releases(&self) -> Result<Vec<StoreEntry>> {
-        self.db.query_rows(
+        let rows = self.db.query_rows(
             "SELECT name, version, registry, pinned, last_used
                FROM releases WHERE origin = 'store' ORDER BY name, version",
             (),
             |row| {
-                Ok(StoreEntry {
-                    name: col_text(row, 0)?,
-                    version: col_text(row, 1)?
-                        .parse()
-                        .unwrap_or(crate::model::Version::new(0, 0, 0)),
-                    registry: col_opt_text(row, 2)?,
-                    pinned: col_i64(row, 3)? != 0,
-                    last_used: col_opt_i64(row, 4)?,
-                })
+                Ok((
+                    col_text(row, 0)?,
+                    col_text(row, 1)?,
+                    col_opt_text(row, 2)?,
+                    col_i64(row, 3)? != 0,
+                    col_opt_i64(row, 4)?,
+                ))
             },
-        )
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(name, version, registry, pinned, last_used)| {
+                Some(StoreEntry {
+                    name,
+                    version: version.parse().ok()?,
+                    registry,
+                    pinned,
+                    last_used,
+                })
+            })
+            .collect())
     }
 
     /// Forget one store entry. Called when the store copy goes, so the index does not

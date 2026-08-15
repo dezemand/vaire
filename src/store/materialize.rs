@@ -33,7 +33,6 @@
 //! you can read is worth more than a pull that refused.
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::Config;
@@ -84,10 +83,15 @@ pub fn materialize(
         .parent()
         .ok_or_else(|| VaireError::Config(format!("{} has no parent", destination.display())))?;
     std::fs::create_dir_all(parent)?;
+    // Unique per **call**, not per process: two threads materializing one version would
+    // otherwise share a staging path, and each would delete the other's — which the module
+    // doc above claims cannot happen.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let staging = parent.join(format!(
-        ".staging-{}-{}",
+        ".staging-{}-{}-{}",
         std::process::id(),
-        artifact.version
+        artifact.version,
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let _cleanup = RemoveOnDrop(staging.clone());
     if staging.exists() {
@@ -263,9 +267,12 @@ fn unpack(artifact: &Path, into: &Path, name: &str, version: crate::model::Versi
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut bytes = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut bytes)?;
-        std::fs::write(&target, bytes)?;
+        // Streamed, not buffered. `entry.size()` is a number the **archive** supplies, so
+        // pre-allocating it hands an attacker-controlled allocation of up to the cap above
+        // — and a legitimate large attachment would cost the same memory for nothing.
+        // `io::copy` keeps this flat, and drops the `as usize` truncation on 32-bit targets.
+        let mut file = std::fs::File::create(&target)?;
+        std::io::copy(&mut entry, &mut file)?;
     }
     Ok(())
 }
