@@ -485,11 +485,27 @@ pub fn ignored_paths(
 /// pack` pins artifact entry mtimes to this, so the same commit always produces the same
 /// bytes (registry.md §5) while extracted files still carry a meaningful date.
 pub fn commit_epoch(repo_root: &Path) -> Result<Option<i64>> {
-    let out = run(repo_root, &["show", "-s", "--format=%ct", "HEAD"])?;
+    commit_epoch_at(repo_root, "HEAD")
+}
+
+/// [`commit_epoch`] for an arbitrary revision — what `vaire push` pins entry mtimes to
+/// when it re-packs a release tag, so a tag packed today is byte-identical to the artifact
+/// that tag produced when it was cut (amendment 15).
+pub fn commit_epoch_at(repo_root: &Path, rev: &str) -> Result<Option<i64>> {
+    require_safe_rev(rev)?;
+    let out = run(
+        repo_root,
+        &["show", "-s", "--format=%ct", "--end-of-options", rev],
+    )?;
     if !out.status.success() {
         return Ok(None);
     }
-    Ok(stdout_trimmed(&out).parse().ok())
+    // An annotated tag prints its own header and message before the formatted commit line,
+    // so the timestamp is the last integer in the output rather than the whole of it.
+    Ok(stdout_trimmed(&out)
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().parse::<i64>().ok()))
 }
 
 /// Whether the working tree differs from HEAD (advisory — drives `vaire pack`'s

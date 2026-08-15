@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::commands::Ctx;
+use crate::config::Config;
 use crate::corpus::markdown::{Fences, mask_code_spans};
 use crate::corpus::repo::Repo;
 use crate::corpus::scan::Scanner;
@@ -81,14 +82,17 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
     let head_files = git::list_files_at_head(root)?;
     let head_set: BTreeSet<&str> = head_files.iter().map(String::as_str).collect();
     let scanner = Scanner::from_config(&ctx.config)?;
-    let mut selected: BTreeSet<String> = BTreeSet::new();
-    selected.insert("knowledge.toml".to_string());
-    for file in &head_files {
-        if scanner.is_match(Path::new(file)) {
-            selected.insert(file.clone());
-        }
-    }
-    let payload = collect_referenced_files(root, &selected, &head_set, &scanner, &mut warnings)?;
+    let selected = select_files(&head_files, &scanner);
+    let payload = collect_referenced_files(
+        root,
+        "HEAD",
+        Absent::AskGitignore,
+        &selected,
+        &head_set,
+        &scanner,
+        &mut warnings,
+    )?;
+    let mut selected = selected;
     selected.extend(payload);
 
     // ---- the artifact index (registry.md §5.1) -----------------------------------------
@@ -155,6 +159,163 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
     })
 }
 
+/// The artifact for a **released tag**, rebuilt from that tag's committed tree.
+///
+/// This is what makes `.vaire/dist/` a cache rather than a requirement (amendment 15):
+/// `vaire push` works from a fresh clone because a tag carries everything the artifact is
+/// made of. Three differences from [`run`], each of them a consequence of packing history
+/// rather than the present:
+///
+/// * **No embedder.** The index is built by [`build::snapshot`], which reads a rev straight
+///   into a scratch database with no vectors — and the publish default is stripped
+///   artifacts anyway (§11), so there was nothing for an embedder to contribute. CI
+///   therefore needs no embedding configuration to publish (amendment 21).
+/// * **No `check` gate.** `vaire release` ran it before it created the tag. Re-running it
+///   here would judge an old tree by today's rules, and a tag cannot be edited in response.
+/// * **Nothing is written into the package.** The staging files live in `dest_dir`, so
+///   packing a tag never touches the working checkout or its index.
+/// * **A referenced file the tag does not carry is a warning, not a refusal**
+///   ([`Absent::Warn`]). [`run`] separates "declared local-only" from "forgotten
+///   `git add`" by asking `git check-ignore`, which only ever answers for the working
+///   tree — so asking it here would make publishing a release depend on today's
+///   `.gitignore`, and the tag cannot be edited in response to either answer.
+pub fn at_rev(root: &Path, rev: &str, dest_dir: &Path) -> Result<RevArtifact> {
+    let manifest = git::show_many_at(root, rev, &["knowledge.toml".to_string()])?
+        .into_iter()
+        .next()
+        .flatten()
+        .ok_or_else(|| {
+            VaireError::Pack(format!(
+                "{rev} has no knowledge.toml — it is not a package tree"
+            ))
+        })?;
+    // Parsed from the tag, never from the working tree: the manifest is the artifact's
+    // identity and its file-selection rules, and both are properties of the release.
+    let config = Config::parse(&manifest, &format!("{rev}:knowledge.toml"))?;
+
+    let files = git::list_files_at(root, rev)?;
+    let file_set: BTreeSet<&str> = files.iter().map(String::as_str).collect();
+    let scanner = Scanner::from_config(&config)?;
+    let selected = select_files(&files, &scanner);
+    let mut warnings = Vec::new();
+    let payload = collect_referenced_files(
+        root,
+        rev,
+        Absent::Warn,
+        &selected,
+        &file_set,
+        &scanner,
+        &mut warnings,
+    )?;
+    let mut selected = selected;
+    selected.extend(payload);
+
+    std::fs::create_dir_all(dest_dir)?;
+    let top = format!("{}-{}", config.name, config.version);
+    let file_name = format!("{top}.tgz");
+    let pid = std::process::id();
+    let snapshot_db = dest_dir.join(format!(".push-snapshot-{pid}.db"));
+    let staging_db = dest_dir.join(format!(".push-index-{pid}.db"));
+    let tmp = dest_dir.join(format!(".{file_name}.{pid}.tmp"));
+    let _scratch = RemoveOnDrop(
+        [&snapshot_db, &staging_db]
+            .iter()
+            .flat_map(|db| {
+                ["", "-wal", "-shm"]
+                    .map(|suffix| std::path::PathBuf::from(format!("{}{suffix}", db.display())))
+            })
+            .chain([tmp.clone()])
+            .collect(),
+    );
+
+    build::snapshot(root, &config, rev, &snapshot_db)?;
+    // Always stripped. A released artifact's checksum has to be reproducible for the
+    // lockfile to mean anything, and vectors are consumer configuration (§11).
+    export::export_artifact_index(
+        &snapshot_db,
+        &staging_db,
+        false,
+        concat!("vaire ", env!("CARGO_PKG_VERSION")),
+    )?;
+
+    let git_paths: Vec<String> = selected.iter().cloned().collect();
+    let blobs = git::show_many_at_bytes(root, rev, &git_paths)?;
+    let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for (path, blob) in git_paths.iter().zip(blobs) {
+        let bytes = blob.ok_or_else(|| {
+            VaireError::Pack(format!(
+                "{path} is listed at {rev} but has no readable blob"
+            ))
+        })?;
+        entries.insert(path.clone(), bytes);
+    }
+    entries.insert(".vaire/index.db".to_string(), std::fs::read(&staging_db)?);
+
+    let epoch = git::commit_epoch_at(root, rev)?.unwrap_or(0).max(0) as u64;
+    write_archive(&tmp, &top, &entries, epoch)?;
+    let artifact = dest_dir.join(&file_name);
+    std::fs::rename(&tmp, &artifact)?;
+
+    Ok(RevArtifact {
+        name: config.name,
+        version: config.version,
+        description: config.description,
+        dependencies: config.dependencies,
+        sha256: crate::hash::sha256_file(&artifact)?,
+        size_bytes: std::fs::metadata(&artifact)?.len(),
+        entries: entries.len(),
+        path: artifact,
+        warnings,
+    })
+}
+
+/// What to do about a referenced file the packed tree does not carry.
+///
+/// The distinction exists because `git check-ignore` only ever answers for the **working
+/// tree**. Asking it about a tag would make publishing a release depend on today's
+/// `.gitignore`: a rule added since would turn an old tag's broken link into a warning, or
+/// its removal turn a declared-local-only target into a failure. Either way the tag is what
+/// it is, and no answer to that question can be acted on.
+#[derive(Clone, Copy)]
+enum Absent {
+    /// Packing the working tree: its ignore rules are the right thing to ask, and they
+    /// separate "declared local-only" from "forgotten `git add`".
+    AskGitignore,
+    /// Packing history. Every absent target is reported and the artifact still builds —
+    /// the alternative is refusing to publish a release nobody can edit in response, which
+    /// would make the tool's own past permanently unpublishable.
+    Warn,
+}
+
+/// An artifact rebuilt from a tag, plus what the wire needs to describe it.
+///
+/// `dependencies` rides along because the index document carries them (§8.3, decision 9):
+/// transitive resolution must never download an artifact to read a manifest, so `push`
+/// reads them here, from the manifest it already parsed.
+pub struct RevArtifact {
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub dependencies: std::collections::BTreeMap<String, String>,
+    pub path: std::path::PathBuf,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub entries: usize,
+    pub warnings: Vec<String>,
+}
+
+/// The corpus files of a tree: the manifest, plus whatever the include/exclude globs select.
+fn select_files(files: &[String], scanner: &Scanner) -> BTreeSet<String> {
+    let mut selected: BTreeSet<String> = BTreeSet::new();
+    selected.insert("knowledge.toml".to_string());
+    for file in files {
+        if scanner.is_match(Path::new(file)) {
+            selected.insert(file.clone());
+        }
+    }
+    selected
+}
+
 /// Grow the artifact's payload from references, validating every relative link.
 ///
 /// **Inclusion is by reference, not location** (registry.md §5.2): every relative
@@ -167,8 +328,13 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
 /// package root) **fails the pack** — a typo or a forgotten `git add`. A trailing-`/`
 /// target is a directory link: satisfied by any shipped file under it, but never an
 /// inclusion demand — a link asks for a file, not a tree.
+///
+/// `absent` decides only the middle of those: what to do about a target the tree does not
+/// carry (see [`Absent`]).
 fn collect_referenced_files(
     root: &Path,
+    rev: &str,
+    absent: Absent,
     corpus: &BTreeSet<String>,
     head_set: &BTreeSet<&str>,
     scanner: &Scanner,
@@ -191,7 +357,7 @@ fn collect_referenced_files(
     // Breadth-first over the reference graph, one Git batch per frontier.
     let mut frontier: Vec<String> = visited_md.iter().cloned().collect();
     while !frontier.is_empty() {
-        let contents = git::show_many_at_head(root, &frontier)?;
+        let contents = git::show_many_at(root, rev, &frontier)?;
         let mut next = Vec::new();
         for (path, content) in frontier.iter().zip(contents) {
             let Some(content) = content else { continue };
@@ -249,20 +415,32 @@ fn collect_referenced_files(
         }
     }
 
-    // The tiebreaker for a target absent from HEAD: the repository's own ignore rules.
-    // A gitignored target was *declared* local-only by the author — warn. An unignored
-    // one is a typo or a forgotten `git add` — fail.
-    if !missing.is_empty() {
-        let ask: Vec<String> = missing.iter().map(|(_, _, _, p, _)| p.clone()).collect();
-        let ignored = git::ignored_paths(root, &ask)?;
-        for (path, line, target, asked, kind) in missing {
-            if ignored.contains(&asked) {
+    // The tiebreaker for a target absent from the tree: the repository's own ignore rules.
+    // A gitignored target was *declared* local-only by the author — warn. An unignored one
+    // is a typo or a forgotten `git add` — fail. Only available when the working tree is
+    // the thing being packed; see [`Absent`].
+    match (missing.is_empty(), absent) {
+        (true, _) => {}
+        (false, Absent::AskGitignore) => {
+            let ask: Vec<String> = missing.iter().map(|(_, _, _, p, _)| p.clone()).collect();
+            let ignored = git::ignored_paths(root, &ask)?;
+            for (path, line, target, asked, kind) in missing {
+                if ignored.contains(&asked) {
+                    warnings.push(format!(
+                        "{path}:{line} links to {target}, which is gitignored (local-only by \
+                         this package's own declaration) and not distributed"
+                    ));
+                } else {
+                    violations.push(format!("{path}:{line} → {target} (no such {kind} at HEAD)"));
+                }
+            }
+        }
+        (false, Absent::Warn) => {
+            for (path, line, target, _, kind) in missing {
                 warnings.push(format!(
-                    "{path}:{line} links to {target}, which is gitignored (local-only by \
-                     this package's own declaration) and not distributed"
+                    "{path}:{line} links to {target}, and no such {kind} is committed at \
+                     {rev}; it is not in the artifact"
                 ));
-            } else {
-                violations.push(format!("{path}:{line} → {target} (no such {kind} at HEAD)"));
             }
         }
     }

@@ -211,9 +211,10 @@ pub enum Command {
         /// Release from a branch that is not the repository's mainline.
         #[arg(long = "allow-branch")]
         allow_branch: bool,
-        /// Reserved: upload to a registry after releasing. Transport is `vaire push`,
-        /// which does not exist yet.
-        #[arg(long, hide = true)]
+        /// Publish the release to a registry once it is cut. A convenience over the
+        /// `release`/`push` split, never a merge of it: the tag exists either way, so a
+        /// failed upload is retried with `vaire push` and costs nothing.
+        #[arg(long)]
         push: bool,
         /// Reserved: back-patch an older major line.
         #[arg(long, hide = true)]
@@ -247,6 +248,48 @@ pub enum Command {
     Catalog {
         #[command(subcommand)]
         action: CatalogAction,
+    },
+
+    /// Upload released versions to a registry. Idempotent: what is already published is
+    /// skipped, and every artifact is rebuilt from its own release tag, so this works from
+    /// a fresh clone.
+    #[cfg(feature = "pack")]
+    Push {
+        /// Publish only this version (default: every release tag the registry lacks).
+        version: Option<String>,
+        /// Which configured registry. Required only when several are configured and none
+        /// has the highest priority.
+        #[arg(long)]
+        registry: Option<String>,
+        /// Who may see and fetch this package here: open | restricted | unlisted. Sticky —
+        /// omitting it keeps whatever the registry already records.
+        #[arg(long)]
+        access: Option<String>,
+        /// Where to ask for access, carried verbatim in the refusal a restricted package
+        /// produces (e.g. "request via #team-powertrain-knowledge").
+        #[arg(long = "access-hint")]
+        access_hint: Option<String>,
+        /// Report what would be published; upload nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+
+    /// Mark a published release as one nobody should newly adopt. The artifact stays put,
+    /// so anything already pinned to it keeps resolving.
+    Yank {
+        /// `<name>@<version>`, e.g. `acme-core@1.4.2`.
+        spec: String,
+        #[arg(long)]
+        registry: Option<String>,
+        /// Clear the flag instead of setting it.
+        #[arg(long)]
+        undo: bool,
+    },
+
+    /// The remote registries this machine publishes to and pulls from.
+    Registry {
+        #[command(subcommand)]
+        action: RegistryAction,
     },
 
     /// Configure global user settings. With no subcommand, opens an interactive prompt.
@@ -322,6 +365,35 @@ pub enum CatalogAction {
     /// Walk a directory once and record every package under it — the bulk import for a
     /// tree you already have.
     Scan { dir: PathBuf },
+}
+
+/// Configuring remotes. A noun group, like `catalog` — which is what keeps the three
+/// "add"s unambiguous: `add` is a dependency, `catalog add` a package on this machine,
+/// `registry add` a remote.
+#[derive(Debug, Subcommand)]
+pub enum RegistryAction {
+    /// Configure a registry. The location may be a URL or a directory (`./registry`),
+    /// which is all a static registry ever is.
+    Add {
+        name: String,
+        url: String,
+        /// Fan-out order, and the tiebreaker when a command that needs one registry is not
+        /// told which. Higher first.
+        #[arg(long, default_value_t = 0)]
+        priority: i64,
+        /// Keep this registry out of `vaire search`'s default fan-out.
+        #[arg(long = "no-search")]
+        no_search: bool,
+    },
+
+    /// Every configured registry.
+    List,
+
+    /// Stop asking a registry. Nothing already pulled from it is forgotten.
+    Rm { name: String },
+
+    /// What a registry is, what it can do, and what it holds.
+    Show { name: String },
 }
 
 /// The sections `vaire configure <section>` can set non-interactively. Bare `vaire

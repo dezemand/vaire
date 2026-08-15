@@ -23,8 +23,13 @@ pub const DEFAULT_RELEASE_TYPE: &str = "release";
 pub const DEFAULT_RELEASE_DIR: &str = "releases";
 
 /// A parsed `MAJOR.MINOR.PATCH`. Ordering is numeric, component by component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
-#[serde(into = "String")]
+///
+/// Serde round-trips through the string form, in both directions: the registry wire
+/// contract writes `"version": "1.4.2"`, and reading it back as a [`Version`] rather than a
+/// `String` means a malformed version in a published index document is caught at the
+/// document boundary instead of somewhere downstream that assumed it had parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(into = "String", try_from = "String")]
 pub struct Version {
     pub major: u64,
     pub minor: u64,
@@ -79,7 +84,15 @@ impl FromStr for Version {
             let part = parts.next().ok_or(ParseVersionError)?;
             // Reject "+1", "1 ", "０" and every other thing `u64::from_str` would
             // otherwise accept or that would round-trip differently.
-            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            //
+            // Leading zeroes are in that last category and matter more than they look:
+            // `01.4.2` would parse and then *serialize back* as `1.4.2`, so a registry
+            // index document could carry two spellings of one release identity — and a
+            // checksum lookup keyed on the wrong one finds nothing. One version, one text.
+            if part.is_empty()
+                || !part.bytes().all(|b| b.is_ascii_digit())
+                || (part.len() > 1 && part.starts_with('0'))
+            {
                 return Err(ParseVersionError);
             }
             part.parse::<u64>().map_err(|_| ParseVersionError)
@@ -113,6 +126,14 @@ impl fmt::Display for Version {
 impl From<Version> for String {
     fn from(v: Version) -> String {
         v.to_string()
+    }
+}
+
+impl TryFrom<String> for Version {
+    type Error = ParseVersionError;
+
+    fn try_from(s: String) -> Result<Version, ParseVersionError> {
+        s.parse()
     }
 }
 
@@ -161,6 +182,22 @@ mod tests {
             assert!(bad.parse::<Version>().is_err(), "{bad} should not parse");
         }
         assert_eq!("0.0.0".parse::<Version>().unwrap(), Version::new(0, 0, 0));
+    }
+
+    #[test]
+    fn a_version_has_exactly_one_spelling() {
+        // A leading zero parses fine and serializes back *differently*, which on the wire
+        // means one release with two identities in one index document.
+        for padded in ["01.4.2", "1.04.2", "1.4.02", "00.0.0"] {
+            assert!(
+                padded.parse::<Version>().is_err(),
+                "{padded} must not parse — it would round-trip as something else"
+            );
+        }
+        assert!(
+            "0.4.0".parse::<Version>().is_ok(),
+            "a bare zero is canonical"
+        );
     }
 
     #[test]

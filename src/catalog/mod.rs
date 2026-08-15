@@ -161,6 +161,31 @@ impl Origin {
     }
 }
 
+/// A configured remote registry (registry.v2.md §8, §12).
+///
+/// The one row in this catalog that is **not** an observation: nobody stumbles across a
+/// registry, someone configures it. That is why there is no state machine here and no
+/// ambient registration — a registry is present because it was named, and it leaves when it
+/// is removed.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RegistryRow {
+    /// What this machine calls it. Local: two people may know one bucket by two names.
+    pub name: String,
+    pub url: String,
+    /// Which client speaks to it — `static` today, `api` when the mediating service exists.
+    pub kind: String,
+    /// Fan-out order, and the tiebreaker when a command that needs *one* registry is not
+    /// told which. Higher first.
+    pub priority: i64,
+    /// Whether `vaire search` reaches this registry without being asked to (§10). No reader
+    /// yet — the fan-out engine arrives with the store — but the column is written now so
+    /// the setting does not have to be re-collected later.
+    pub search_by_default: bool,
+}
+
+/// The registry kinds this client can construct.
+pub const KIND_STATIC: &str = "static";
+
 /// One observation of a package on this machine.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Sighting {
@@ -382,6 +407,63 @@ impl Catalog {
             out.push((sighting.name, sighting.path));
         }
         Ok(out)
+    }
+
+    // ---- registries (registry.v2.md §8) -----------------------------------------------
+
+    /// Configure a registry, or update one already configured under this name.
+    ///
+    /// Keyed by the local name rather than by the URL, deliberately: re-pointing `central`
+    /// at a new bucket should move the name, not leave two rows racing to be it.
+    pub fn add_registry(&self, row: &RegistryRow) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO registries(name, url, kind, priority, search_by_default)
+                  VALUES(?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(name) DO UPDATE SET
+                  url               = excluded.url,
+                  kind              = excluded.kind,
+                  priority          = excluded.priority,
+                  search_by_default = excluded.search_by_default",
+            turso::params![
+                row.name.as_str(),
+                row.url.as_str(),
+                row.kind.as_str(),
+                row.priority,
+                i64::from(row.search_by_default),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every configured registry, highest priority first and then by name — the order a
+    /// fan-out would ask them in, so listing and querying agree.
+    pub fn registries(&self) -> Result<Vec<RegistryRow>> {
+        self.db.query_rows(
+            "SELECT name, url, kind, priority, search_by_default
+               FROM registries ORDER BY priority DESC, name",
+            (),
+            |row| {
+                Ok(RegistryRow {
+                    name: col_text(row, 0)?,
+                    url: col_text(row, 1)?,
+                    kind: col_text(row, 2)?,
+                    priority: col_i64(row, 3)?,
+                    search_by_default: col_i64(row, 4)? != 0,
+                })
+            },
+        )
+    }
+
+    /// Forget a registry. Returns whether a row went.
+    ///
+    /// Nothing cascades: releases already pulled from it stay in the store, because they
+    /// are on this disk and still readable. Removing a registry says "stop asking here",
+    /// never "unlearn what it told me".
+    pub fn forget_registry(&self, name: &str) -> Result<bool> {
+        Ok(self
+            .db
+            .execute("DELETE FROM registries WHERE name = ?1", [name])?
+            > 0)
     }
 
     /// Mark a path `missing` (it did not answer) or `live` (it did).

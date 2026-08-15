@@ -130,6 +130,42 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         return Ok(ExitCode::Success);
     }
 
+    // Registries are machine-level configuration, like the catalog: usable from anywhere,
+    // and never needing a package to stand in.
+    if let Command::Registry { action } = cli.command {
+        let home = vaire::userconfig::vaire_home();
+        use vaire::cli::RegistryAction;
+        match action {
+            RegistryAction::Add {
+                name,
+                url,
+                priority,
+                no_search,
+            } => emit(
+                &commands::registry::add(&home, &name, &url, priority, !no_search)?,
+                json,
+            ),
+            RegistryAction::List => emit(&commands::registry::list(&home)?, json),
+            RegistryAction::Rm { name } => emit(&commands::registry::remove(&home, &name)?, json),
+            RegistryAction::Show { name } => emit(&commands::registry::show(&home, &name)?, json),
+        }
+        return Ok(ExitCode::Success);
+    }
+
+    // `yank` acts on a registry, not on a corpus: after a bad publish, the package whose
+    // release is being withdrawn is often not the directory you are standing in.
+    if let Command::Yank {
+        spec,
+        registry,
+        undo,
+    } = &cli.command
+    {
+        let home = vaire::userconfig::vaire_home();
+        let out = commands::yank::run(&home, spec, registry.as_deref(), *undo)?;
+        emit(&out, json);
+        return Ok(ExitCode::Success);
+    }
+
     // `mcp` builds its own long-lived context and never returns output. Outside any
     // package it serves the rootless session, which is the point of exposing it that way:
     // an agent can be pointed at the machine rather than at one checkout.
@@ -267,15 +303,8 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             push,
             onto,
         } => {
-            // Reserved grammar: the flags exist so the split they belong to has somewhere
-            // to grow, and are rejected rather than silently ignored.
-            if push {
-                return Err(VaireError::Usage(
-                    "`--push` is not implemented yet: releasing is a git act, and \
-                     uploading is `vaire push`, which arrives with the registry client"
-                        .into(),
-                ));
-            }
+            // Reserved grammar: the flag exists so the split it belongs to has somewhere
+            // to grow, and is rejected rather than silently ignored.
             if onto.is_some() {
                 return Err(VaireError::Usage(
                     "`--onto` (back-patching an older major line) is reserved, not yet \
@@ -294,22 +323,84 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 },
             )?;
             let blocked = out.status == vaire::output::ReleaseStatus::Blocked;
+            let released = out.status == vaire::output::ReleaseStatus::Released;
             emit(&out, json);
             if blocked {
                 // Not a failure: a decision waiting on a maintainer. Its own code so a
                 // pipeline can report it as pending rather than broken.
                 return Ok(ExitCode::ReleaseBlocked);
             }
+            // `--push` is a convenience over the split, never a merge of it: the release
+            // has already been committed and tagged by the time this runs, so a failed
+            // upload leaves a perfectly good tag that `vaire push` will publish on its own.
+            // Nothing to publish (a dry run, or a no-op release) means nothing to do.
+            #[cfg(feature = "pack")]
+            if push && released {
+                let out = commands::push::run(
+                    &ctx,
+                    commands::push::Options {
+                        version: None,
+                        registry: None,
+                        access: None,
+                        access_hint: None,
+                        dry_run: false,
+                    },
+                )?;
+                let failed = !out.failed.is_empty();
+                emit(&out, json);
+                if failed {
+                    return Ok(ExitCode::Generic);
+                }
+            }
+            #[cfg(not(feature = "pack"))]
+            // Not gated on `released`, unlike the `pack` build above: there the guard means
+            // "nothing was cut, so there is nothing to upload", and here the flag can never
+            // do anything at all. Accepting it silently on a dry run would teach nothing.
+            if push {
+                return Err(VaireError::Usage(
+                    "`--push` needs the `pack` feature: an artifact has to exist before it \
+                     can be uploaded"
+                        .into(),
+                ));
+            }
         }
         #[cfg(feature = "pack")]
         Command::Pack { no_embeddings } => {
             emit(&commands::pack::run(&ctx, no_embeddings)?, json);
+        }
+        #[cfg(feature = "pack")]
+        Command::Push {
+            version,
+            registry,
+            access,
+            access_hint,
+            dry_run,
+        } => {
+            let out = commands::push::run(
+                &ctx,
+                commands::push::Options {
+                    version: version.as_deref(),
+                    registry: registry.as_deref(),
+                    access: access.as_deref(),
+                    access_hint: access_hint.as_deref(),
+                    dry_run,
+                },
+            )?;
+            let failed = !out.failed.is_empty();
+            emit(&out, json);
+            if failed {
+                // Some versions did not publish. Reported per version above; the exit code
+                // is what a pipeline branches on.
+                return Ok(ExitCode::Generic);
+            }
         }
         Command::Deps => {
             emit(&commands::deps::run(&ctx)?, json);
         }
         Command::Init { .. }
         | Command::Catalog { .. }
+        | Command::Registry { .. }
+        | Command::Yank { .. }
         | Command::Mcp
         | Command::Configure { .. }
         | Command::Add { .. }
