@@ -90,8 +90,22 @@ impl Store {
     }
 
     /// Where `name` at `version` lives, whether or not it is there.
-    pub fn entry(&self, name: &str, version: Version) -> PathBuf {
-        self.root.join(name).join(version.to_string())
+    ///
+    /// `None` for a name that is not a safe path segment. The store is the one place a
+    /// declared name becomes a directory under the user's home, and a name arrives here from
+    /// a manifest, a lockfile, or a command line — none of which this crate wrote. The
+    /// registry client checks the same grammar before it builds a URL; checking it here too
+    /// is not redundancy but the second half of the same invariant, since the store is
+    /// consulted *before* any registry is asked.
+    pub fn entry(&self, name: &str, version: Version) -> Option<PathBuf> {
+        Some(self.package_dir(name)?.join(version.to_string()))
+    }
+
+    /// The directory holding every stored version of `name`, or `None` if the name is not
+    /// one this store will construct a path from.
+    fn package_dir(&self, name: &str) -> Option<PathBuf> {
+        crate::registry::wire::checked_name(name).ok()?;
+        Some(self.root.join(name))
     }
 
     /// Whether a **finished** entry is there.
@@ -100,7 +114,8 @@ impl Store {
     /// mid-rename or after an interrupted removal, and half an entry must never be
     /// resolvable.
     pub fn has(&self, name: &str, version: Version) -> bool {
-        self.entry(name, version).join(SOURCE_FILE).is_file()
+        self.entry(name, version)
+            .is_some_and(|entry| entry.join(SOURCE_FILE).is_file())
     }
 
     /// Whether `path` is inside this store — the test the ensure pass uses to leave an
@@ -126,7 +141,10 @@ impl Store {
     /// resolution falls back to when the two disagree.
     pub fn versions(&self, name: &str) -> Vec<Version> {
         let mut versions: Vec<Version> = Vec::new();
-        let Ok(entries) = std::fs::read_dir(self.root.join(name)) else {
+        let Some(package_dir) = self.package_dir(name) else {
+            return versions;
+        };
+        let Ok(entries) = std::fs::read_dir(package_dir) else {
             return versions;
         };
         for entry in entries.flatten() {
@@ -160,8 +178,10 @@ impl Store {
             let name = entry.file_name().to_string_lossy().into_owned();
             // The highest, because a store holds at most one entry per major line and a
             // reader asking "what does this machine know" wants the current answer.
-            if let Some(version) = self.versions(&name).into_iter().max() {
-                out.push((name.clone(), self.entry(&name, version)));
+            if let Some(version) = self.versions(&name).into_iter().max()
+                && let Some(entry) = self.entry(&name, version)
+            {
+                out.push((name.clone(), entry));
             }
         }
         out.sort();
@@ -170,7 +190,10 @@ impl Store {
 
     /// Read an entry's `source.toml`.
     pub fn source(&self, name: &str, version: Version) -> Result<Source> {
-        let path = self.entry(name, version).join(SOURCE_FILE);
+        let path = self
+            .entry(name, version)
+            .ok_or_else(|| VaireError::Config(format!("'{name}' is not a usable package name")))?
+            .join(SOURCE_FILE);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| VaireError::Config(format!("{}: {e}", path.display())))?;
         toml::from_str(&text).map_err(|e| VaireError::Config(format!("{}: {e}", path.display())))
@@ -182,7 +205,9 @@ impl Store {
     /// reasons: retention replacing a version within its major line, and `gc`. A link
     /// pointing at what went heals the way every broken link heals — by re-resolving.
     pub fn remove(&self, name: &str, version: Version) -> Result<()> {
-        let entry = self.entry(name, version);
+        let Some(entry) = self.entry(name, version) else {
+            return Ok(());
+        };
         if !entry.exists() {
             return Ok(());
         }
@@ -190,7 +215,9 @@ impl Store {
         std::fs::remove_dir_all(&entry)?;
         // Leave no empty `<name>/` behind: it would make `packages()` report a package with
         // nothing in it.
-        let _ = std::fs::remove_dir(self.root.join(name));
+        if let Some(package_dir) = self.package_dir(name) {
+            let _ = std::fs::remove_dir(package_dir);
+        }
         Ok(())
     }
 }
@@ -237,7 +264,7 @@ mod tests {
 
     fn finished(store: &Store, name: &str, version: &str) {
         let version: Version = version.parse().unwrap();
-        let entry = store.entry(name, version);
+        let entry = store.entry(name, version).expect("a usable name");
         std::fs::create_dir_all(entry.join(".vaire")).unwrap();
         std::fs::write(entry.join(SOURCE_FILE), "").unwrap();
     }
@@ -245,7 +272,9 @@ mod tests {
     #[test]
     fn only_a_finished_entry_counts() {
         let (_home, store) = store();
-        let unfinished = store.entry("acme-core", Version::new(1, 0, 0));
+        let unfinished = store
+            .entry("acme-core", Version::new(1, 0, 0))
+            .expect("a usable name");
         std::fs::create_dir_all(&unfinished).unwrap();
         // A directory with no `source.toml` is an interrupted materialization, and must
         // never be resolvable.
@@ -272,6 +301,21 @@ mod tests {
             Some(Version::new(2, 0, 0))
         );
         assert_eq!(store.satisfying("acme-core", "^3"), None);
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_path_segment_yields_no_store_path() {
+        let (_home, store) = store();
+        // The store is where a declared name becomes a directory under the user's home, so
+        // the check belongs here as well as at the registry client — the store is consulted
+        // first, before any registry is asked.
+        for bad in ["../../etc", "a/b", "..", ".hidden", "Acme-Core", ""] {
+            assert!(store.entry(bad, Version::new(1, 0, 0)).is_none(), "{bad:?}");
+            assert!(!store.has(bad, Version::new(1, 0, 0)));
+            assert!(store.versions(bad).is_empty());
+            assert!(store.satisfying(bad, "^1").is_none());
+            assert!(store.remove(bad, Version::new(1, 0, 0)).is_ok());
+        }
     }
 
     #[test]

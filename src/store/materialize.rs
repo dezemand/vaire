@@ -68,7 +68,16 @@ pub fn materialize(
     registry: Option<(&str, &str)>,
     embedder: Option<&dyn Embedder>,
 ) -> Result<Materialized> {
-    let destination = store.entry(&artifact.name, artifact.version);
+    // The name was checked when the registry served it; checked again here because this is
+    // the call that turns it into a directory.
+    let destination = store
+        .entry(&artifact.name, artifact.version)
+        .ok_or_else(|| {
+            VaireError::Config(format!(
+                "'{}' is not a usable package name for the store",
+                artifact.name
+            ))
+        })?;
     if store.has(&artifact.name, artifact.version) {
         return Ok(Materialized {
             path: destination,
