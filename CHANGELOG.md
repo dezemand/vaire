@@ -182,10 +182,11 @@ uses [Semantic Versioning](https://semver.org).
 
   Gated on a clean tree, HEAD on the mainline (`--allow-branch` escapes), the package
   being its own Git repository, and `vaire check` free of violations. Nothing to release
-  is a clean no-op, exit `0`. It never runs `git push` and never uploads: git transport
-  stays the maintainer's, and publishing is `vaire push` (not yet implemented), so a
-  flaky upload re-runs an upload rather than a ritual and CI can publish a tag it did not
-  cut. `--push`/`--onto` are reserved grammar, rejected as not yet implemented.
+  is a clean no-op, exit `0`. It never runs `git push`, and uploads only when asked: git
+  transport stays the maintainer's, and publishing is `vaire push`, so a flaky upload
+  re-runs an upload rather than a ritual and CI can publish a tag it did not cut. `--push`
+  runs that upload once the tag is cut; `--onto` stays reserved grammar, rejected as not
+  yet implemented.
 - **Release records** — the changelog, written as corpus. Each release writes
   `releases/<version>.md`: an entity carrying the date, the bump, and **edges** to what
   was added, changed, and retired, so "which releases touched this entity?" is

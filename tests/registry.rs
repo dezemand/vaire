@@ -348,6 +348,48 @@ fn access_is_sticky_until_it_is_changed() {
 }
 
 #[test]
+fn a_publish_that_the_index_refuses_is_not_reported_as_success() {
+    let dir = temp();
+    let scratch = temp();
+    let registry = registry(dir.path());
+    publish(
+        &registry,
+        &artifact(scratch.path(), "a.tgz", b"one"),
+        "1.0.0",
+    )
+    .unwrap();
+
+    // The artifact deleted out of band — a bucket lifecycle rule, a stray `rm`. The
+    // create-only write now succeeds with *new* bytes while the index still holds the old
+    // digest, so accepting this would make every later fetch of 1.0.0 fail its checksum
+    // forever, after a publish that claimed to work.
+    std::fs::remove_file(
+        dir.path()
+            .join("v1/artifacts/acme-core/acme-core-1.0.0.tgz"),
+    )
+    .unwrap();
+    let republished = publish(
+        &registry,
+        &artifact(scratch.path(), "b.tgz", b"different bytes"),
+        "1.0.0",
+    );
+    assert!(
+        matches!(republished, Err(RegistryError::VersionExists { .. })),
+        "{republished:?}"
+    );
+    let index = index_doc(dir.path(), "acme-core");
+    assert_eq!(index.releases.len(), 1);
+    assert_eq!(
+        index.releases[0].sha256,
+        {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(b"one"))
+        },
+        "the index still describes the release it always described"
+    );
+}
+
+#[test]
 fn a_missing_package_is_not_found_rather_than_an_empty_answer() {
     let dir = temp();
     let scratch = temp();
@@ -514,6 +556,55 @@ fn push_rebuilds_artifacts_from_tags_so_a_fresh_clone_can_publish() {
     assert_eq!(
         out.published[0].sha256, expected,
         "the same tag must pack to the same bytes anywhere"
+    );
+}
+
+#[test]
+fn a_version_published_by_someone_else_mid_push_counts_as_already_there() {
+    let c = package();
+    let dir = temp();
+    release(&c);
+
+    // The preflight sees an empty registry; by the time the artifact write runs, someone
+    // else has published 1.0.0. Storage refuses the create-only write — and the registry
+    // now holds exactly the immutable release we wanted it to, so this is not a failure.
+    let registry = registry(dir.path());
+    let scratch = temp();
+    publish(
+        &registry,
+        &artifact(scratch.path(), "theirs.tgz", b"published by someone else"),
+        "1.0.0",
+    )
+    .unwrap();
+    // Standing in for the interleaving: the preflight answer is stale by construction,
+    // since `push` asks the registry before it packs.
+    let out = push(&c, dir.path(), options());
+
+    assert!(out.failed.is_empty(), "{:?}", out.failed);
+    assert_eq!(out.already, ["1.0.0"]);
+    assert!(out.published.is_empty());
+}
+
+#[test]
+fn a_registry_name_is_stored_the_way_it_will_be_looked_up() {
+    let c = package();
+    let dir = temp();
+    let ctx = c.ctx();
+    // The name is the primary key, so an untrimmed one would list as `lab` and then fail
+    // every `show`/`rm`/`--registry` that spells it the way it looks.
+    vaire::commands::registry::add(
+        ctx.home(),
+        "  lab  ",
+        &dir.path().display().to_string(),
+        0,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        vaire::commands::registry::find(ctx.home(), "lab")
+            .unwrap()
+            .name,
+        "lab"
     );
 }
 

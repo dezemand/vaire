@@ -250,8 +250,12 @@ impl Transport for FileTransport {
         let target = self.resolve(path);
         create_parents(&target)?;
         // Stage first: a rename over the live document is atomic, so no reader ever sees a
-        // half-written index.
-        let staged = target.with_extension(format!("tmp{}", std::process::id()));
+        // half-written index. Unique **per call**, not per process — two threads swapping
+        // one document would otherwise share a staging path, and one `RemoveOnDrop` would
+        // delete the file the other is about to rename.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staged = target.with_extension(format!("tmp{}.{seq}", std::process::id()));
         let _cleanup = RemoveOnDrop(staged.clone());
         {
             let mut file =
@@ -332,7 +336,16 @@ impl Transport for HttpTransport {
         let url = format!("{}/{}", self.base, path.trim_start_matches('/'));
         let response = match self.agent.get(&url).call() {
             Ok(response) => response,
-            Err(ureq::Error::Status(404 | 403, _)) => return Ok(None),
+            Err(ureq::Error::Status(404, _)) => return Ok(None),
+            // Not folded into absence, though it is tempting: a bucket whose objects are
+            // private answers 403 for the descriptor, and reading that as "there is no
+            // registry here" points the user at the wrong problem entirely. The registry
+            // may well be there; this client may not read it.
+            Err(ureq::Error::Status(403, _)) => {
+                return Err(TransportError::Unreachable(format!(
+                    "{url} answered 403 — something is there, but this client may not read it"
+                )));
+            }
             Err(ureq::Error::Status(code, _)) => {
                 return Err(TransportError::Unreachable(format!(
                     "{url} answered {code}"

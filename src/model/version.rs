@@ -84,7 +84,15 @@ impl FromStr for Version {
             let part = parts.next().ok_or(ParseVersionError)?;
             // Reject "+1", "1 ", "０" and every other thing `u64::from_str` would
             // otherwise accept or that would round-trip differently.
-            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            //
+            // Leading zeroes are in that last category and matter more than they look:
+            // `01.4.2` would parse and then *serialize back* as `1.4.2`, so a registry
+            // index document could carry two spellings of one release identity — and a
+            // checksum lookup keyed on the wrong one finds nothing. One version, one text.
+            if part.is_empty()
+                || !part.bytes().all(|b| b.is_ascii_digit())
+                || (part.len() > 1 && part.starts_with('0'))
+            {
                 return Err(ParseVersionError);
             }
             part.parse::<u64>().map_err(|_| ParseVersionError)
@@ -174,6 +182,22 @@ mod tests {
             assert!(bad.parse::<Version>().is_err(), "{bad} should not parse");
         }
         assert_eq!("0.0.0".parse::<Version>().unwrap(), Version::new(0, 0, 0));
+    }
+
+    #[test]
+    fn a_version_has_exactly_one_spelling() {
+        // A leading zero parses fine and serializes back *differently*, which on the wire
+        // means one release with two identities in one index document.
+        for padded in ["01.4.2", "1.04.2", "1.4.02", "00.0.0"] {
+            assert!(
+                padded.parse::<Version>().is_err(),
+                "{padded} must not parse — it would round-trip as something else"
+            );
+        }
+        assert!(
+            "0.4.0".parse::<Version>().is_ok(),
+            "a bare zero is canonical"
+        );
     }
 
     #[test]

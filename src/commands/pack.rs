@@ -83,8 +83,15 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
     let head_set: BTreeSet<&str> = head_files.iter().map(String::as_str).collect();
     let scanner = Scanner::from_config(&ctx.config)?;
     let selected = select_files(&head_files, &scanner);
-    let payload =
-        collect_referenced_files(root, "HEAD", &selected, &head_set, &scanner, &mut warnings)?;
+    let payload = collect_referenced_files(
+        root,
+        "HEAD",
+        Absent::AskGitignore,
+        &selected,
+        &head_set,
+        &scanner,
+        &mut warnings,
+    )?;
     let mut selected = selected;
     selected.extend(payload);
 
@@ -167,10 +174,11 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
 ///   here would judge an old tree by today's rules, and a tag cannot be edited in response.
 /// * **Nothing is written into the package.** The staging files live in `dest_dir`, so
 ///   packing a tag never touches the working checkout or its index.
-///
-/// Broken relative links still refuse the artifact, exactly as in [`run`]: an artifact that
-/// is not self-contained is not publishable regardless of how old it is. `push` reports
-/// that per version and moves on to the next tag.
+/// * **A referenced file the tag does not carry is a warning, not a refusal**
+///   ([`Absent::Warn`]). [`run`] separates "declared local-only" from "forgotten
+///   `git add`" by asking `git check-ignore`, which only ever answers for the working
+///   tree — so asking it here would make publishing a release depend on today's
+///   `.gitignore`, and the tag cannot be edited in response to either answer.
 pub fn at_rev(root: &Path, rev: &str, dest_dir: &Path) -> Result<RevArtifact> {
     let manifest = git::show_many_at(root, rev, &["knowledge.toml".to_string()])?
         .into_iter()
@@ -190,8 +198,15 @@ pub fn at_rev(root: &Path, rev: &str, dest_dir: &Path) -> Result<RevArtifact> {
     let scanner = Scanner::from_config(&config)?;
     let selected = select_files(&files, &scanner);
     let mut warnings = Vec::new();
-    let payload =
-        collect_referenced_files(root, rev, &selected, &file_set, &scanner, &mut warnings)?;
+    let payload = collect_referenced_files(
+        root,
+        rev,
+        Absent::Warn,
+        &selected,
+        &file_set,
+        &scanner,
+        &mut warnings,
+    )?;
     let mut selected = selected;
     selected.extend(payload);
 
@@ -254,6 +269,24 @@ pub fn at_rev(root: &Path, rev: &str, dest_dir: &Path) -> Result<RevArtifact> {
     })
 }
 
+/// What to do about a referenced file the packed tree does not carry.
+///
+/// The distinction exists because `git check-ignore` only ever answers for the **working
+/// tree**. Asking it about a tag would make publishing a release depend on today's
+/// `.gitignore`: a rule added since would turn an old tag's broken link into a warning, or
+/// its removal turn a declared-local-only target into a failure. Either way the tag is what
+/// it is, and no answer to that question can be acted on.
+#[derive(Clone, Copy)]
+enum Absent {
+    /// Packing the working tree: its ignore rules are the right thing to ask, and they
+    /// separate "declared local-only" from "forgotten `git add`".
+    AskGitignore,
+    /// Packing history. Every absent target is reported and the artifact still builds —
+    /// the alternative is refusing to publish a release nobody can edit in response, which
+    /// would make the tool's own past permanently unpublishable.
+    Warn,
+}
+
 /// An artifact rebuilt from a tag, plus what the wire needs to describe it.
 ///
 /// `dependencies` rides along because the index document carries them (§8.3, decision 9):
@@ -295,9 +328,13 @@ fn select_files(files: &[String], scanner: &Scanner) -> BTreeSet<String> {
 /// package root) **fails the pack** — a typo or a forgotten `git add`. A trailing-`/`
 /// target is a directory link: satisfied by any shipped file under it, but never an
 /// inclusion demand — a link asks for a file, not a tree.
+///
+/// `absent` decides only the middle of those: what to do about a target the tree does not
+/// carry (see [`Absent`]).
 fn collect_referenced_files(
     root: &Path,
     rev: &str,
+    absent: Absent,
     corpus: &BTreeSet<String>,
     head_set: &BTreeSet<&str>,
     scanner: &Scanner,
@@ -378,20 +415,32 @@ fn collect_referenced_files(
         }
     }
 
-    // The tiebreaker for a target absent from HEAD: the repository's own ignore rules.
-    // A gitignored target was *declared* local-only by the author — warn. An unignored
-    // one is a typo or a forgotten `git add` — fail.
-    if !missing.is_empty() {
-        let ask: Vec<String> = missing.iter().map(|(_, _, _, p, _)| p.clone()).collect();
-        let ignored = git::ignored_paths(root, &ask)?;
-        for (path, line, target, asked, kind) in missing {
-            if ignored.contains(&asked) {
+    // The tiebreaker for a target absent from the tree: the repository's own ignore rules.
+    // A gitignored target was *declared* local-only by the author — warn. An unignored one
+    // is a typo or a forgotten `git add` — fail. Only available when the working tree is
+    // the thing being packed; see [`Absent`].
+    match (missing.is_empty(), absent) {
+        (true, _) => {}
+        (false, Absent::AskGitignore) => {
+            let ask: Vec<String> = missing.iter().map(|(_, _, _, p, _)| p.clone()).collect();
+            let ignored = git::ignored_paths(root, &ask)?;
+            for (path, line, target, asked, kind) in missing {
+                if ignored.contains(&asked) {
+                    warnings.push(format!(
+                        "{path}:{line} links to {target}, which is gitignored (local-only by \
+                         this package's own declaration) and not distributed"
+                    ));
+                } else {
+                    violations.push(format!("{path}:{line} → {target} (no such {kind} at HEAD)"));
+                }
+            }
+        }
+        (false, Absent::Warn) => {
+            for (path, line, target, _, kind) in missing {
                 warnings.push(format!(
-                    "{path}:{line} links to {target}, which is gitignored (local-only by \
-                     this package's own declaration) and not distributed"
+                    "{path}:{line} links to {target}, and no such {kind} is committed at \
+                     {rev}; it is not in the artifact"
                 ));
-            } else {
-                violations.push(format!("{path}:{line} → {target} (no such {kind} at HEAD)"));
             }
         }
     }

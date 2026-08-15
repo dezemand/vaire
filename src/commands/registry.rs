@@ -32,7 +32,11 @@ pub fn add(
     priority: i64,
     search_by_default: bool,
 ) -> Result<RegistryAddOutput> {
-    if name.trim().is_empty() {
+    // Trimmed once, here, and stored trimmed: the name is the primary key, so recording
+    // `"  lab  "` would leave `registry show lab`, `push --registry lab` and `registry rm
+    // lab` all failing against a listing that reads exactly like `lab`.
+    let name = name.trim();
+    if name.is_empty() {
         return Err(VaireError::Usage("a registry needs a name".into()));
     }
     let url = transport::normalize_url(url)
@@ -57,14 +61,22 @@ pub fn add(
             // A location with no descriptor has never been published to. Reported as such
             // rather than as "0 packages": an empty registry and a directory that is not a
             // registry yet look identical in a count and are not the same situation.
-            let packages = match registry.initialized() {
-                true => registry.list().ok().map(|packages| packages.len()),
-                false => None,
+            //
+            // The same care applies to a failed enumeration. `None` here already means
+            // "cannot enumerate", so silently mapping a broken `packages.json` onto it
+            // would describe a registry as unable to do the thing it declares it can.
+            let (packages, enumeration) = match registry.initialized() {
+                false => (None, None),
+                true => match registry.list() {
+                    Ok(packages) => (Some(packages.len()), None),
+                    Err(e) => (None, Some(e.to_string())),
+                },
             };
             Ok(Probe {
                 writable,
                 initialized: registry.initialized(),
                 packages,
+                enumeration,
             })
         }
         Err(e) => Err(e.to_string()),
@@ -76,6 +88,7 @@ pub fn add(
         packages: probe.as_ref().ok().and_then(|p| p.packages),
         initialized: probe.as_ref().is_ok_and(|p| p.initialized),
         writable: probe.as_ref().is_ok_and(|p| p.writable),
+        enumeration: probe.as_ref().ok().and_then(|p| p.enumeration.clone()),
         note: probe.err(),
     })
 }
@@ -84,6 +97,9 @@ struct Probe {
     writable: bool,
     initialized: bool,
     packages: Option<usize>,
+    /// Why enumeration failed, when it did. Distinct from `packages: None`, which means
+    /// the registry cannot enumerate at all.
+    enumeration: Option<String>,
 }
 
 /// `vaire registry list`.
@@ -117,8 +133,12 @@ pub fn show(home: &Path, name: &str) -> Result<RegistryShowOutput> {
     // Enumeration is capability-gated, so a registry that cannot list is reported as
     // "cannot", not as empty. The two look identical in a bare count and mean opposite
     // things to someone deciding whether to trust a search result.
+    //
+    // A registry that *declares* `enumerable` and then fails to enumerate is a third
+    // thing, and the one this command exists to surface: the error propagates rather than
+    // collapsing into "cannot", which would describe the fault as a capability.
     let packages = match descriptor.capabilities.enumerable {
-        true => registry.list().ok(),
+        true => Some(registry.list()?),
         false => None,
     };
     Ok(RegistryShowOutput {

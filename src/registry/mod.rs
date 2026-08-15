@@ -156,6 +156,10 @@ pub struct Published {
     pub size: u64,
     /// Where the artifact now lives, for the human reading the output.
     pub artifact_url: String,
+    /// What went imperfectly in a publish that nonetheless landed — a convenience document
+    /// the registry could not update, say. Carried rather than swallowed: the release is
+    /// published either way, and the caller is the one with somewhere to print this.
+    pub warnings: Vec<String>,
 }
 
 /// A registry client.

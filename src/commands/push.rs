@@ -181,10 +181,14 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<PushOutput> {
             prior_of(&tagged, *version),
             access.clone(),
         ) {
-            Ok((release, notes)) => {
+            Ok(Outcome::Published(release, notes)) => {
                 out.published.push(release);
                 out.warnings.extend(notes);
             }
+            // Someone else published it between the preflight question and our write. The
+            // registry holds the immutable release either way, which is the outcome we
+            // wanted — so it belongs with what was already there, not with what failed.
+            Ok(Outcome::AlreadyPublished) => out.already.push(version.to_string()),
             Err(e) => out.failed.push(crate::output::PushFailure {
                 version: version.to_string(),
                 reason: e.to_string(),
@@ -192,6 +196,14 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<PushOutput> {
         }
     }
     Ok(out)
+}
+
+/// What publishing one version came to.
+enum Outcome {
+    Published(PushedRelease, Vec<String>),
+    /// The registry already had it — either the preflight missed it, or a concurrent
+    /// publisher won the create-only write. Not a failure in either case.
+    AlreadyPublished,
 }
 
 /// Build one tag's artifact and publish it.
@@ -203,7 +215,7 @@ fn publish_one(
     version: Version,
     prior_version: Option<Version>,
     access: Option<Access>,
-) -> Result<(PushedRelease, Vec<String>)> {
+) -> Result<Outcome> {
     let artifact = crate::commands::pack::at_rev(root, tag, dist)?;
     // The manifest at the tag has to agree with the tag, or the artifact would be published
     // under a version its own manifest does not claim.
@@ -217,7 +229,7 @@ fn publish_one(
     let changelog = changelog_at(root, tag, version)?;
     let excerpt = changelog.as_deref().and_then(invalidated_assumptions);
 
-    let published = registry.publish(PublishRequest {
+    let published = match registry.publish(PublishRequest {
         name: &artifact.name,
         version,
         artifact: &artifact.path,
@@ -230,16 +242,22 @@ fn publish_one(
         // the claim can be checked rather than trusted. Static hosts ignore both.
         claimed_bump: None,
         prior_version,
-    })?;
+    }) {
+        Ok(published) => published,
+        Err(RegistryError::VersionExists { .. }) => return Ok(Outcome::AlreadyPublished),
+        Err(e) => return Err(e.into()),
+    };
 
-    Ok((
+    let mut warnings = artifact.warnings;
+    warnings.extend(published.warnings);
+    Ok(Outcome::Published(
         PushedRelease {
             version: published.version.to_string(),
             sha256: published.sha256,
             size_bytes: published.size,
             url: published.artifact_url,
         },
-        artifact.warnings,
+        warnings,
     ))
 }
 

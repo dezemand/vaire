@@ -461,13 +461,24 @@ impl Registry for StaticHttp {
             if let Some(access) = &request.access {
                 index.access = access.clone();
             }
-            index.insert(meta.clone());
-            Ok(())
+            // The artifact write normally makes a refusal here impossible. It becomes
+            // possible when the index lists a version whose artifact was deleted out of
+            // band: `put_new` then succeeds with new bytes, this refuses, and the document
+            // keeps the *old* digest — so every later fetch of that version fails its
+            // checksum, permanently, after a publish that claimed to work. Refuse instead.
+            match index.insert(meta.clone()) {
+                true => Ok(()),
+                false => Err(RegistryError::VersionExists {
+                    registry: self.name.clone(),
+                    name: name.to_string(),
+                    version,
+                }),
+            }
         })?;
 
-        // Enumeration is a convenience; a failure to update it is reported by the caller,
-        // never by failing a publish that has already landed.
-        self.announce(name);
+        // Enumeration is a convenience; a failure to update it is carried back as a warning
+        // rather than failing a publish that has already landed.
+        let warnings = self.announce(name).into_iter().collect();
 
         Ok(Published {
             name: name.to_string(),
@@ -475,6 +486,7 @@ impl Registry for StaticHttp {
             sha256,
             size,
             artifact_url: self.url_for(&artifact_path),
+            warnings,
         })
     }
 

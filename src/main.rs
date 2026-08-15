@@ -353,7 +353,10 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 }
             }
             #[cfg(not(feature = "pack"))]
-            if push && released {
+            // Not gated on `released`, unlike the `pack` build above: there the guard means
+            // "nothing was cut, so there is nothing to upload", and here the flag can never
+            // do anything at all. Accepting it silently on a dry run would teach nothing.
+            if push {
                 return Err(VaireError::Usage(
                     "`--push` needs the `pack` feature: an artifact has to exist before it \
                      can be uploaded"

@@ -772,7 +772,7 @@ JSON:
 ### 4.7 `vaire release`
 
 ```text
-vaire release [--major] [--dry-run] [--notes <file>] [--allow-branch] [--yes] [--json]
+vaire release [--major] [--dry-run] [--notes <file>] [--allow-branch] [--yes] [--push] [--json]
 ```
 
 Cut a release: classify what changed since the last one, compute the version, write the

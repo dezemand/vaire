@@ -1547,6 +1547,11 @@ pub struct RegistryAddOutput {
     /// Whether anything has ever been published here. A writable location that is not
     /// initialized is not a mistake — the first `vaire push` writes its descriptor.
     pub initialized: bool,
+    /// Why enumeration failed, when the registry declares it can enumerate and then did
+    /// not. Distinct from `packages: None`, which says it cannot — a broken
+    /// `packages.json` is a fault, not a capability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enumeration: Option<String>,
     /// Whether this client could publish to it. `false` for an `https://` registry, which
     /// is a fine place to pull from and needs the object store's own credentials to write.
     pub writable: bool,
@@ -1610,7 +1615,12 @@ impl Output for RegistryAddOutput {
             (None, true, Some(n)) => {
                 out.push_str(&dim(&format!("  serves {}\n", pluralize(n, "package"))));
             }
-            (None, true, None) => out.push_str(&dim("  answered; it cannot enumerate\n")),
+            // Said as the fault it is. Reporting a broken `packages.json` as "cannot
+            // enumerate" would describe a registry as lacking the capability it declares.
+            (None, true, None) => out.push_str(&match &self.enumeration {
+                Some(why) => yellow(&format!("  answered, but could not be listed: {why}\n")),
+                None => dim("  answered; it cannot enumerate\n"),
+            }),
         }
         if self.reachable && self.initialized && !self.writable {
             out.push_str(&dim(
@@ -1835,7 +1845,12 @@ impl Output for PushOutput {
                 )));
             }
         }
-        if !self.already.is_empty() && !self.published.is_empty() {
+        // Only when something else was printed above. The one branch that suppresses this
+        // is "up to date", which states the count in its own wording — and it is precisely
+        // the branch that runs when nothing was published and nothing failed. A run where
+        // every attempt failed is where the rest of the picture matters most, so it prints.
+        let reported_something = !self.published.is_empty() || !self.failed.is_empty();
+        if reported_something && !self.already.is_empty() {
             out.push_str(&dim(&format!(
                 "  {} already published\n",
                 pluralize(self.already.len(), "version")
