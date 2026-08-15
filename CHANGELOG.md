@@ -140,7 +140,9 @@ uses [Semantic Versioning](https://semver.org).
   release rather than to whoever uploaded it. It needs no embedder and re-runs no `check`
   (the tag was already gated when it was cut), so CI publishes with no embedding
   configuration at all. Re-running it is a clean no-op, and one bad tag is reported and
-  stepped over rather than stopping the rest.
+  stepped over rather than stopping the rest. A version storage refuses is checked rather
+  than assumed: identical bytes are idempotence, different bytes are a failure naming both
+  digests, since a published version is immutable and pushing again cannot fix it.
 
   **`yank` is an index edit and nothing else.** The artifact never moves, so a lockfile
   pinning that version keeps resolving; what changes is only what a *new* resolution would

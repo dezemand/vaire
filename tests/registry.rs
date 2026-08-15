@@ -560,14 +560,14 @@ fn push_rebuilds_artifacts_from_tags_so_a_fresh_clone_can_publish() {
 }
 
 #[test]
-fn a_version_published_by_someone_else_mid_push_counts_as_already_there() {
+fn a_version_taken_by_someone_elses_bytes_is_a_failure_not_an_idempotent_no_op() {
     let c = package();
     let dir = temp();
     release(&c);
 
-    // The preflight sees an empty registry; by the time the artifact write runs, someone
-    // else has published 1.0.0. Storage refuses the create-only write — and the registry
-    // now holds exactly the immutable release we wanted it to, so this is not a failure.
+    // Another repository — or a mistake, or an attack — got to this (name, version) first,
+    // with different bytes. Storage will refuse the create-only write, and that refusal says
+    // only that *something* occupies the identity.
     let registry = registry(dir.path());
     let scratch = temp();
     publish(
@@ -576,13 +576,52 @@ fn a_version_published_by_someone_else_mid_push_counts_as_already_there() {
         "1.0.0",
     )
     .unwrap();
-    // Standing in for the interleaving: the preflight answer is stale by construction,
-    // since `push` asks the registry before it packs.
-    let out = push(&c, dir.path(), options());
 
+    // Naming the version bypasses the preflight skip, so the artifact is actually built and
+    // the digests actually compared.
+    let out = push(
+        &c,
+        dir.path(),
+        vaire::commands::push::Options {
+            version: Some("1.0.0"),
+            ..options()
+        },
+    );
+    assert!(out.published.is_empty(), "{out:?}");
+    assert!(
+        out.already.is_empty(),
+        "this release did NOT reach the registry"
+    );
+    assert_eq!(out.failed.len(), 1, "{out:?}");
+    // Reporting this as "already published" would be the worst outcome available: the
+    // identity is immutably taken and the intended release will never reach the registry.
+    assert!(
+        out.failed[0].reason.contains("not this release"),
+        "{:?}",
+        out.failed
+    );
+}
+
+#[test]
+fn a_version_published_by_someone_else_mid_push_is_a_no_op_when_the_bytes_match() {
+    let c = package();
+    let dir = temp();
+    release(&c);
+
+    // Publish once, then push the same tag again with the version explicitly named so the
+    // preflight skip does not answer for us. Determinism means the second attempt packs
+    // byte-identical bytes, so the create-only refusal really is idempotence.
+    push(&c, dir.path(), options());
+    let out = push(
+        &c,
+        dir.path(),
+        vaire::commands::push::Options {
+            version: Some("1.0.0"),
+            ..options()
+        },
+    );
     assert!(out.failed.is_empty(), "{:?}", out.failed);
-    assert_eq!(out.already, ["1.0.0"]);
-    assert!(out.published.is_empty());
+    assert_eq!(out.already, ["1.0.0"], "{out:?}");
 }
 
 #[test]
