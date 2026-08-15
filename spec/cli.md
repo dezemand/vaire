@@ -982,8 +982,16 @@ re-run a ritual, and CI must be able to publish a tag it did not cut.
   tag; re-running it would judge an old tree by today's rules for a tag nobody can edit in
   response.
 - **Idempotent.** Versions the registry already lists are skipped, and re-running is a
-  clean no-op. A version whose upload storage refuses was published by someone else between
-  the question and the write — reported, never overwritten.
+  clean no-op.
+- **A taken version is checked, not assumed.** Storage refusing the create-only write says
+  only that *something* occupies that `(name, version)` — so the digest decides: identical
+  bytes are the idempotent case, different bytes are a failure naming both digests. A
+  published version is immutable, so that is not something pushing again can fix.
+  The skip above is the one place the registry's listing is taken on trust: verifying a
+  historical version means re-packing it, which would cost the cheap re-runnability that
+  makes `push` safe to put in a pipeline. Naming a version explicitly (`vaire push 1.4.2`)
+  bypasses the skip and therefore does verify — the command to reach for when a conflict is
+  suspected.
 - **One version's failure is stepped over.** A tag from two years ago with a broken relative
   link is reported and the push carries on; that tag alone stays unpublished, and the exit
   code is `1` so a pipeline can branch on it.

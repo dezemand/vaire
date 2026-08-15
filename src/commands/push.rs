@@ -155,8 +155,18 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<PushOutput> {
     };
 
     let dist = Repo::prepare_derived_dir(root)?.join("dist");
+    // An explicitly named version bypasses the skip below: `vaire push 1.4.2` means "make
+    // sure 1.4.2 is published", so it packs and attempts, and the digest check in
+    // `publish_one` then actually confirms that what the registry holds is this release.
+    // That is the command to reach for when a conflict is suspected.
+    let named = options.version.is_some();
     for (tag, version) in &wanted {
-        if published.contains(version) {
+        // The listing is trusted here, and this is the one place it is. Verifying a
+        // historical version would mean re-packing it — a second on one tag, a minute on
+        // fifty — on every push, which would cost the idempotence that makes `push` safe to
+        // re-run far more than it would buy. The version being published *now* is verified,
+        // because there the digest is already in hand.
+        if !named && published.contains(version) {
             out.already.push(version.to_string());
             continue;
         }
@@ -185,9 +195,9 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<PushOutput> {
                 out.published.push(release);
                 out.warnings.extend(notes);
             }
-            // Someone else published it between the preflight question and our write. The
-            // registry holds the immutable release either way, which is the outcome we
-            // wanted — so it belongs with what was already there, not with what failed.
+            // Someone else published it between the preflight question and our write, and
+            // the bytes match. The registry holds the immutable release either way, which
+            // is the outcome we wanted — so it belongs with what was already there.
             Ok(Outcome::AlreadyPublished) => out.already.push(version.to_string()),
             Err(e) => out.failed.push(crate::output::PushFailure {
                 version: version.to_string(),
@@ -201,8 +211,9 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<PushOutput> {
 /// What publishing one version came to.
 enum Outcome {
     Published(PushedRelease, Vec<String>),
-    /// The registry already had it — either the preflight missed it, or a concurrent
-    /// publisher won the create-only write. Not a failure in either case.
+    /// The registry already had it, **and its bytes are this release's bytes** — the
+    /// preflight missed it, or a concurrent publisher won the create-only write. Not a
+    /// failure: the registry holds exactly what this push was trying to put there.
     AlreadyPublished,
 }
 
@@ -244,7 +255,35 @@ fn publish_one(
         prior_version,
     }) {
         Ok(published) => published,
-        Err(RegistryError::VersionExists { .. }) => return Ok(Outcome::AlreadyPublished),
+        // Storage refused the create-only write, which says only that *something* occupies
+        // this (name, version) — not that it is this release. Those are very different
+        // situations and reporting the second as the first would be the worst outcome
+        // available: a push that says "already published" while the intended release never
+        // reached the registry and never will, because the identity is immutably taken.
+        //
+        // The digest settles it, and costs nothing: the artifact was just built.
+        Err(RegistryError::VersionExists { .. }) => {
+            return match published_digest(registry, &artifact.name, version) {
+                Some(theirs) if theirs == artifact.sha256 => Ok(Outcome::AlreadyPublished),
+                Some(theirs) => Err(VaireError::Registry(format!(
+                    "{} {version} is already published, and it is not this release — the \
+                     registry serves {}, this tag packs to {}. A published version is \
+                     immutable, so this cannot be corrected by pushing; release a new \
+                     version, or find out whose {version} that is",
+                    artifact.name,
+                    short(&theirs),
+                    short(&artifact.sha256),
+                ))),
+                // The artifact is there and the index does not describe it — a half-written
+                // publish, or an index edited by hand. Either way this push cannot claim the
+                // version and cannot confirm it either.
+                None => Err(VaireError::Registry(format!(
+                    "{} {version} is already published, but the registry's index does not \
+                     record it — the registry is in an inconsistent state",
+                    artifact.name
+                ))),
+            };
+        }
         Err(e) => return Err(e.into()),
     };
 
@@ -259,6 +298,20 @@ fn publish_one(
         },
         warnings,
     ))
+}
+
+/// The digest the registry records for a published version, if it records one.
+fn published_digest(registry: &dyn Registry, name: &str, version: Version) -> Option<String> {
+    registry
+        .versions(name)
+        .ok()?
+        .into_iter()
+        .find(|release| release.version == version)
+        .map(|release| release.sha256)
+}
+
+fn short(digest: &str) -> &str {
+    &digest[..digest.len().min(12)]
 }
 
 /// Every release tag of `package`, lowest version first.
