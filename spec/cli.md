@@ -1029,7 +1029,9 @@ vaire pull [<name>[@^MAJOR | @<version>]] [--registry <name>] [--dry-run]
 
 Fetches a release into the **store** (registry.v2.md §5): verified, unpacked, re-indexed
 here, and sealed read-only at `~/.vaire/store/<name>/<version>/`. Bare `vaire pull` takes
-every declared dependency this machine cannot already satisfy.
+every declared dependency this machine cannot already satisfy, and therefore needs a package
+to stand in; `vaire pull <name>` is a store operation and works from anywhere, which is what
+makes it the first command on a fresh machine.
 
 **This is the only command that acquires a package, and that is the design.** Resolution
 never fetches silently (§6): a dependency nothing on this machine satisfies is reported

@@ -1968,7 +1968,11 @@ impl Output for PullOutput {
                 )));
             }
         }
-        if !self.already.is_empty() && !self.pulled.is_empty() {
+        // Only after the "already satisfies" branch, which states the count in its own
+        // wording — a run where every pull failed is where the rest of the picture matters
+        // most. Same rule as `PushOutput`.
+        let reported_something = !self.pulled.is_empty() || !self.failed.is_empty();
+        if reported_something && !self.already.is_empty() {
             out.push_str(&dim(&format!(
                 "  {} already in the store\n",
                 pluralize(self.already.len(), "package")
