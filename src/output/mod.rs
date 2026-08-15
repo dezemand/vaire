@@ -1883,3 +1883,100 @@ impl Output for YankOutput {
         }
     }
 }
+
+/// `vaire pull`.
+#[derive(Debug, Serialize)]
+pub struct PullOutput {
+    pub store: String,
+    pub pulled: Vec<PulledRelease>,
+    /// Packages the store already satisfied. What makes `vaire pull` safe in a setup script.
+    pub already: Vec<String>,
+    pub failed: Vec<PullFailure>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PulledRelease {
+    pub package: String,
+    pub version: String,
+    pub registry: String,
+    pub path: String,
+    /// Versions retention removed from the same major line.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub replaced: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PullFailure {
+    pub package: String,
+    pub reason: String,
+}
+
+impl Output for PullOutput {
+    fn render_human(&self) -> String {
+        let mut out = String::new();
+        if self.pulled.is_empty() && self.failed.is_empty() {
+            out.push_str(&match self.already.is_empty() {
+                true => dim("nothing to pull").to_string(),
+                false => green(&format!(
+                    "✓ the store already satisfies {}",
+                    pluralize(self.already.len(), "package")
+                ))
+                .to_string(),
+            });
+            out.push('\n');
+        } else {
+            let verb = match self.dry_run {
+                true => "would pull",
+                false => "✓ pulled",
+            };
+            if !self.pulled.is_empty() {
+                out.push_str(&format!(
+                    "{}\n",
+                    match self.dry_run {
+                        true => bold(&format!(
+                            "{verb} {}",
+                            pluralize(self.pulled.len(), "package")
+                        )),
+                        false => green(&format!(
+                            "{verb} {}",
+                            pluralize(self.pulled.len(), "package")
+                        )),
+                    }
+                ));
+                let w = col_width(self.pulled.iter().map(|r| r.package.as_str()));
+                for release in &self.pulled {
+                    out.push_str(&format!(
+                        "  {}  {}  {}\n",
+                        cyan(&format!("{:<w$}", release.package)),
+                        plain(&format!("{:<9}", release.version)),
+                        dim(&format!("from '{}'", release.registry)),
+                    ));
+                    // Named, not silent: a version leaving the store is the one thing here
+                    // that removes something the user had.
+                    for gone in &release.replaced {
+                        out.push_str(&dim(&format!("      replaced {gone}\n")));
+                    }
+                }
+            }
+            for failure in &self.failed {
+                out.push_str(&red(&format!(
+                    "  ✗ {}: {}\n",
+                    failure.package, failure.reason
+                )));
+            }
+        }
+        if !self.already.is_empty() && !self.pulled.is_empty() {
+            out.push_str(&dim(&format!(
+                "  {} already in the store\n",
+                pluralize(self.already.len(), "package")
+            )));
+        }
+        for warning in &self.warnings {
+            out.push_str(&yellow(&format!("  {warning}\n")));
+        }
+        out.trim_end().to_string()
+    }
+}

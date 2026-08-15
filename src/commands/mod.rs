@@ -17,6 +17,8 @@ pub mod init;
 #[cfg(feature = "pack")]
 pub mod pack;
 #[cfg(feature = "pack")]
+pub mod pull;
+#[cfg(feature = "pack")]
 pub mod push;
 pub mod refs;
 pub mod registry;
@@ -109,7 +111,11 @@ impl Ctx {
     /// "search everything" quietly excluding *here* is the one result nobody would read as
     /// correct. Seeded last, so a catalogued path for the same name is not displaced.
     pub fn rootless_with(home: PathBuf, also: Option<(String, PathBuf)>) -> Result<Ctx> {
-        let mut packages = crate::catalog::Catalog::open(&home)?.live_packages()?;
+        // Store entries first, working copies over them, and the package you are standing
+        // in last (see above). Later wins, and that ordering is the two-worlds rule read
+        // aloud: what you author outranks what you pulled, under the same name.
+        let mut packages = crate::store::Store::at(&home).packages();
+        packages.extend(crate::catalog::Catalog::open(&home)?.live_packages()?);
         packages.extend(also);
         let workspace = std::cell::OnceCell::new();
         let _ = workspace.set(crate::workspace::Workspace::rootless(packages));

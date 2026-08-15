@@ -74,6 +74,7 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
     }
 
     let ws = ctx.workspace()?;
+    let store = crate::store::Store::at(ctx.home());
     let mut rows = Vec::new();
     let mut snapshot = Vec::new();
 
@@ -92,6 +93,30 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
                 }),
                 linked: None,
             }),
+            // A store entry ships its index already built, by this machine, and is sealed
+            // read-only. Skipping it is what makes immutability a *behavior* — the `chmod`
+            // is only the enforcement — and it is also the honest thing: rebuilding would
+            // produce the same index, having first had to break the seal to write it.
+            Ok(handle) if store.contains(&handle.root) => {
+                rows.push(DepIndexed {
+                    name: id.to_string(),
+                    status: "store".to_string(),
+                    nodes: None,
+                    commit: None,
+                    note: Some(format!("{} (immutable)", handle.config.version)),
+                    linked: satisfied
+                        .linked
+                        .iter()
+                        .find(|l| l.name == id.as_str())
+                        .map(|l| l.target.clone()),
+                });
+                snapshot.push(serde_json::json!({
+                    "name": id.to_string(),
+                    "version": handle.config.version,
+                    "root": handle.root.display().to_string(),
+                    "constraint": ctx.config.dependencies.get(id.as_str()),
+                }));
+            }
             Ok(handle) => {
                 let mode = dep_mode(&handle.root, embedder);
                 let dep_repo = Repo::discover(Some(&handle.root), &handle.root)?;

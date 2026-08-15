@@ -240,12 +240,20 @@ fn try_register_ambient(home: &Path, ctx: &Ctx) -> Result<()> {
         &ctx.config.version,
         Origin::Ambient,
     )?;
-    // Closure members are working copies too (until the store exists, every located
-    // dependency is a directory someone could edit), and they are exactly the packages a
-    // consumer will want resolved by name later.
+    // Closure members that are working copies — directories someone could edit — are
+    // exactly the packages a consumer will want resolved by name later.
+    //
+    // A **store entry is not one of those**, and recording it here would be a category
+    // error with visible consequences: a sighting says "a package was observed at a path
+    // and may have changed since", which is the opposite of a sealed release, and the
+    // duplicate row makes one directory look like two packages declaring one name. Store
+    // entries have their own table, written by `pull`.
+    let store = crate::store::Store::at(home);
     if let Ok(ws) = ctx.workspace() {
         for (_, entry) in ws.closure() {
-            if let Ok(handle) = entry {
+            if let Ok(handle) = entry
+                && !store.contains(&handle.root)
+            {
                 let _ = catalog.record(
                     &handle.root,
                     handle.id.as_str(),

@@ -187,10 +187,15 @@ impl Workspace {
         let run_root_id = PackageId(NO_PACKAGE.to_string());
         let mut catalog: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
         for (name, path) in packages {
+            // Canonicalized first, because the dedupe below is the whole point and two
+            // spellings of one directory would otherwise be reported as an ambiguity the
+            // user cannot resolve — `/tmp/x` and `/private/tmp/x` on macOS, or any route
+            // through a symlinked home.
+            let path = std::fs::canonicalize(&path).unwrap_or(path);
             let paths = catalog.entry(name).or_default();
             // Idempotent by path: the same checkout arriving twice (a catalogued package
-            // that is also the one being stood in, under `--all`) is one candidate, not an
-            // ambiguity.
+            // that is also the one being stood in, under `--all`; a store entry the catalog
+            // has also seen) is one candidate, not an ambiguity.
             if !paths.contains(&path) {
                 paths.push(path);
             }

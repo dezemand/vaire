@@ -229,6 +229,17 @@ pub fn at_rev(root: &Path, rev: &str, dest_dir: &Path) -> Result<RevArtifact> {
     );
 
     build::snapshot(root, &config, rev, &snapshot_db)?;
+    // `snapshot` records no provenance — it exists for the release classifier, which reads
+    // an index once and deletes it. An *artifact* index is read by every consumer that
+    // materializes it, and one that cannot say which commit it is leaves a store entry
+    // unable to answer the same question. Stamped from the tag it was built from.
+    {
+        let index = crate::index::Index::open(&snapshot_db)?;
+        if let Some(commit) = git::resolve_rev(root, rev)? {
+            index.set_meta("last_indexed_commit", &commit)?;
+        }
+        index.set_meta("index_source", "committed")?;
+    }
     // Always stripped. A released artifact's checksum has to be reproducible for the
     // lockfile to mean anything, and vectors are consumer configuration (§11).
     export::export_artifact_index(

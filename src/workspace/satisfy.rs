@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use crate::catalog::Catalog;
 use crate::config::Config;
 use crate::corpus::repo::Repo;
+use crate::store::Store;
 use crate::workspace::Workspace;
 use crate::workspace::link::{self, EntryState};
 use crate::workspace::select::{self, Selection};
@@ -75,6 +76,9 @@ struct Demand {
 /// at all degrades to exactly that, one warning and no links.
 pub fn satisfy(repo: &Repo, config: &Config, home: &Path) -> Satisfied {
     let mut out = Satisfied::default();
+    // Cheap to build (it is a path) and consulted only after the catalog has nothing, so
+    // the ordinary all-linked pass still touches neither it nor the catalog.
+    let store = Store::at(home);
     // Opened on the first name that actually needs looking up, once, and dropped on
     // return. Both halves of that are load-bearing, and for the same reason: Turso takes
     // an **exclusive** lock when a database is opened.
@@ -132,7 +136,7 @@ pub fn satisfy(repo: &Repo, config: &Config, home: &Path) -> Satisfied {
                     }
                 },
             };
-            match satisfy_one(catalog, repo.root(), &name, &constraint) {
+            match satisfy_one(catalog, &store, repo.root(), &name, &constraint) {
                 Outcome::Linked(dep) => {
                     out.linked.push(dep);
                     progress = true;
@@ -211,6 +215,7 @@ pub fn satisfy_name(pkg_root: &Path, name: &str, constraint: &str, home: &Path) 
     if link::entry_state(&Repo::packages_dir_at(pkg_root).join(name)) == EntryState::Present {
         return out;
     }
+    let store = Store::at(home);
     let catalog = match Catalog::open(home) {
         Ok(catalog) => catalog,
         Err(e) => {
@@ -218,7 +223,7 @@ pub fn satisfy_name(pkg_root: &Path, name: &str, constraint: &str, home: &Path) 
             return out;
         }
     };
-    match satisfy_one(&catalog, pkg_root, name, constraint) {
+    match satisfy_one(&catalog, &store, pkg_root, name, constraint) {
         Outcome::Linked(dep) => out.linked.push(dep),
         Outcome::Note(note) => {
             out.notes.insert(name.to_string(), note);
@@ -273,6 +278,18 @@ fn intersect(demands: &[Demand]) -> std::result::Result<String, String> {
     }
 }
 
+/// What to say about a name neither the catalog nor the store can satisfy.
+///
+/// **Never a fetch.** Resolution does not reach the network (§6), so the most useful thing
+/// available is the exact command that would fix it — said alongside whatever the catalog
+/// did have, since "no package declaring this" and "one, but in the wrong major line" call
+/// for different next steps.
+fn unsatisfiable(name: &str, constraint: &str, selection: &Selection) -> String {
+    let local = select::explain(name, constraint, selection)
+        .unwrap_or_else(|| format!("'{name}' could not be resolved"));
+    format!("{local}; or fetch it with `vaire pull {name}@{constraint}`")
+}
+
 enum Outcome {
     Linked(LinkedDep),
     /// Nothing to do — the entry is already there and resolvable.
@@ -280,8 +297,19 @@ enum Outcome {
     Note(String),
 }
 
-/// Fill (or heal) one `.vaire/packages/<name>` entry under `pkg_root` from the catalog.
-fn satisfy_one(catalog: &Catalog, pkg_root: &Path, name: &str, constraint: &str) -> Outcome {
+/// Fill (or heal) one `.vaire/packages/<name>` entry under `pkg_root`.
+///
+/// The catalog first, then the store (registry.v2.md §6). That order is the two-worlds
+/// decision made concrete: a working copy is what you author, so it wins over a pulled
+/// release of the same name even when the release is newer. The store is the fallback for
+/// what you merely *consume*.
+fn satisfy_one(
+    catalog: &Catalog,
+    store: &Store,
+    pkg_root: &Path,
+    name: &str,
+    constraint: &str,
+) -> Outcome {
     let entry = Repo::packages_dir_at(pkg_root).join(name);
     match link::entry_state(&entry) {
         // A resolvable link or a real directory is somebody's deliberate choice: an
@@ -298,11 +326,22 @@ fn satisfy_one(catalog: &Catalog, pkg_root: &Path, name: &str, constraint: &str)
     };
     let target: PathBuf = match &selection {
         Selection::One(candidate) => candidate.path.clone(),
-        _ => {
+        // Ambiguity is a decision to report, never one the store may quietly settle: two
+        // working copies both satisfying is a question about which one you meant, and
+        // answering it with a third thing would be worse than saying so.
+        Selection::Ambiguous(_) => {
             return Outcome::Note(
                 select::explain(name, constraint, &selection)
                     .unwrap_or_else(|| format!("'{name}' could not be resolved")),
             );
+        }
+        Selection::Unknown | Selection::Unsatisfied(_) => {
+            match store.satisfying(name, constraint) {
+                Some(version) => store.entry(name, version),
+                None => {
+                    return Outcome::Note(unsatisfiable(name, constraint, &selection));
+                }
+            }
         }
     };
 

@@ -369,6 +369,26 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             emit(&commands::pack::run(&ctx, no_embeddings)?, json);
         }
         #[cfg(feature = "pack")]
+        Command::Pull {
+            spec,
+            registry,
+            dry_run,
+        } => {
+            let out = commands::pull::run(
+                &ctx,
+                commands::pull::Options {
+                    spec: spec.as_deref(),
+                    registry: registry.as_deref(),
+                    dry_run,
+                },
+            )?;
+            let failed = !out.failed.is_empty();
+            emit(&out, json);
+            if failed {
+                return Ok(ExitCode::Generic);
+            }
+        }
+        #[cfg(feature = "pack")]
         Command::Push {
             version,
             registry,
