@@ -170,7 +170,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     // package it serves the rootless session, which is the point of exposing it that way:
     // an agent can be pointed at the machine rather than at one checkout.
     if let Command::Mcp = cli.command {
-        let ctx = read_ctx(cli.repo, cli.config, false)?;
+        let ctx = read_ctx(cli.repo, cli.config, false)?.with_frozen(cli.frozen);
         mcp::serve(ctx)?;
         return Ok(ExitCode::Success);
     }
@@ -191,7 +191,8 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     let ctx = match cli.command.is_read() {
         true => read_ctx(cli.repo, cli.config, cli.command.wants_all())?,
         false => Ctx::new(cli.repo, cli.config)?,
-    };
+    }
+    .with_frozen(cli.frozen);
 
     match cli.command {
         Command::Resolve { id } => {
@@ -372,6 +373,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Pull {
             spec,
             registry,
+            locked,
             dry_run,
         } => {
             let out = commands::pull::run(
@@ -379,6 +381,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 commands::pull::Options {
                     spec: spec.as_deref(),
                     registry: registry.as_deref(),
+                    locked,
                     dry_run,
                 },
             )?;

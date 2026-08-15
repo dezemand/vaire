@@ -17,6 +17,7 @@
 //! - [`release`] — computing a version bump from what changed, and recording it.
 //! - [`registry`]— the client seam for remote registries, and the static-file wire contract.
 //! - [`store`]   — pulled releases, unpacked, rebuilt, and sealed read-only.
+//! - [`lockfile`]— `knowledge.lock`: what resolved, and whether it can resolve so again.
 //! - [`commands`]— one module per CLI command, each returning a typed [`output::Output`].
 //! - [`output`]  — the returned unit: paths + IDs, rendered as human text or JSON.
 //! - [`mcp`]     — the STDIO MCP server that re-exposes the read commands as tools.
@@ -44,6 +45,8 @@ pub mod git;
 mod hash;
 #[cfg(feature = "index")]
 pub mod index;
+#[cfg(feature = "index")]
+pub mod lockfile;
 #[cfg(feature = "index")]
 pub mod mcp;
 pub mod model;

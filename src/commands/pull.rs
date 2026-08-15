@@ -33,6 +33,7 @@ use std::path::Path;
 use crate::catalog::{Catalog, StoreEntry};
 use crate::commands::Ctx;
 use crate::error::{Result, VaireError};
+use crate::lockfile::{Locked, Lockfile};
 use crate::model::Version;
 use crate::output::{PullOutput, PulledRelease};
 use crate::registry::{Registry, RegistryError};
@@ -43,17 +44,42 @@ pub struct Options<'a> {
     /// cannot already satisfy.
     pub spec: Option<&'a str>,
     pub registry: Option<&'a str>,
+    /// Reproduce `knowledge.lock` exactly instead of resolving afresh: the versions it
+    /// names, checked against the digests it records.
+    pub locked: bool,
     /// Report what would be fetched; write nothing.
     pub dry_run: bool,
+}
+
+/// One package to fetch, and what would count as having fetched it.
+struct Wanted {
+    name: String,
+    want: Want,
+    /// The digest the lockfile records for this entry, when reproducing.
+    ///
+    /// `fetch` already verifies an artifact against what the **registry** currently
+    /// publishes; this checks that against what was **recorded**, which is the different and
+    /// more interesting question — a registry that starts serving other bytes under a
+    /// published version fails here and nowhere else.
+    expect: Option<String>,
 }
 
 pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<PullOutput> {
     let home = ctx.home().to_path_buf();
     let store = Store::at(&home);
 
-    let wanted: Vec<(String, Want)> = match options.spec {
-        Some(spec) => vec![parse_spec(spec)?],
-        None => unsatisfied_dependencies(ctx, &store)?,
+    let previous = Lockfile::load(ctx.repo.root())?;
+    let wanted: Vec<Wanted> = match (options.locked, options.spec) {
+        (true, Some(_)) => {
+            return Err(VaireError::Usage(
+                "`--locked` reproduces the whole recorded resolution, so it takes no package \
+                 name — drop one or the other"
+                    .into(),
+            ));
+        }
+        (true, None) => from_lockfile(previous.as_ref())?,
+        (false, Some(spec)) => vec![parse_spec(spec)?],
+        (false, None) => unsatisfied_dependencies(ctx, &store)?,
     };
     if wanted.is_empty() {
         return Ok(PullOutput {
@@ -100,20 +126,91 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<PullOutput> {
         store: store.root().display().to_string(),
     };
 
-    for (name, want) in wanted {
-        match pull_one(ctx, &store, &clients, &name, &want, options.dry_run) {
-            Ok(Outcome::Pulled(release, notes)) => {
-                out.pulled.push(release);
-                out.warnings.extend(notes);
+    let mut resolved: Vec<Locked> = Vec::new();
+    for wanted in wanted {
+        let name = wanted.name.clone();
+        match pull_one(ctx, &store, &clients, &wanted, options.dry_run) {
+            Ok(Outcome::Pulled(pulled)) => {
+                out.pulled.push(pulled.release);
+                out.warnings.extend(pulled.warnings);
+                resolved.extend(pulled.locked);
             }
-            Ok(Outcome::Already(version)) => out.already.push(format!("{name} {version}")),
+            Ok(Outcome::Already(version)) => {
+                out.already.push(format!("{name} {version}"));
+                resolved.extend(locked_from_store(&store, &name, version));
+            }
             Err(e) => out.failed.push(crate::output::PullFailure {
                 package: name,
                 reason: e.to_string(),
             }),
         }
     }
+
+    // The lockfile records what this run resolved, merged over what was there — a package
+    // this run could not reach keeps its previous entry, because that record is the thing
+    // somebody else reproduces from. Skipped on a dry run, which writes nothing anywhere.
+    if !options.dry_run && !resolved.is_empty() {
+        let declared: Vec<String> = ctx.config.dependencies.keys().cloned().collect();
+        let merged = Lockfile::merged(previous.as_ref(), resolved, &declared);
+        if let Err(e) = merged.write(ctx.repo.root()) {
+            out.warnings
+                .push(format!("knowledge.lock was not updated: {e}"));
+        }
+    }
     Ok(out)
+}
+
+/// What `--locked` fetches: every reproducible entry the lockfile records.
+///
+/// A `workspace` entry is refused rather than skipped. `--locked` is a claim that the
+/// resolution can be obtained again, and an entry with no digest is precisely the case where
+/// it cannot — passing over it quietly would let a pipeline report a reproduction it did not
+/// perform.
+fn from_lockfile(previous: Option<&Lockfile>) -> Result<Vec<Wanted>> {
+    let lockfile = previous.ok_or_else(|| {
+        VaireError::Usage(format!(
+            "`--locked` reproduces {}, and there is none here — run `vaire pull` once to \
+             write it",
+            crate::lockfile::FILE_NAME
+        ))
+    })?;
+    let unreproducible: Vec<&str> = lockfile
+        .packages
+        .iter()
+        .filter(|entry| !entry.reproducible())
+        .map(|entry| entry.name.as_str())
+        .collect();
+    if !unreproducible.is_empty() {
+        return Err(VaireError::Registry(format!(
+            "{} records {} as resolved from a working copy, which has no artifact to \
+             reproduce — those answers cannot be obtained again, so `--locked` cannot \
+             honestly claim to have reproduced this resolution",
+            crate::lockfile::FILE_NAME,
+            unreproducible.join(", ")
+        )));
+    }
+    Ok(lockfile
+        .packages
+        .iter()
+        .map(|entry| Wanted {
+            name: entry.name.clone(),
+            want: Want::Exact(entry.version),
+            expect: entry.sha256.clone(),
+        })
+        .collect())
+}
+
+/// The lockfile entry for a version already in the store, read from its own `source.toml`.
+fn locked_from_store(store: &Store, name: &str, version: Version) -> Option<Locked> {
+    let source = store.source(name, version).ok()?;
+    Some(Locked {
+        name: name.to_string(),
+        version,
+        source: crate::lockfile::Source::Registry,
+        registry: source.registry,
+        sha256: Some(source.artifact_sha256),
+        pinned: false,
+    })
 }
 
 /// What version of a package is wanted.
@@ -135,19 +232,27 @@ impl Want {
 }
 
 enum Outcome {
-    Pulled(PulledRelease, Vec<String>),
+    /// Fetched: what to report, what to warn about, and what to record in the lockfile.
+    /// Boxed because it dwarfs the other variant and this is returned per package.
+    Pulled(Box<Pulled>),
     /// The store already holds it.
     Already(Version),
+}
+
+struct Pulled {
+    release: PulledRelease,
+    warnings: Vec<String>,
+    locked: Option<Locked>,
 }
 
 fn pull_one(
     ctx: &Ctx,
     store: &Store,
     clients: &[(String, String, Box<dyn Registry>)],
-    name: &str,
-    want: &Want,
+    wanted: &Wanted,
     dry_run: bool,
 ) -> Result<Outcome> {
+    let (name, want) = (wanted.name.as_str(), &wanted.want);
     // The registry is asked first, even when the store already holds *a* version in this
     // major line. `vaire pull acme-glossary` means "bring me the current one", and stopping
     // at whatever is cached would make the command unable to do the thing retention exists
@@ -161,16 +266,17 @@ fn pull_one(
         return Ok(Outcome::Already(version));
     }
     if dry_run {
-        return Ok(Outcome::Pulled(
-            PulledRelease {
+        return Ok(Outcome::Pulled(Box::new(Pulled {
+            release: PulledRelease {
                 package: name.to_string(),
                 version: version.to_string(),
                 registry: registry_name,
                 path: String::new(),
                 replaced: Vec::new(),
             },
-            Vec::new(),
-        ));
+            warnings: Vec::new(),
+            locked: None,
+        })));
     }
 
     // Downloaded beside the store rather than into it: nothing enters the store that has
@@ -180,6 +286,23 @@ fn pull_one(
     let downloaded = scratch.join(format!("{name}-{version}-{}.tgz", std::process::id()));
     let _cleanup = RemoveOnDrop(downloaded.clone());
     let artifact = client.fetch(name, version, &downloaded)?;
+
+    // The lockfile's digest, checked against what the registry served. `fetch` has already
+    // confirmed the bytes match the registry's *current* claim; this confirms that claim
+    // still matches what was recorded, which is the only place a registry quietly changing
+    // what it serves under a published version would ever be caught.
+    if let Some(expected) = &wanted.expect
+        && expected != &artifact.sha256
+    {
+        return Err(VaireError::Registry(format!(
+            "{name} {version} does not match {}: it records {}, and '{registry_name}' now \
+             serves {}. A published version is supposed to be immutable, so this is worth \
+             understanding before trusting either",
+            crate::lockfile::FILE_NAME,
+            &expected[..expected.len().min(12)],
+            &artifact.sha256[..artifact.sha256.len().min(12)],
+        )));
+    }
 
     // No embedder is a degradation, not a failure: a package you can read lexically is
     // worth more than a pull that refused because a provider was unconfigured.
@@ -207,16 +330,24 @@ fn pull_one(
     // bolted on — and safe to be blunt about because the remote keeps every version.
     let replaced = retain(store, ctx.home(), name, version, &mut warnings);
 
-    Ok(Outcome::Pulled(
-        PulledRelease {
+    Ok(Outcome::Pulled(Box::new(Pulled {
+        release: PulledRelease {
             package: name.to_string(),
             version: version.to_string(),
-            registry: registry_name,
+            registry: registry_name.clone(),
             path: materialized.path.display().to_string(),
             replaced,
         },
         warnings,
-    ))
+        locked: Some(Locked {
+            name: name.to_string(),
+            version,
+            source: crate::lockfile::Source::Registry,
+            registry: Some(registry_name),
+            sha256: Some(artifact.sha256),
+            pinned: false,
+        }),
+    })))
 }
 
 /// Ask each registry in turn for a version satisfying `want`.
@@ -316,9 +447,14 @@ fn retain(
 }
 
 /// `acme-core` or `acme-core@1.4.2`.
-fn parse_spec(spec: &str) -> Result<(String, Want)> {
+fn parse_spec(spec: &str) -> Result<Wanted> {
+    let plain = |name: &str, want: Want| Wanted {
+        name: name.to_string(),
+        want,
+        expect: None,
+    };
     match spec.rsplit_once('@') {
-        None => Ok((spec.to_string(), Want::Constraint("^1".to_string()))),
+        None => Ok(plain(spec, Want::Constraint("^1".to_string()))),
         Some((name, version)) => {
             // `name@^1` is the manifest's own spelling and reads as a constraint; a bare
             // triple is an exact version. Accepting both means the two forms someone might
@@ -331,7 +467,7 @@ fn parse_spec(spec: &str) -> Result<(String, Want)> {
                     ))
                 })?),
             };
-            Ok((name.to_string(), want))
+            Ok(plain(name, want))
         }
     }
 }
@@ -342,7 +478,7 @@ fn parse_spec(spec: &str) -> Result<(String, Want)> {
 /// The catalog is *not* consulted here, deliberately: a dependency satisfiable from a
 /// working copy is already satisfiable, and pulling a published copy of something you have
 /// checked out beside you would replace what you are authoring with what you published.
-fn unsatisfied_dependencies(ctx: &Ctx, store: &Store) -> Result<Vec<(String, Want)>> {
+fn unsatisfied_dependencies(ctx: &Ctx, store: &Store) -> Result<Vec<Wanted>> {
     let ws = ctx.workspace()?;
     let mut out = Vec::new();
     for (name, constraint) in &ctx.config.dependencies {
@@ -352,7 +488,11 @@ fn unsatisfied_dependencies(ctx: &Ctx, store: &Store) -> Result<Vec<(String, Wan
         if store.satisfying(name, constraint).is_some() {
             continue;
         }
-        out.push((name.clone(), Want::Constraint(constraint.clone())));
+        out.push(Wanted {
+            name: name.clone(),
+            want: Want::Constraint(constraint.clone()),
+            expect: None,
+        });
     }
     Ok(out)
 }
@@ -371,18 +511,38 @@ mod tests {
 
     #[test]
     fn a_spec_reads_both_forms_people_type() {
-        let (name, want) = parse_spec("acme-core").unwrap();
-        assert_eq!(name, "acme-core");
-        assert!(matches!(want, Want::Constraint(c) if c == "^1"));
+        let wanted = parse_spec("acme-core").unwrap();
+        assert_eq!(wanted.name, "acme-core");
+        assert!(matches!(wanted.want, Want::Constraint(c) if c == "^1"));
 
         // The manifest's own spelling.
-        let (_, want) = parse_spec("acme-core@^2").unwrap();
-        assert!(matches!(want, Want::Constraint(c) if c == "^2"));
+        assert!(
+            matches!(parse_spec("acme-core@^2").unwrap().want, Want::Constraint(c) if c == "^2")
+        );
 
         // A bare triple is exact — which is how a yanked version is still reachable.
-        let (_, want) = parse_spec("acme-core@1.4.2").unwrap();
-        assert!(matches!(want, Want::Exact(v) if v == Version::new(1, 4, 2)));
+        assert!(
+            matches!(parse_spec("acme-core@1.4.2").unwrap().want, Want::Exact(v) if v == Version::new(1, 4, 2))
+        );
 
         assert!(parse_spec("acme-core@1.4").is_err());
+    }
+
+    #[test]
+    fn locked_refuses_an_entry_it_cannot_reproduce() {
+        let lockfile = Lockfile::new(vec![Locked {
+            name: "acme-internal".into(),
+            version: Version::new(0, 3, 0),
+            source: crate::lockfile::Source::Workspace,
+            registry: None,
+            sha256: None,
+            pinned: false,
+        }]);
+        // Passing over it quietly would let a pipeline report a reproduction it did not
+        // perform, which is the one thing `--locked` exists to prevent.
+        let Err(e) = from_lockfile(Some(&lockfile)) else {
+            panic!("an entry with no digest cannot be reproduced");
+        };
+        assert!(e.to_string().contains("cannot be obtained again"), "{e}");
     }
 }

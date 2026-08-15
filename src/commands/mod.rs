@@ -69,6 +69,8 @@ pub struct Ctx {
     /// The embedding provider can own an HTTP connection pool or command configuration;
     /// retain it for the invocation (and all MCP requests) rather than recreating it per call.
     embedder: std::cell::OnceCell<Box<dyn crate::embed::Embedder>>,
+    /// `--frozen`: answer only from the store (registry.v2.md §6).
+    frozen: bool,
 }
 
 impl Ctx {
@@ -84,6 +86,7 @@ impl Ctx {
             home: crate::userconfig::vaire_home(),
             workspace: std::cell::OnceCell::new(),
             embedder: std::cell::OnceCell::new(),
+            frozen: false,
         })
     }
 
@@ -125,6 +128,7 @@ impl Ctx {
             home,
             workspace,
             embedder: std::cell::OnceCell::new(),
+            frozen: false,
         })
     }
 
@@ -133,6 +137,21 @@ impl Ctx {
         self.workspace
             .get()
             .is_some_and(crate::workspace::Workspace::is_rootless)
+    }
+
+    /// Answer only from the store for this invocation (`--frozen`).
+    ///
+    /// Set before the workspace is built, which is why it is a builder rather than a
+    /// setter: the memoized view carries the restriction, so a later `workspace()` cannot
+    /// hand back an unrestricted one.
+    pub fn with_frozen(mut self, frozen: bool) -> Ctx {
+        self.frozen = frozen;
+        self
+    }
+
+    /// Whether this invocation answers only from the store.
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
     }
 
     /// Point this invocation at a different vaire home. The seam in-process tests use to
@@ -151,7 +170,10 @@ impl Ctx {
     /// The linked-package view rooted at this package (memoized).
     pub fn workspace(&self) -> Result<&crate::workspace::Workspace> {
         if self.workspace.get().is_none() {
-            let ws = crate::workspace::Workspace::new(&self.repo, &self.config)?;
+            let mut ws = crate::workspace::Workspace::new(&self.repo, &self.config)?;
+            if self.frozen {
+                ws = ws.frozen(crate::store::Store::at(&self.home));
+            }
             let _ = self.workspace.set(ws);
         }
         Ok(self.workspace.get().expect("just initialized"))

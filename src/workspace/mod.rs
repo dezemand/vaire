@@ -132,6 +132,14 @@ pub struct Workspace {
     /// than guessing at write time. Resolution refuses the guess too — see
     /// [`Workspace::locate`].
     catalog: Option<BTreeMap<String, Vec<PathBuf>>>,
+    /// Set by `--frozen`: resolution may only answer from the store (registry.v2.md §6).
+    ///
+    /// `None` is the ordinary mode, where a live link is exactly what you want — authoring
+    /// wants the working copy. `Some` is the mode where "answered against acme-core 1.4.2"
+    /// has to be a claim someone can check, so a working copy is refused rather than
+    /// followed: it has no version anyone else can obtain, and following it silently is how
+    /// a reproducible-looking answer stops being one.
+    frozen: Option<crate::store::Store>,
 }
 
 /// The synthetic run-root's package id in a rootless session. Empty deliberately: manifest
@@ -151,6 +159,7 @@ impl Workspace {
             run_root_id: run_root_id.clone(),
             handles: RefCell::new(BTreeMap::new()),
             catalog: None,
+            frozen: None,
         };
         ws.handles.borrow_mut().insert(
             run_root.clone(),
@@ -163,6 +172,17 @@ impl Workspace {
             }),
         );
         Ok(ws)
+    }
+
+    /// Restrict this view to the store (`--frozen`).
+    pub fn frozen(mut self, store: crate::store::Store) -> Workspace {
+        self.frozen = Some(store);
+        self
+    }
+
+    /// Whether this view answers only from the store.
+    pub fn is_frozen(&self) -> bool {
+        self.frozen.is_some()
     }
 
     /// The view for a **rootless** session: no package to stand in, scope taken from the
@@ -217,6 +237,7 @@ impl Workspace {
             run_root_id: run_root_id.clone(),
             handles: RefCell::new(BTreeMap::new()),
             catalog: Some(catalog),
+            frozen: None,
         };
         ws.handles.borrow_mut().insert(
             run_root.clone(),
@@ -300,6 +321,26 @@ impl Workspace {
     /// one flat set of links serve the whole closure). Errors are specific: not linked /
     /// broken link / name mismatch / unreadable manifest.
     pub fn locate(&self, source: &PackageHandle, name: &str) -> Result<Rc<PackageHandle>> {
+        let located = self.locate_any(source, name)?;
+        // The `--frozen` gate sits *after* resolution rather than inside it, deliberately:
+        // the answer is found the same way either way, and what changes is only whether it
+        // is allowed to count. That keeps one resolution order to reason about, and makes
+        // the refusal able to say what it found and why it will not use it.
+        let Some(store) = &self.frozen else {
+            return Ok(located);
+        };
+        if store.contains(&located.root) || located.is_run_root {
+            return Ok(located);
+        }
+        Err(VaireError::Dependency(format!(
+            "--frozen answers only from the store, and '{name}' resolves to {} — a working \
+             copy, whose version nobody else can obtain. Publish it and `vaire pull {name}`, \
+             or drop --frozen and accept that this answer is not reproducible",
+            located.root.display()
+        )))
+    }
+
+    fn locate_any(&self, source: &PackageHandle, name: &str) -> Result<Rc<PackageHandle>> {
         if name == source.id.as_str() {
             return Err(VaireError::Dependency(format!(
                 "package '{name}' cannot depend on itself; bare references are already local"
