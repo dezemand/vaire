@@ -189,6 +189,22 @@ pub fn to_node(rel_path: &str, doc: Document) -> Option<Node> {
         }
     }
 
+    // 3. `vaire/`-prefixed markers inside fenced diagram blocks (```plantuml / ```mermaid
+    //    / etc.) in this node's own prose — issue #23. The marker is written where the
+    //    fence is, so the source is this node's own file. Malformed markers are dropped
+    //    here (nothing to attach them to yet); see `corpus::diagram` for the scan itself.
+    for (marker, line) in super::diagram::scan_prose(&doc.prose, doc.prose_start_line) {
+        if let super::diagram::DiagramMarker::Resolved(target) = marker {
+            edges.push(Edge {
+                from: id.clone(),
+                to: target,
+                origin: RefOrigin::Diagram,
+                source_file: rel_path.to_string(),
+                line,
+            });
+        }
+    }
+
     Some(Node {
         id,
         path: rel_path.to_string(),

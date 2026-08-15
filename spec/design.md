@@ -322,6 +322,39 @@ for: the speaker said "someone from logistics," and the record still shows that,
 followable. Each resolution is its own commit; the Git diff is the audit trail (which
 descriptor resolved to which ID, and who decided), for free.
 
+**Diagram references (issue #23).** A diagram's own link syntax can carry a reference too
+— vaire adds edges for these, and nothing else: it does not render, rasterize, validate,
+or parse any diagram language. Inside a diagram source, a reference is any link target
+that begins with the literal prefix `vaire/`, e.g. `[[vaire/system:gateway]]` (PlantUML)
+or `click A href "vaire/system:gateway"` (Mermaid). The scan runs over the *raw text* of
+the diagram source — the marker is ours, not corpus grammar, and it makes the scan work
+identically across every diagram language that can carry a link target, draw.io included.
+
+The address charset is `[A-Za-z0-9._:/@-]`; a target ends at the first character outside
+it. The marker must **start** a target — if the character right before `vaire/` is itself
+an address character, it is skipped, so `https://example.com/vaire/x` (somebody's URL) is
+not matched. Trailing `.`/`/` are trimmed. Results are de-duplicated, first-occurrence
+order. What follows the prefix parses with the ordinary target grammar above (`type:id`,
+`@pkg/type:id`, scoped `container-id/type:local`) and resolves the ordinary way
+(scope-first, tombstone-following, cross-package). A `vaire/` target that does not parse
+is reported, not silently dropped — a typo must not evaporate. There is no loose-end form
+in a diagram: `[[?type: descriptor]]` needs a space, and a diagram is not where an open
+question gets recorded.
+
+A diagram belongs to a node only when that node's **prose** points at it — never
+frontmatter, which is a citation like `spec:`, not a placement: a fenced ```` ```plantuml
+````/```` ```puml ````/```` ```uml ````/```` ```mermaid ```` block, or a relative
+Markdown link/image whose extension names a diagram language (`.puml` `.plantuml` `.pu`
+`.iuml` → PlantUML; `.mmd` `.mermaid` → Mermaid; `.drawio` `.dio` → draw.io — `.drawio.svg`
+and `.drawio.png` are already pictures, skipped). Paths resolve relative to the referring
+file only, the same rule every other Markdown tool applies.
+
+The resulting edge's `ref_type` is `diagram` (cli.md §3.2), distinct from `inline`: a
+diagram edge is not fixable the way a prose one is, and `check`'s drift rule (§7) must
+never fire on it. `source_file`/`line` point at where the marker is *written* — the
+diagram file for an external diagram, the node's own file for a fenced block — since a
+reference lives where it is written, not where its containing node happens to be.
+
 ## 7. Authoring contract
 
 Every author — human or agent — follows the same contract when writing a corpus file.
