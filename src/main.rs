@@ -166,9 +166,11 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         return Ok(ExitCode::Success);
     }
 
-    // `mcp` builds its own long-lived context and never returns output.
+    // `mcp` builds its own long-lived context and never returns output. Outside any
+    // package it serves the rootless session, which is the point of exposing it that way:
+    // an agent can be pointed at the machine rather than at one checkout.
     if let Command::Mcp = cli.command {
-        let ctx = Ctx::new(cli.repo, cli.config)?;
+        let ctx = read_ctx(cli.repo, cli.config, false)?;
         mcp::serve(ctx)?;
         return Ok(ExitCode::Success);
     }
@@ -184,7 +186,12 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         ));
     }
 
-    let ctx = Ctx::new(cli.repo, cli.config)?;
+    // Read commands fall back to the catalog when there is no package to stand in;
+    // maintain commands keep erroring, because there is nothing for them to maintain.
+    let ctx = match cli.command.is_read() {
+        true => read_ctx(cli.repo, cli.config, cli.command.wants_all())?,
+        false => Ctx::new(cli.repo, cli.config)?,
+    };
 
     match cli.command {
         Command::Resolve { id } => {
@@ -215,6 +222,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             scope,
             limit,
             local,
+            all: _,
         } => {
             let out = commands::search::run(
                 &ctx,
@@ -231,6 +239,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             type_filter,
             limit,
             local,
+            all: _,
         } => {
             let out = commands::suggest::run(
                 &ctx,
@@ -439,5 +448,42 @@ fn emit_error(err: &VaireError, json: bool) {
         println!("{}", err.to_json());
     } else {
         eprintln!("error: {err}");
+    }
+}
+
+/// The context a **read** command runs in.
+///
+/// Ordinarily the package you are standing in. Outside one — or with `--all` — the
+/// rootless session, scoped by the catalog (registry.v2.md §9). The fallback is confined
+/// to reads on purpose: a maintain command has nothing to maintain without a package, and
+/// its `no corpus found` error is the right answer rather than a scope substitution.
+///
+/// Note which way the fallback runs. It never rescues a *resolution* — an author's
+/// declared dependency that cannot be located still fails, because a manifest that
+/// silently resolves from ambient machine state has stopped meaning anything. It rescues
+/// only the case where there is no manifest at all to betray.
+fn read_ctx(
+    repo: Option<std::path::PathBuf>,
+    config: Option<std::path::PathBuf>,
+    all: bool,
+) -> Result<Ctx> {
+    let home = vaire::userconfig::vaire_home();
+    // `--all` widens the closure query, so whatever package you are standing in stays in
+    // scope — including one the catalog has never been told about. Standing nowhere is not
+    // an error here: `--all` is exactly as valid from `~` as from inside a package.
+    if all {
+        let standing_in = Ctx::new(repo, config)
+            .ok()
+            .map(|ctx| (ctx.config.name.clone(), ctx.repo.root().to_path_buf()));
+        return Ctx::rootless_with(home, standing_in);
+    }
+    // An explicit `--repo` / `VAIRE_REPO` naming something that is not a package is a
+    // mistake to report, not the ambient "no package anywhere above me" the fallback is
+    // for. Both arrive as `NoRepo`; only the ambient one may be answered with a different
+    // scope, or a typo'd override would silently return results from the whole machine.
+    let overridden = repo.is_some() || std::env::var_os("VAIRE_REPO").is_some();
+    match Ctx::new(repo, config) {
+        Err(VaireError::NoRepo) if !overridden => Ctx::rootless(home),
+        other => other,
     }
 }

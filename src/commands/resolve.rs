@@ -12,6 +12,7 @@ pub fn run(ctx: &Ctx, id: &str) -> Result<ResolveOutput> {
     let id: NodeId = id
         .parse()
         .map_err(|e| VaireError::Usage(format!("bad id '{id}': {e}")))?;
+    crate::commands::require_qualified(ctx, &id)?;
     let ws = ctx.workspace()?;
     let resolved = resolver::resolve(ws, ws.current(), &id)?;
 
