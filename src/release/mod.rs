@@ -8,6 +8,7 @@
 
 pub mod classify;
 pub mod record;
+pub mod summary;
 
 use std::path::Path;
 

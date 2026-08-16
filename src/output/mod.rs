@@ -1145,6 +1145,15 @@ pub struct ReleaseOutput {
     /// Integrity warnings the release carried past — reported, never fatal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<usize>,
+    /// Whether the record carries prose from `--summary`. Absent when it does not, so the
+    /// ordinary release's JSON is unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub summary: bool,
+    /// A planned MAJOR with no `--notes` yet: what the real run will refuse over, reported
+    /// rather than raised so a dry run can hand an agent the plan for the notes it is being
+    /// asked to draft.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub notes_required: bool,
     /// Changed entities a lot of others point at — the classifier saying "structure says
     /// patch, but this is load-bearing". Advisory; the maintainer's answer stands.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1186,6 +1195,8 @@ impl ReleaseOutput {
             record: None,
             commit: None,
             warnings: None,
+            summary: false,
+            notes_required: false,
             advisories: Vec::new(),
         }
     }
@@ -1193,6 +1204,18 @@ impl ReleaseOutput {
     /// Attach the heavily-cited advisories (chainable — every constructor may carry them).
     pub fn with_advisories(mut self, advisories: Vec<CitedEntity>) -> ReleaseOutput {
         self.advisories = advisories;
+        self
+    }
+
+    /// Record that the release record carries `--summary` prose.
+    pub fn with_summary(mut self, summary: bool) -> ReleaseOutput {
+        self.summary = summary;
+        self
+    }
+
+    /// Record that a planned MAJOR still owes its invalidated-assumptions notes.
+    pub fn with_notes_required(mut self, required: bool) -> ReleaseOutput {
+        self.notes_required = required;
         self
     }
 
@@ -1310,7 +1333,11 @@ impl Output for ReleaseOutput {
             kv(&mut out, "tag", 9, tag);
         }
         if let Some(record) = &self.record {
-            kv(&mut out, "record", 9, record);
+            let record = match self.summary {
+                true => format!("{record} (with summary)"),
+                false => record.clone(),
+            };
+            kv(&mut out, "record", 9, &record);
         }
         if let Some(commit) = &self.commit {
             kv(&mut out, "commit", 9, &commit[..commit.len().min(12)]);
@@ -1342,6 +1369,12 @@ impl Output for ReleaseOutput {
                 "  {} — `vaire check` for the detail\n",
                 pluralize(warnings, "warning")
             )));
+        }
+        if self.notes_required {
+            out.push_str(&yellow(
+                "  a major needs its invalidated-assumptions notes — the real run refuses \
+                 without `--notes <file>`\n",
+            ));
         }
         if self.status == ReleaseStatus::Released {
             out.push_str(&dim("  push the commit and tag when you are ready\n"));

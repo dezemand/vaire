@@ -49,6 +49,22 @@ impl Violation {
         }
     }
 
+    /// Whether this violation implicates `path` (package-root-relative, forward slashes).
+    ///
+    /// The filter behind `release`'s post-write check: the release tree is clean by gate,
+    /// so a violation naming the record just written is the summary's doing, and saying so
+    /// beats re-printing a corpus-wide report the maintainer already passed a moment ago.
+    /// A `MissingDependency` names no file — it is about the manifest — so it belongs to
+    /// nobody's path.
+    pub fn involves(&self, path: &str) -> bool {
+        match self {
+            Violation::DuplicateId { paths, .. } => paths.iter().any(|p| p == path),
+            Violation::DanglingRef { path: p, .. }
+            | Violation::UndeclaredImport { path: p, .. } => p == path,
+            Violation::MissingDependency { .. } => false,
+        }
+    }
+
     /// A one-line human description (no `kind` prefix).
     pub fn detail(&self) -> String {
         match self {

@@ -6,6 +6,35 @@ uses [Semantic Versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- **`vaire release --summary <file>`** (cli.md §4.7) — narration in the release record,
+  written by somebody other than the classifier. The record has always been the changelog,
+  and it has always been *computed*: the version, the bump, and edges to what was added,
+  changed and retired. What a diff cannot write is what any of it meant. `--summary` takes
+  a Markdown file and lands it as a `## Summary` section, so the prose ships inside the
+  release it describes.
+
+  **Vairë does not call a model, and gains no way to.** The seam is a file — no prompt, no
+  API client, no provider setting — so the producer is somebody else's business and a
+  package stays releasable by a maintainer who has no model at all. Opt-in in the only
+  sense that matters: pass nothing, and nothing changed.
+
+  What makes outside prose safe to admit is that **the record's claims about itself stay
+  computed**. A summary may retitle the record (`name`), extend `aliases` (union — the
+  version spellings can never be displaced), and add keys of its own; naming `id`, `type`,
+  `date`, `bump`, `added`, `changed`, `retired` or `generated_summary` is refused *by
+  name*, because an author who set `added:` believes they described the release. And
+  `check` runs again with the record on disk before the commit: the tree is clean by gate,
+  so any violation is the summary's doing, an address it imagined refuses the release, and
+  the record is rolled back to a tree byte-identical to where it started. `generated_summary:
+  true` marks the result, so a reader can tell narration that came from outside the
+  classifier from prose the tool derived.
+
+  `--dry-run --summary` rehearses all of it, write-and-check included, and leaves nothing
+  behind. Paired with `--dry-run --json` that is the whole CI shape: one job emits the
+  plan, a second turns it into prose in an image carrying whatever wrote it, a third cuts
+  the release — so an agent harness never has to live in the image that ships `vaire`. The
+  **vaire-release-summary** skill is the writing half of that contract.
+
 - **Reading without a package to stand in** (cli.md §6.8). Every read command has assumed
   an author: scope is the package you are in, plus what its manifest declares. That serves
   the person writing a package and offers nothing to the larger audience who authors
@@ -45,6 +74,11 @@ uses [Semantic Versioning](https://semver.org).
   because there is nothing there for them to maintain.
 
 ### Changed
+- **`vaire release --dry-run` reports the notes a MAJOR owes rather than refusing over
+  them** (`notes_required` in JSON). A dry run writes nothing, so "would cut 2.0.0, and it
+  will need notes" is a faithful prediction rather than a loosened gate — and it was
+  previously impossible to obtain the plan for a major in order to *write* those notes,
+  since the rehearsal demanded them first. The real run still refuses.
 - **Dependency resolution goes through the catalog, and the `^MAJOR` constraint now
   *selects*** (cli.md §6.6). A declared dependency with no `.vaire/packages/<name>` entry
   is satisfied by asking the catalog for a package declaring that name **in the
