@@ -88,6 +88,11 @@ pub enum Source {
     Workspace,
 }
 
+/// Whether `digest` is the shape a sha256 is written in.
+fn is_sha256(digest: &str) -> bool {
+    digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 impl Locked {
     /// Whether this entry names bytes that can be obtained again.
     pub fn reproducible(&self) -> bool {
@@ -125,6 +130,21 @@ impl Lockfile {
                 path.display(),
                 lockfile.lockfile_version
             )));
+        }
+        // A digest is checked at the door rather than wherever it is next used. This file is
+        // committed and hand-editable, so its `sha256` is untrusted text — and a value that
+        // is not a hex digest cannot match anything, so accepting one only defers the
+        // failure to somewhere that has to cope with arbitrary bytes.
+        for entry in &lockfile.packages {
+            if let Some(digest) = &entry.sha256
+                && !is_sha256(digest)
+            {
+                return Err(VaireError::Config(format!(
+                    "{}: {} records a sha256 that is not a 64-character hex digest",
+                    path.display(),
+                    entry.name
+                )));
+            }
         }
         Ok(Some(lockfile))
     }
@@ -263,6 +283,24 @@ mod tests {
         // Guessing would have `--locked` report a reproduction it never performed.
         let e = Lockfile::load(dir.path()).unwrap_err().to_string();
         assert!(e.contains("newer vaire"), "{e}");
+    }
+
+    #[test]
+    fn a_digest_that_is_not_a_digest_is_refused_at_the_door() {
+        let dir = tempfile::tempdir().unwrap();
+        // Hand-edited or corrupted. Accepting it would only defer the failure to code that
+        // then has to cope with arbitrary bytes — including a multi-byte character in the
+        // middle of a message that wants to abbreviate the digest.
+        std::fs::write(
+            path_for(dir.path()),
+            "lockfile_version = 1\n[[package]]\nname = \"acme-core\"\nversion = \"1.0.0\"\n\
+             source = \"registry\"\nsha256 = \"ünreadable\"\n",
+        )
+        .unwrap();
+        let Err(e) = Lockfile::load(dir.path()) else {
+            panic!("a non-hex digest is not a digest");
+        };
+        assert!(e.to_string().contains("hex digest"), "{e}");
     }
 
     #[test]

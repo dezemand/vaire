@@ -170,7 +170,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     // package it serves the rootless session, which is the point of exposing it that way:
     // an agent can be pointed at the machine rather than at one checkout.
     if let Command::Mcp = cli.command {
-        let ctx = read_ctx(cli.repo, cli.config, false)?.with_frozen(cli.frozen);
+        let ctx = read_ctx(cli.repo, cli.config, false, cli.frozen)?.with_frozen(cli.frozen);
         mcp::serve(ctx)?;
         return Ok(ExitCode::Success);
     }
@@ -223,7 +223,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     // Read commands fall back to the catalog when there is no package to stand in;
     // maintain commands keep erroring, because there is nothing for them to maintain.
     let ctx = match cli.command.is_read() {
-        true => read_ctx(cli.repo, cli.config, cli.command.wants_all())?,
+        true => read_ctx(cli.repo, cli.config, cli.command.wants_all(), cli.frozen)?,
         false => Ctx::new(cli.repo, cli.config)?,
     }
     .with_frozen(cli.frozen);
@@ -526,6 +526,7 @@ fn read_ctx(
     repo: Option<std::path::PathBuf>,
     config: Option<std::path::PathBuf>,
     all: bool,
+    frozen: bool,
 ) -> Result<Ctx> {
     let home = vaire::userconfig::vaire_home();
     // `--all` widens the closure query, so whatever package you are standing in stays in
@@ -535,7 +536,7 @@ fn read_ctx(
         let standing_in = Ctx::new(repo, config)
             .ok()
             .map(|ctx| (ctx.config.name.clone(), ctx.repo.root().to_path_buf()));
-        return Ctx::rootless_with(home, standing_in);
+        return Ctx::rootless_with(home, standing_in, frozen);
     }
     // An explicit `--repo` / `VAIRE_REPO` naming something that is not a package is a
     // mistake to report, not the ambient "no package anywhere above me" the fallback is
@@ -543,7 +544,7 @@ fn read_ctx(
     // scope, or a typo'd override would silently return results from the whole machine.
     let overridden = repo.is_some() || std::env::var_os("VAIRE_REPO").is_some();
     match Ctx::new(repo, config) {
-        Err(VaireError::NoRepo) if !overridden => Ctx::rootless(home),
+        Err(VaireError::NoRepo) if !overridden => Ctx::rootless_with(home, None, frozen),
         other => other,
     }
 }

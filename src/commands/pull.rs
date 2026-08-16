@@ -68,15 +68,23 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<PullOutput> {
     let home = ctx.home().to_path_buf();
     let store = Store::at(&home);
 
-    let previous = Lockfile::load(ctx.repo.root())?;
+    // Argument validation before any file is read: a usage error should not depend on
+    // whether a lockfile happens to parse.
+    if options.locked && options.spec.is_some() {
+        return Err(VaireError::Usage(
+            "`--locked` reproduces the whole recorded resolution, so it takes no package \
+             name — drop one or the other"
+                .into(),
+        ));
+    }
+    // Rootless has no package, so there is no lockfile of its own to read; `ctx.repo` here
+    // is the vaire home, and reading (or writing) a lockfile there would be about nothing.
+    let previous = match ctx.is_rootless() {
+        true => None,
+        false => Lockfile::load(ctx.repo.root())?,
+    };
     let wanted: Vec<Wanted> = match (options.locked, options.spec) {
-        (true, Some(_)) => {
-            return Err(VaireError::Usage(
-                "`--locked` reproduces the whole recorded resolution, so it takes no package \
-                 name — drop one or the other"
-                    .into(),
-            ));
-        }
+        (true, Some(_)) => unreachable!("rejected above"),
         (true, None) => from_lockfile(previous.as_ref())?,
         (false, Some(spec)) => vec![parse_spec(spec)?],
         (false, None) => unsatisfied_dependencies(ctx, &store)?,
@@ -161,8 +169,26 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<PullOutput> {
     // The lockfile records what this run resolved, merged over what was there — a package
     // this run could not reach keeps its previous entry, because that record is the thing
     // somebody else reproduces from. Skipped on a dry run, which writes nothing anywhere.
-    if !options.dry_run && !resolved.is_empty() {
-        let declared: Vec<String> = ctx.config.dependencies.keys().cloned().collect();
+    // Rootless has no lockfile to keep: `ctx.repo` is the vaire home, and a rootless config
+    // declares nothing — so merging would produce an empty file and `write` would *delete*
+    // whatever happened to sit at `$VAIRE_HOME/knowledge.lock`. A named pull from outside a
+    // package is a store operation; it has no resolution to record.
+    if !options.dry_run && !resolved.is_empty() && !ctx.is_rootless() {
+        // The **whole closure**, not just the direct dependencies (cli.md §4.13:
+        // "reproducing a resolution means reproducing all of it"). `merged` forgets any name
+        // not in this list, so passing only the direct ones here would have `vaire pull`
+        // delete the transitive entries `vaire index` had just written — and a later
+        // `--locked` would then reproduce half a closure while claiming to be exact.
+        let declared: Vec<String> = match ctx.workspace() {
+            Ok(ws) => ws
+                .closure()
+                .into_iter()
+                .map(|(id, _)| id.to_string())
+                .collect(),
+            // No workspace to walk (an unlinked dependency, a broken link): the manifest's
+            // own list is the honest floor, and `merged` keeps what it cannot re-resolve.
+            Err(_) => ctx.config.dependencies.keys().cloned().collect(),
+        };
         let merged = Lockfile::merged(previous.as_ref(), resolved, &declared);
         if let Err(e) = merged.write(ctx.repo.root()) {
             out.warnings
@@ -311,8 +337,8 @@ fn pull_one(
              serves {}. A published version is supposed to be immutable, so this is worth \
              understanding before trusting either",
             crate::lockfile::FILE_NAME,
-            &expected[..expected.len().min(12)],
-            &artifact.sha256[..artifact.sha256.len().min(12)],
+            short(expected),
+            short(&artifact.sha256),
         )));
     }
 
@@ -456,6 +482,16 @@ fn retain(
         }
     }
     replaced
+}
+
+/// The first few characters of a digest, for a message.
+///
+/// By characters, not bytes. `Lockfile::load` rejects a non-hex digest, so this should never
+/// see one — but this is the error path for a lockfile that disagrees with a registry, and
+/// panicking mid-character while reporting a mismatch would replace the finding with a
+/// crash.
+fn short(digest: &str) -> String {
+    digest.chars().take(12).collect()
 }
 
 /// `acme-core` or `acme-core@1.4.2`.

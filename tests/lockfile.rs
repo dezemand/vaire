@@ -415,6 +415,134 @@ fn frozen_links_from_the_store_without_consulting_the_catalog() {
     assert_eq!(dep.status, "store", "{dep:?}");
 }
 
+/// A second publishable package, so the glossary can depend on something and the consumer
+/// can acquire a **transitive** member — the case that separates "the closure" from "the
+/// direct dependencies".
+fn units(registry: &Path) -> Publisher {
+    let corpus = Corpus::empty();
+    std::fs::write(
+        corpus.root().join("knowledge.toml"),
+        "name = \"acme-units\"\nversion = \"1.0.0\"\ninclude = [\"**/*.md\"]\ntypes = [\"unit\"]\n",
+    )
+    .unwrap();
+    corpus
+        .add(
+            "knowledge/newton-metre.md",
+            "---\nid: newton-metre\ntype: unit\nname: Newton metre\n---\n# Newton metre\n\nTorque.\n",
+        )
+        .commit()
+        .build();
+    let publisher = Publisher {
+        corpus,
+        home: temp(),
+    };
+    vaire::commands::registry::add(
+        publisher.home.path(),
+        "lab",
+        &registry.display().to_string(),
+        0,
+        true,
+    )
+    .expect("registry add");
+    publisher
+}
+
+#[test]
+fn pulling_does_not_prune_the_transitive_closure_that_indexing_recorded() {
+    let registry = temp();
+    let units = units(registry.path());
+    units.publish();
+
+    // The glossary depends on the units package, so a consumer of the glossary acquires
+    // `acme-units` transitively — it is in the closure and *not* in the consumer's manifest.
+    let publisher = Publisher::new(registry.path());
+    std::fs::write(
+        publisher.root().join("knowledge.toml"),
+        "name = \"acme-glossary\"\nversion = \"1.0.0\"\ninclude = [\"**/*.md\"]\n\
+         types = [\"term\"]\n\n[dependencies]\nacme-units = \"^1\"\n",
+    )
+    .unwrap();
+    vaire::commands::catalog::add(publisher.home.path(), Some(units.root())).expect("catalog add");
+    publisher.corpus.commit().build();
+    publisher.publish();
+
+    let consumer = Consumer::new(registry.path());
+    consumer.pull(Some("acme-glossary"));
+    consumer.pull(Some("acme-units"));
+    consumer.index(&consumer.ctx());
+    assert!(
+        consumer.lockfile().unwrap().get("acme-units").is_some(),
+        "indexing records the whole closure"
+    );
+
+    // `merged` forgets whatever is absent from the list it is given, so a pull passing only
+    // the *direct* dependencies would delete this — and a later `--locked` would then
+    // reproduce half a closure while claiming to be exact (cli.md §4.13).
+    consumer.pull(Some("acme-glossary"));
+    let after = consumer.lockfile().expect("still written");
+    assert!(
+        after.get("acme-units").is_some(),
+        "pull pruned a transitive entry indexing had recorded: {after:?}"
+    );
+}
+
+#[test]
+fn frozen_is_store_only_even_outside_a_package() {
+    let registry = temp();
+    let publisher = Publisher::new(registry.path());
+    publisher.publish();
+
+    let consumer = Consumer::new(registry.path());
+    consumer.pull(None);
+    // Both worlds hold the name. Unfrozen, the working copy displaces the store entry; under
+    // `--frozen` that displacement must not hide the store entry, or the package would be
+    // invisible *and* the working copy refused — a release the store actually holds, unusable.
+    vaire::commands::catalog::add(consumer.home.path(), Some(publisher.root()))
+        .expect("catalog add");
+
+    let frozen =
+        vaire::commands::Ctx::rootless_with(consumer.home.path().to_path_buf(), None, true)
+            .expect("a frozen rootless session");
+    assert!(frozen.is_frozen());
+    let ws = frozen.workspace().expect("the view");
+    let located = ws
+        .locate(&ws.current(), "acme-glossary")
+        .expect("the store entry answers");
+    assert!(
+        consumer.store().contains(&located.root),
+        "a frozen session must answer from the store, got {}",
+        located.root.display()
+    );
+}
+
+#[test]
+fn a_named_pull_outside_a_package_leaves_the_home_lockfile_alone() {
+    let registry = temp();
+    let publisher = Publisher::new(registry.path());
+    publisher.publish();
+    let consumer = Consumer::new(registry.path());
+
+    // A file that has nothing to do with this pull. Rootless `ctx.repo` is the vaire home
+    // and a rootless config declares nothing, so a merge-and-write here would resolve to an
+    // empty lockfile — and `write` removes the file when there is nothing to record.
+    let home_lock = vaire::lockfile::path_for(consumer.home.path());
+    std::fs::write(&home_lock, "lockfile_version = 1\n").unwrap();
+
+    let ctx = vaire::commands::Ctx::rootless(consumer.home.path().to_path_buf()).expect("rootless");
+    vaire::commands::pull::run(
+        &ctx,
+        vaire::commands::pull::Options {
+            spec: Some("acme-glossary"),
+            registry: None,
+            locked: false,
+            dry_run: false,
+        },
+    )
+    .expect("a named pull works from anywhere");
+
+    assert!(home_lock.is_file(), "the home lockfile was removed");
+}
+
 #[test]
 fn a_stale_lock_is_imprecise_rather_than_wrong() {
     let registry = temp();

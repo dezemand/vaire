@@ -82,6 +82,8 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
     // What the closure settled on, recorded in `knowledge.lock` at the end of the pass.
     let mut locked: Vec<crate::lockfile::Locked> = Vec::new();
     let mut in_closure: Vec<String> = Vec::new();
+    // Why the lockfile could not be written truthfully this run, if it could not.
+    let mut lock_blocked: Vec<String> = Vec::new();
 
     for (id, entry) in ws.closure() {
         match entry {
@@ -104,11 +106,15 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
             // produce the same index, having first had to break the seal to write it.
             Ok(handle) if store.contains(&handle.root) => {
                 in_closure.push(id.to_string());
-                locked.extend(locked_from_store(
-                    &store,
-                    id.as_str(),
-                    &handle.config.version,
-                ));
+                // A store entry that cannot describe itself is a **reason not to write a
+                // lockfile**, not a row to leave out. Omitting it silently would keep the
+                // previous entry's version — or none at all — while the closure reports the
+                // dependency as resolved, so the file would name a resolution that never
+                // happened.
+                match locked_from_store(&store, id.as_str(), &handle.config.version) {
+                    Ok(entry) => locked.push(entry),
+                    Err(e) => lock_blocked.push(format!("{id}: {e}")),
+                }
                 rows.push(DepIndexed {
                     name: id.to_string(),
                     status: "store".to_string(),
@@ -186,12 +192,23 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
     //
     // Never fatal: a lockfile that could not be written is a lost record, and failing
     // `vaire index` over one would be worse than the record's absence.
-    let previous = crate::lockfile::Lockfile::load(ctx.repo.root()).unwrap_or(None);
-    let merged = crate::lockfile::Lockfile::merged(previous.as_ref(), locked, &in_closure);
-    if let Err(e) = merged.write(ctx.repo.root()) {
+    if lock_blocked.is_empty() {
+        let previous = crate::lockfile::Lockfile::load(ctx.repo.root()).unwrap_or(None);
+        let merged = crate::lockfile::Lockfile::merged(previous.as_ref(), locked, &in_closure);
+        if let Err(e) = merged.write(ctx.repo.root()) {
+            eprintln!(
+                "warning: {} was not updated: {e}",
+                crate::lockfile::FILE_NAME
+            );
+        }
+    } else {
+        // Left exactly as it was. A partial lockfile is worse than a stale one: stale is
+        // safe and merely imprecise (within-major substitutability), while partial names a
+        // resolution that did not happen.
         eprintln!(
-            "warning: {} was not updated: {e}",
-            crate::lockfile::FILE_NAME
+            "warning: {} was left unchanged — a store entry could not be read: {}",
+            crate::lockfile::FILE_NAME,
+            lock_blocked.join("; ")
         );
     }
 
@@ -205,12 +222,16 @@ fn locked_from_store(
     store: &crate::store::Store,
     name: &str,
     version: &str,
-) -> Option<crate::lockfile::Locked> {
-    let version: Version = version.parse().ok()?;
-    let source = store.source(name, version).ok()?;
-    Some(crate::lockfile::Locked {
+) -> Result<crate::lockfile::Locked> {
+    let parsed: Version = version.parse().map_err(|_| {
+        crate::error::VaireError::Config(format!(
+            "the store entry declares version {version:?}, which is not MAJOR.MINOR.PATCH"
+        ))
+    })?;
+    let source = store.source(name, parsed)?;
+    Ok(crate::lockfile::Locked {
         name: name.to_string(),
-        version,
+        version: parsed,
         source: crate::lockfile::Source::Registry,
         registry: source.registry,
         sha256: Some(source.artifact_sha256),
