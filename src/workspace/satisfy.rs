@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use crate::catalog::Catalog;
 use crate::config::Config;
 use crate::corpus::repo::Repo;
+use crate::model::Version;
 use crate::store::Store;
 use crate::workspace::Workspace;
 use crate::workspace::link::{self, EntryState};
@@ -42,6 +43,51 @@ pub struct LinkedDep {
     pub name: String,
     /// The package's own directory (what the user recognizes), not the stored link value.
     pub target: String,
+}
+
+/// The exact versions this package holds, from its own `knowledge.lock`.
+///
+/// A pin is a **consumer-side** hold, so it is read from the run root's lockfile and applies
+/// to the whole closure that lockfile describes — the links it governs all live in the run
+/// root's `.vaire/packages/` (see [`satisfy`]).
+///
+/// It selects *within the store* and nowhere else. Resolution order is untouched: an
+/// explicit link, then a working copy the catalog knows, then the store. A pin that
+/// displaced a checkout would mean cloning a package with a pinned lockfile silently stopped
+/// using your own copy of that dependency, which is the last thing a version hold should do.
+#[derive(Debug, Default)]
+pub(crate) struct Pins(BTreeMap<String, Version>);
+
+impl Pins {
+    /// Read the run root's pins. An unreadable lockfile yields no pins and a warning — the
+    /// same posture the rest of the tool takes towards one it refuses to interpret, and the
+    /// visible half matters here because resolution would otherwise silently stop honoring
+    /// holds the file still records.
+    fn load(root: &Path) -> (Pins, Vec<String>) {
+        match crate::lockfile::Lockfile::load(root) {
+            Ok(None) => (Pins::default(), Vec::new()),
+            Ok(Some(lockfile)) => (
+                Pins(
+                    lockfile
+                        .packages
+                        .into_iter()
+                        .filter(|locked| locked.pinned)
+                        .map(|locked| (locked.name, locked.version))
+                        .collect(),
+                ),
+                Vec::new(),
+            ),
+            Err(e) => (
+                Pins::default(),
+                vec![format!("pins are not being honored — {e}")],
+            ),
+        }
+    }
+
+    /// The version of `name` this package holds, if it holds one.
+    fn held(&self, name: &str) -> Option<Version> {
+        self.0.get(name).copied()
+    }
 }
 
 /// What a pass did, and what it could not do.
@@ -76,6 +122,10 @@ struct Demand {
 /// at all degrades to exactly that, one warning and no links.
 pub fn satisfy(repo: &Repo, config: &Config, home: &Path, frozen: bool) -> Satisfied {
     let mut out = Satisfied::default();
+    // Read once, from the run root: the lockfile does not change under a pass, and a pin is
+    // a statement by *this* package about what it will resolve to.
+    let (pins, pin_warnings) = Pins::load(repo.root());
+    out.warnings.extend(pin_warnings);
     // Cheap to build (it is a path) and consulted only after the catalog has nothing, so
     // the ordinary all-linked pass still touches neither it nor the catalog.
     let store = Store::at(home);
@@ -129,7 +179,15 @@ pub fn satisfy(repo: &Repo, config: &Config, home: &Path, frozen: bool) -> Satis
             // *working copies*, and a working copy is precisely what frozen resolution
             // refuses. Skipping it also means the lock is never taken.
             if frozen {
-                match satisfy_one(None, &store, repo.root(), &name, &constraint) {
+                match satisfy_one(
+                    None,
+                    &store,
+                    &pins,
+                    repo.root(),
+                    &name,
+                    &constraint,
+                    &mut out.warnings,
+                ) {
                     Outcome::Linked(dep) => {
                         out.linked.push(dep);
                         progress = true;
@@ -152,7 +210,15 @@ pub fn satisfy(repo: &Repo, config: &Config, home: &Path, frozen: bool) -> Satis
                     }
                 },
             };
-            match satisfy_one(Some(catalog), &store, repo.root(), &name, &constraint) {
+            match satisfy_one(
+                Some(catalog),
+                &store,
+                &pins,
+                repo.root(),
+                &name,
+                &constraint,
+                &mut out.warnings,
+            ) {
                 Outcome::Linked(dep) => {
                     out.linked.push(dep);
                     progress = true;
@@ -239,7 +305,17 @@ pub fn satisfy_name(pkg_root: &Path, name: &str, constraint: &str, home: &Path) 
             return out;
         }
     };
-    match satisfy_one(Some(&catalog), &store, pkg_root, name, constraint) {
+    let (pins, pin_warnings) = Pins::load(pkg_root);
+    out.warnings.extend(pin_warnings);
+    match satisfy_one(
+        Some(&catalog),
+        &store,
+        &pins,
+        pkg_root,
+        name,
+        constraint,
+        &mut out.warnings,
+    ) {
         Outcome::Linked(dep) => out.linked.push(dep),
         Outcome::Note(note) => {
             out.notes.insert(name.to_string(), note);
@@ -294,6 +370,41 @@ fn intersect(demands: &[Demand]) -> std::result::Result<String, String> {
     }
 }
 
+/// The store entry to link for `name`: the pinned version if one is held, else the highest
+/// satisfying one.
+///
+/// A pin that cannot be honored — the version was swept, or deleted by hand — falls back
+/// rather than failing, because refusing to resolve at all would be a worse answer than
+/// resolving to something usable. It is **said**, though: silently resolving to a different
+/// version than the one a committed lockfile pins is exactly the drift a pin exists to
+/// prevent, and the fix is one `vaire pull` away.
+fn stored(
+    store: &Store,
+    pins: &Pins,
+    name: &str,
+    constraint: &str,
+    warnings: &mut Vec<String>,
+) -> Option<PathBuf> {
+    if let Some(held) = pins.held(name) {
+        if store.has(name, held) && held.satisfies_caret(constraint) {
+            return store.entry(name, held);
+        }
+        warnings.push(match store.has(name, held) {
+            // The manifest moved on and the pin did not. Refusing would strand the package;
+            // naming both is what lets somebody see which one to change.
+            true => format!(
+                "'{name}' is pinned to {held}, which no longer satisfies {constraint} —                  `vaire unpin {name}`, or widen the dependency"
+            ),
+            false => format!(
+                "'{name}' is pinned to {held}, which is not in the store —                  `vaire pull {name}@{held}` to honor the pin"
+            ),
+        });
+    }
+    store
+        .satisfying(name, constraint)
+        .and_then(|version| store.entry(name, version))
+}
+
 /// What to say about a name neither the catalog nor the store can satisfy.
 ///
 /// **Never a fetch.** Resolution does not reach the network (§6), so the most useful thing
@@ -322,9 +433,11 @@ enum Outcome {
 fn satisfy_one(
     catalog: Option<&Catalog>,
     store: &Store,
+    pins: &Pins,
     pkg_root: &Path,
     name: &str,
     constraint: &str,
+    warnings: &mut Vec<String>,
 ) -> Outcome {
     let entry = Repo::packages_dir_at(pkg_root).join(name);
     match link::entry_state(&entry) {
@@ -356,10 +469,7 @@ fn satisfy_one(
             );
         }
         Selection::Unknown | Selection::Unsatisfied(_) => {
-            match store
-                .satisfying(name, constraint)
-                .and_then(|version| store.entry(name, version))
-            {
+            match stored(store, pins, name, constraint, warnings) {
                 Some(entry) => entry,
                 None => {
                     return Outcome::Note(unsatisfiable(name, constraint, &selection));

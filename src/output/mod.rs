@@ -1906,6 +1906,11 @@ pub struct PulledRelease {
     /// Versions retention removed from the same major line.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub replaced: Vec<String>,
+    /// What the versions this advanced over changed that the consuming package cites.
+    /// `None` outside a package, and for a first pull — there is no adoption in arriving
+    /// somewhere for the first time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adopted: Option<Adopted>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1959,6 +1964,9 @@ impl Output for PullOutput {
                     for gone in &release.replaced {
                         out.push_str(&dim(&format!("      replaced {gone}\n")));
                     }
+                    if let Some(adopted) = &release.adopted {
+                        out.push_str(&adopted.render());
+                    }
                 }
             }
             for failure in &self.failed {
@@ -1982,5 +1990,195 @@ impl Output for PullOutput {
             out.push_str(&yellow(&format!("  {warning}\n")));
         }
         out.trim_end().to_string()
+    }
+}
+
+/// What a newly-adopted release changed that this package actually cites
+/// (registry.v2.md amendment 20).
+///
+/// A release record carries edges to the entities it touched, and this package's index
+/// carries edges to the entities it references. The interesting set is the intersection:
+/// not "what changed", which is the publisher's changelog and is usually long, but "what
+/// changed **under me**", which is short and is the thing worth reading.
+#[derive(Debug, Serialize)]
+pub struct Adopted {
+    /// The version this replaced, and the one now in the store.
+    pub from: String,
+    pub to: String,
+    /// Every entity the intervening releases touched, that this package references.
+    pub cited: Vec<AdoptedChange>,
+    /// How many entities those releases touched in total — the denominator that makes the
+    /// intersection legible rather than merely small.
+    pub touched: usize,
+    /// Versions whose release record could not be read. Named, because a digest computed
+    /// over part of a range would otherwise look like a complete one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unread: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdoptedChange {
+    pub id: String,
+    /// `added`, `changed` or `retired` — the release record's own edge type.
+    pub change: String,
+}
+
+impl Adopted {
+    /// Rendered inline under the release that was pulled, indented to belong to it.
+    fn render(&self) -> String {
+        let mut out = String::new();
+        if self.cited.is_empty() {
+            // Worth saying rather than omitting: "nothing you cite moved" is the answer
+            // somebody advancing a dependency wanted, and silence would read as "not
+            // checked".
+            out.push_str(&dim(&format!(
+                "      {} touched by {}→{}, none of it cited here\n",
+                pluralize(self.touched, "entity"),
+                self.from,
+                self.to
+            )));
+        } else {
+            out.push_str(&yellow(&format!(
+                "      {} of the {} touched by {}→{} cited here:\n",
+                self.cited.len(),
+                pluralize(self.touched, "entity"),
+                self.from,
+                self.to
+            )));
+            let w = col_width(self.cited.iter().map(|change| change.change.as_str()));
+            for change in &self.cited {
+                out.push_str(&format!(
+                    "        {}  {}\n",
+                    dim(&format!("{:<w$}", change.change)),
+                    cyan(&change.id)
+                ));
+            }
+        }
+        for version in &self.unread {
+            out.push_str(&dim(&format!(
+                "      the release record for {version} could not be read\n"
+            )));
+        }
+        out
+    }
+}
+
+/// `vaire pin` and `vaire unpin`.
+#[derive(Debug, Serialize)]
+pub struct PinOutput {
+    pub package: String,
+    /// The version held, or — for `unpin` — the one released.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub pinned: bool,
+    pub lockfile: String,
+    pub warnings: Vec<String>,
+}
+
+impl Output for PinOutput {
+    fn render_human(&self) -> String {
+        let mut out = String::new();
+        let version = self.version.as_deref().unwrap_or("");
+        out.push_str(&match self.pinned {
+            true => green(&format!("✓ pinned {} {version}", self.package)).to_string(),
+            false => green(&format!("✓ unpinned {}", self.package)).to_string(),
+        });
+        out.push('\n');
+        out.push_str(&dim(&format!("  recorded in {}\n", self.lockfile)));
+        if self.pinned {
+            out.push_str(&dim(
+                "  it survives retention and `vaire clean`, and resolution takes it over \
+                 anything newer\n",
+            ));
+        }
+        for warning in &self.warnings {
+            out.push_str(&yellow(&format!("  {warning}\n")));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+/// `vaire clean`.
+#[derive(Debug, Serialize)]
+pub struct CleanOutput {
+    pub store: String,
+    pub removed: Vec<CleanedEntry>,
+    /// Entries a root held on to.
+    pub kept: usize,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CleanedEntry {
+    pub package: String,
+    pub version: String,
+    pub bytes: u64,
+}
+
+impl Output for CleanOutput {
+    fn render_human(&self) -> String {
+        let mut out = String::new();
+        if self.removed.is_empty() {
+            out.push_str(&green(&format!(
+                "✓ nothing to clean — {} in the store, all of it held",
+                pluralize(self.kept, "entry")
+            )));
+            out.push('\n');
+        } else {
+            let freed: u64 = self.removed.iter().map(|entry| entry.bytes).sum();
+            let headline = format!(
+                "{} {}, freeing {}",
+                match self.dry_run {
+                    true => "would remove",
+                    false => "✓ removed",
+                },
+                pluralize(self.removed.len(), "entry"),
+                bytes(freed),
+            );
+            out.push_str(&format!(
+                "{}\n",
+                match self.dry_run {
+                    true => bold(&headline),
+                    false => green(&headline),
+                }
+            ));
+            let w = col_width(self.removed.iter().map(|entry| entry.package.as_str()));
+            for entry in &self.removed {
+                out.push_str(&format!(
+                    "  {}  {}  {}\n",
+                    cyan(&format!("{:<w$}", entry.package)),
+                    plain(&format!("{:<9}", entry.version)),
+                    dim(&bytes(entry.bytes)),
+                ));
+            }
+            if self.kept > 0 {
+                out.push_str(&dim(&format!(
+                    "  {} held by a lockfile, a pin, or a standing request\n",
+                    pluralize(self.kept, "entry")
+                )));
+            }
+            // Deletion is the one thing here the user cannot undo locally, so the sentence
+            // that makes it undoable is worth the line every time.
+            out.push_str(&dim(
+                "  every removed version is still published, and `vaire pull` brings it back\n",
+            ));
+        }
+        for warning in &self.warnings {
+            out.push_str(&yellow(&format!("  {warning}\n")));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+/// A byte count at human scale. Binary units, because this is disk.
+fn bytes(count: u64) -> String {
+    const KIB: u64 = 1024;
+    match count {
+        n if n < KIB => format!("{n} B"),
+        n if n < KIB * KIB => format!("{:.0} KiB", n as f64 / KIB as f64),
+        n if n < KIB * KIB * KIB => format!("{:.1} MiB", n as f64 / (KIB * KIB) as f64),
+        n => format!("{:.1} GiB", n as f64 / (KIB * KIB * KIB) as f64),
     }
 }

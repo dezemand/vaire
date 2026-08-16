@@ -57,7 +57,10 @@ use crate::error::{Result, VaireError};
 /// The catalog's schema version, stamped in its own `schema_version` table — the same
 /// discipline the package index uses. **Bump on any schema change**; a catalog written by
 /// a newer vaire is recreated rather than misread, which costs a rescan and nothing else.
-pub const SCHEMA_VERSION: u32 = 1;
+/// v2 adds `releases.requested` — see the table below. A mismatch recreates the catalog
+/// rather than migrating it, which is affordable precisely because every row is an
+/// observation something can produce again (`vaire catalog scan`, and a walk of the store).
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// All four tables ship in v1, even where this milestone has no writer for them yet
 /// (registries, releases, and provenance arrive with the registry client and the store).
@@ -87,12 +90,20 @@ const SCHEMA_STMTS: &[&str] = &[
         search_by_default INTEGER NOT NULL DEFAULT 1
     )",
     // Materialized releases in the store. Populated by `vaire pull`.
+    //
+    // `requested` is what separates a package somebody asked for by name from one that
+    // arrived because a manifest mentioned it, and it exists for `vaire clean`: a
+    // dependency is rooted by the lockfile that records it, and a package pulled to *read*
+    // — the rootless session's whole corpus — is recorded by no lockfile at all. Without
+    // this column the two are indistinguishable in the store, and a sweep that keeps only
+    // what a lockfile names would delete a reader's library.
     "CREATE TABLE IF NOT EXISTS releases (
         name      TEXT NOT NULL,
         version   TEXT NOT NULL,
         origin    TEXT NOT NULL,     -- 'store' | 'remote'
         registry  TEXT,
         pinned    INTEGER NOT NULL DEFAULT 0,
+        requested INTEGER NOT NULL DEFAULT 0,
         last_used INTEGER,
         PRIMARY KEY (name, version)
     )",
@@ -199,10 +210,15 @@ pub struct StoreEntry {
     /// Which configured registry it came from, when it is still known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registry: Option<String>,
-    /// Held against retention and `gc`. Written by `vaire pin`, which arrives with the
-    /// lockfile.
+    /// Held against retention and `vaire clean`. Written by `vaire pin`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    /// Somebody asked for this package **by name** rather than declaring it. A root for
+    /// `vaire clean` in its own right, because nothing else records it: a named pull from
+    /// outside a package writes no lockfile, and that is exactly how a rootless reader
+    /// builds a corpus.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub requested: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_used: Option<i64>,
 }
@@ -497,24 +513,58 @@ impl Catalog {
     /// materialization that just succeeded.
     pub fn record_release(&self, entry: &StoreEntry) -> Result<()> {
         self.db.execute(
-            "INSERT INTO releases(name, version, origin, registry, pinned, last_used)
-                  VALUES(?1, ?2, 'store', ?3, ?4, ?5)
+            "INSERT INTO releases(name, version, origin, registry, pinned, requested, last_used)
+                  VALUES(?1, ?2, 'store', ?3, ?4, ?5, ?6)
              ON CONFLICT(name, version) DO UPDATE SET
                   origin    = 'store',
                   registry  = excluded.registry,
                   last_used = excluded.last_used,
                   -- A pin is a statement by the user; re-pulling the same version is not a
                   -- reason to forget it.
-                  pinned    = CASE WHEN releases.pinned = 1 THEN 1 ELSE excluded.pinned END",
+                  pinned    = CASE WHEN releases.pinned = 1 THEN 1 ELSE excluded.pinned END,
+                  -- Likewise a standing request: a later manifest-driven pull of the same
+                  -- version does not turn a package somebody asked for into a leaf the next
+                  -- sweep may take.
+                  requested = CASE WHEN releases.requested = 1 THEN 1 ELSE excluded.requested END",
             turso::params![
                 entry.name.as_str(),
                 entry.version.to_string(),
                 entry.registry.clone(),
                 i64::from(entry.pinned),
+                i64::from(entry.requested),
                 crate::clock::now(),
             ],
         )?;
         Ok(())
+    }
+
+    /// Hold (or release) one stored version against retention and `vaire clean`.
+    ///
+    /// Separate from [`Catalog::record_release`], which can only ever *set* the flag: a pin
+    /// that a routine pull could clear would not be a pin, so clearing one has to be its own
+    /// deliberate statement. `false` for a row that is not there.
+    pub fn set_pinned(
+        &self,
+        name: &str,
+        version: crate::model::Version,
+        pinned: bool,
+    ) -> Result<bool> {
+        Ok(self.db.execute(
+            "UPDATE releases SET pinned = ?3 WHERE name = ?1 AND version = ?2",
+            turso::params![name, version.to_string(), i64::from(pinned)],
+        )? > 0)
+    }
+
+    /// Record (or withdraw) a standing request for a package, across every version of it.
+    ///
+    /// By name rather than by version, because that is how it was asked for: `vaire pull
+    /// acme-core` means "have this package here", and retention replacing 1.4.1 with 1.4.2
+    /// must not quietly retract the request along with the bytes.
+    pub fn set_requested(&self, name: &str, requested: bool) -> Result<u64> {
+        self.db.execute(
+            "UPDATE releases SET requested = ?2 WHERE name = ?1",
+            turso::params![name, i64::from(requested)],
+        )
     }
 
     /// Every recorded store entry, by name then version.
@@ -526,7 +576,7 @@ impl Catalog {
     /// `source.toml` is the fact here, so losing an index row costs a walk.
     pub fn releases(&self) -> Result<Vec<StoreEntry>> {
         let rows = self.db.query_rows(
-            "SELECT name, version, registry, pinned, last_used
+            "SELECT name, version, registry, pinned, requested, last_used
                FROM releases WHERE origin = 'store' ORDER BY name, version",
             (),
             |row| {
@@ -535,18 +585,20 @@ impl Catalog {
                     col_text(row, 1)?,
                     col_opt_text(row, 2)?,
                     col_i64(row, 3)? != 0,
-                    col_opt_i64(row, 4)?,
+                    col_i64(row, 4)? != 0,
+                    col_opt_i64(row, 5)?,
                 ))
             },
         )?;
         Ok(rows
             .into_iter()
-            .filter_map(|(name, version, registry, pinned, last_used)| {
+            .filter_map(|(name, version, registry, pinned, requested, last_used)| {
                 Some(StoreEntry {
                     name,
                     version: version.parse().ok()?,
                     registry,
                     pinned,
+                    requested,
                     last_used,
                 })
             })

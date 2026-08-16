@@ -152,6 +152,22 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         return Ok(ExitCode::Success);
     }
 
+    // `clean` sweeps the store, which is machine-level state like the catalog: somebody
+    // clearing space is most likely standing outside every package, and requiring one
+    // would make the command unavailable exactly where it is wanted.
+    if let Command::Clean { package, dry_run } = &cli.command {
+        let home = vaire::userconfig::vaire_home();
+        let out = commands::clean::run(
+            &home,
+            commands::clean::Options {
+                package: package.as_deref(),
+                dry_run: *dry_run,
+            },
+        )?;
+        emit(&out, json);
+        return Ok(ExitCode::Success);
+    }
+
     // `yank` acts on a registry, not on a corpus: after a bad publish, the package whose
     // release is being withdrawn is often not the directory you are standing in.
     if let Command::Yank {
@@ -451,6 +467,12 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 return Ok(ExitCode::Generic);
             }
         }
+        Command::Pin { spec } => {
+            emit(&commands::pin::pin(&ctx, &spec)?, json);
+        }
+        Command::Unpin { name } => {
+            emit(&commands::pin::unpin(&ctx, &name)?, json);
+        }
         Command::Deps => {
             emit(&commands::deps::run(&ctx)?, json);
         }
@@ -458,6 +480,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         | Command::Catalog { .. }
         | Command::Registry { .. }
         | Command::Yank { .. }
+        | Command::Clean { .. }
         | Command::Mcp
         | Command::Configure { .. }
         | Command::Add { .. }
