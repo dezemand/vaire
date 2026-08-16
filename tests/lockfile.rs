@@ -544,6 +544,38 @@ fn a_named_pull_outside_a_package_leaves_the_home_lockfile_alone() {
 }
 
 #[test]
+fn indexing_leaves_a_lockfile_it_refuses_to_read_exactly_as_it_found_it() {
+    let registry = temp();
+    let publisher = Publisher::new(registry.path());
+    publisher.publish();
+
+    // Both refusals `Lockfile::load` makes. Declining to *read* a file and then overwriting
+    // it would defeat the refusal entirely — the point of not reinterpreting a newer format
+    // is that its contents survive to be read by something that can.
+    for unreadable in [
+        // Written by a newer vaire.
+        "lockfile_version = 99\n[[package]]\nname = \"acme-glossary\"\nversion = \"1.0.0\"\n\
+         source = \"registry\"\n",
+        // Records a digest that is not a digest.
+        "lockfile_version = 1\n[[package]]\nname = \"acme-glossary\"\nversion = \"1.0.0\"\n\
+         source = \"registry\"\nsha256 = \"not-a-digest\"\n",
+    ] {
+        let consumer = Consumer::new(registry.path());
+        consumer.pull(None);
+        let path = vaire::lockfile::path_for(consumer.corpus.root());
+        std::fs::write(&path, unreadable).unwrap();
+
+        consumer.index(&consumer.ctx());
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            unreadable,
+            "indexing rewrote a lockfile it will not read"
+        );
+    }
+}
+
+#[test]
 fn a_stale_lock_is_imprecise_rather_than_wrong() {
     let registry = temp();
     let publisher = Publisher::new(registry.path());

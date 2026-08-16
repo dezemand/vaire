@@ -192,23 +192,34 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
     //
     // Never fatal: a lockfile that could not be written is a lost record, and failing
     // `vaire index` over one would be worse than the record's absence.
-    if lock_blocked.is_empty() {
-        let previous = crate::lockfile::Lockfile::load(ctx.repo.root()).unwrap_or(None);
-        let merged = crate::lockfile::Lockfile::merged(previous.as_ref(), locked, &in_closure);
-        if let Err(e) = merged.write(ctx.repo.root()) {
-            eprintln!(
-                "warning: {} was not updated: {e}",
-                crate::lockfile::FILE_NAME
-            );
-        }
-    } else {
-        // Left exactly as it was. A partial lockfile is worse than a stale one: stale is
-        // safe and merely imprecise (within-major substitutability), while partial names a
-        // resolution that did not happen.
-        eprintln!(
-            "warning: {} was left unchanged — a store entry could not be read: {}",
-            crate::lockfile::FILE_NAME,
+    //
+    // Two things stop the write, and both leave the existing file **exactly** as it is:
+    //
+    // * A store entry that could not describe itself. A partial lockfile is worse than a
+    //   stale one — stale is safe and merely imprecise (within-major substitutability),
+    //   while partial names a resolution that did not happen.
+    // * A lockfile this vaire will not read: written by a newer one, or recording a digest
+    //   that is not a digest. Refusing to *read* such a file and then overwriting it would
+    //   defeat the refusal entirely — the whole point of declining to reinterpret a newer
+    //   format is that its contents survive to be read by something that can.
+    let blocked = match lock_blocked.is_empty() {
+        false => Some(format!(
+            "a store entry could not be read: {}",
             lock_blocked.join("; ")
+        )),
+        true => match crate::lockfile::Lockfile::load(ctx.repo.root()) {
+            Ok(previous) => {
+                let merged =
+                    crate::lockfile::Lockfile::merged(previous.as_ref(), locked, &in_closure);
+                merged.write(ctx.repo.root()).err().map(|e| e.to_string())
+            }
+            Err(e) => Some(e.to_string()),
+        },
+    };
+    if let Some(why) = blocked {
+        eprintln!(
+            "warning: {} was left unchanged — {why}",
+            crate::lockfile::FILE_NAME
         );
     }
 
