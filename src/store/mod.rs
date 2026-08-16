@@ -167,6 +167,28 @@ impl Store {
             .max()
     }
 
+    /// Every finished entry in the store, as `(name, version)`, name then version.
+    ///
+    /// The filesystem is the fact here, exactly as in [`Store::versions`]: `vaire clean`
+    /// decides what to delete from what is actually on disk, and consults the catalog only
+    /// for the flags saying what to keep. A sweep driven by the index instead would be
+    /// unable to see an entry the index has forgotten — which is the one thing a sweep is
+    /// most needed for.
+    pub fn entries(&self) -> Vec<(String, Version)> {
+        let mut out = Vec::new();
+        let Ok(names) = std::fs::read_dir(&self.root) else {
+            return out;
+        };
+        for name in names.flatten() {
+            let name = name.file_name().to_string_lossy().into_owned();
+            for version in self.versions(&name) {
+                out.push((name.clone(), version));
+            }
+        }
+        out.sort();
+        out
+    }
+
     /// Every package with at least one finished entry, as `(name, path)` for its highest
     /// version — the store's contribution to a rootless session's scope (amendment 11).
     pub fn packages(&self) -> Vec<(String, PathBuf)> {
@@ -202,7 +224,7 @@ impl Store {
     /// Delete one entry, undoing the read-only seal first.
     ///
     /// Removal is the *only* thing that ever touches a sealed entry, and it happens for two
-    /// reasons: retention replacing a version within its major line, and `gc`. A link
+    /// reasons: retention replacing a version within its major line, and `vaire clean`. A link
     /// pointing at what went heals the way every broken link heals — by re-resolving.
     pub fn remove(&self, name: &str, version: Version) -> Result<()> {
         let Some(entry) = self.entry(name, version) else {
@@ -324,7 +346,7 @@ mod tests {
         finished(&store, "acme-core", "1.0.0");
         store.remove("acme-core", Version::new(1, 0, 0)).unwrap();
         assert!(store.packages().is_empty(), "no phantom package");
-        // Removing what is not there is not an error: retention and gc both run over sets
+        // Removing what is not there is not an error: retention and `clean` both run over sets
         // that may already have been pruned.
         assert!(store.remove("acme-core", Version::new(1, 0, 0)).is_ok());
     }

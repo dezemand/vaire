@@ -6,6 +6,54 @@ uses [Semantic Versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- **`vaire pin` / `vaire unpin`, and `vaire clean`** (cli.md §4.14–§4.15). The store's
+  default behavior is to move: retention replaces 1.4.1 with 1.4.2, resolution takes the
+  highest satisfying version, and neither asks — all of which is safe because within-major
+  substitutability is the protocol's own promise. These are the commands for when that
+  promise turns out not to hold, and for taking back the disk when it does.
+
+  ```bash
+  vaire pin acme-glossary@1.4.1     # hold this exact version
+  vaire unpin acme-glossary         # let it move again
+  vaire clean --dry-run             # what would go
+  vaire clean                       # take it
+  ```
+
+  A pin does three things: resolution takes it over anything newer, retention keeps it, and
+  `clean` treats it as a root. It is recorded in `knowledge.lock`, so it travels with the
+  package — a colleague cloning the repo reproduces the hold — and flagged in the catalog,
+  where retention and `clean` can see it without a consumer in hand.
+
+  Three rules are worth knowing because each one is a decision. **A pin selects a release;
+  it does not change which world answers** — an explicit link and a working copy still
+  outrank the store, because a committed pin that displaced checkouts would reach every
+  colleague's authoring setup. **A refresh never moves a pin**: carrying the flag onto a
+  newly resolved version would keep the hold in name while releasing what it held, so a
+  pull that fetched something newer says the pin is why nothing changed. **You can only pin
+  what you have**, since the entry carries the artifact's digest.
+
+  `clean` keeps what a registered workspace's lockfile names, what any workspace pins, and
+  what was pulled by name from outside a package — that last one because a rootless
+  reader's corpus is recorded by no lockfile anywhere, and a sweep that missed it would
+  delete their whole library. `vaire clean <name>` is how to say you are done with one.
+  Everything removed is still published, and one `vaire pull` brings it back.
+- **The adopted-changes digest.** Advancing a dependency now reports what changed *that
+  this package cites*, rather than the publisher's changelog:
+
+  ```text
+  ✓ pulled 1 package
+    acme-glossary  1.1.0      from 'lab'
+        replaced 1.0.0
+        1 of the 4 entities touched by 1.0.0→1.1.0 cited here:
+          changed  term:torque-vectoring
+  ```
+
+  Both halves were already in the graph — a release record carries edges to the entities it
+  touched, and your index carries edges to what you reference — so this is their
+  intersection, which is short by construction and specific to you. Nothing about it can
+  fail a pull; a digest that cannot be computed is a missing courtesy, not a failed
+  acquisition.
+
 - **Reading without a package to stand in** (cli.md §6.8). Every read command has assumed
   an author: scope is the package you are in, plus what its manifest declares. That serves
   the person writing a package and offers nothing to the larger audience who authors

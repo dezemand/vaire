@@ -339,3 +339,91 @@ fn sweeping_a_clean_catalog_says_so_rather_than_reporting_a_failed_match() {
     let rendered = vaire::output::Output::render_human(&out);
     assert!(rendered.contains("still answers"), "{rendered}");
 }
+
+// ---- schema v2 ---------------------------------------------------------------------------
+
+#[test]
+fn a_v1_catalog_is_migrated_rather_than_recreated() {
+    let home = tmp();
+    let work = tmp();
+    let pkg = loose_package(work.path(), "acme-core");
+    cmd::add(home.path(), Some(&pkg)).expect("add");
+    {
+        // A catalog as v1 left it. Recreating instead of migrating used to cost a rescan;
+        // it now costs *deletions*, because `vaire clean` reads its roots from exactly these
+        // rows — a machine that forgot every workspace would sweep away the releases their
+        // lockfiles were holding.
+        let catalog = Catalog::open(home.path()).expect("open");
+        catalog.set_schema_version(1).expect("pretend to be v1");
+    }
+
+    let catalog = Catalog::open(home.path()).expect("reopen");
+    assert_eq!(catalog.schema_version().expect("version"), Some(2));
+    assert_eq!(
+        catalog.sightings().expect("sightings").len(),
+        1,
+        "the registration survived the upgrade"
+    );
+}
+
+#[test]
+fn a_half_finished_migration_finishes_on_the_next_open() {
+    let home = tmp();
+    let work = tmp();
+    let pkg = loose_package(work.path(), "acme-core");
+    cmd::add(home.path(), Some(&pkg)).expect("add");
+    {
+        // Killed between the schema change and the version stamp — the tables are already
+        // v2 and the recorded version is not. There is no transaction spanning the two, so
+        // the next open has to be able to finish rather than fail on the column it finds
+        // already there.
+        let catalog = Catalog::open(home.path()).expect("open");
+        catalog.set_schema_version(1).expect("stamp");
+    }
+
+    let catalog = Catalog::open(home.path()).expect("reopen");
+    assert_eq!(catalog.schema_version().expect("version"), Some(2));
+    assert_eq!(catalog.sightings().expect("sightings").len(), 1);
+}
+
+#[test]
+fn a_standing_request_carries_onto_a_replacement_version() {
+    let home = tmp();
+    let catalog = Catalog::open(home.path()).expect("open");
+    let entry = |version: &str, requested: bool| vaire::catalog::StoreEntry {
+        name: "acme-core".into(),
+        version: version.parse().expect("version"),
+        registry: Some("lab".into()),
+        pinned: false,
+        requested,
+        last_used: None,
+    };
+    catalog.record_release(&entry("1.0.0", true)).expect("pull");
+
+    // A later manifest-driven pull of the next version. The request was made about the
+    // *package*, so retention taking 1.0.0 away must not retract it along with the bytes.
+    catalog
+        .record_release(&entry("1.1.0", false))
+        .expect("pull");
+    let releases = catalog.releases().expect("releases");
+    assert!(releases.iter().all(|entry| entry.requested), "{releases:?}");
+
+    // An unrelated package is untouched by any of it.
+    catalog
+        .record_release(&vaire::catalog::StoreEntry {
+            name: "acme-other".into(),
+            version: "1.0.0".parse().expect("version"),
+            registry: None,
+            pinned: false,
+            requested: false,
+            last_used: None,
+        })
+        .expect("pull");
+    let other = catalog
+        .releases()
+        .expect("releases")
+        .into_iter()
+        .find(|entry| entry.name == "acme-other")
+        .expect("recorded");
+    assert!(!other.requested);
+}

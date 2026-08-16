@@ -55,6 +55,13 @@ pub struct Options<'a> {
 struct Wanted {
     name: String,
     want: Want,
+    /// Somebody typed this name **with no package to record it in**. A standing request in
+    /// its own right (§5), and only then: inside a package the lockfile already records what
+    /// resolved, so that is the root. Outside one, a named pull writes no lockfile
+    /// deliberately — there is no resolution to record — and that is exactly how a rootless
+    /// reader assembles a corpus, so without this flag `vaire clean` would take every
+    /// package they pulled as a leaf.
+    requested: bool,
     /// The digest the lockfile records for this entry, when reproducing.
     ///
     /// `fetch` already verifies an artifact against what the **registry** currently
@@ -86,7 +93,7 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<PullOutput> {
     let wanted: Vec<Wanted> = match (options.locked, options.spec) {
         (true, Some(_)) => unreachable!("rejected above"),
         (true, None) => from_lockfile(previous.as_ref())?,
-        (false, Some(spec)) => vec![parse_spec(spec)?],
+        (false, Some(spec)) => vec![parse_spec(spec, ctx.is_rootless())?],
         (false, None) => unsatisfied_dependencies(ctx, &store)?,
     };
     if wanted.is_empty() {
@@ -166,6 +173,27 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<PullOutput> {
         }
     }
 
+    // A fetch that resolution will not use is worth saying out loud. The bytes are in the
+    // store and the pull did what it was asked, but a pin means the closure keeps answering
+    // from the version it holds — and "I pulled the new one and nothing changed" is the
+    // puzzle this one line prevents.
+    if let Some(previous) = &previous {
+        for release in &out.pulled {
+            if let Some(held) = previous
+                .get(&release.package)
+                .filter(|locked| locked.pinned)
+                .map(|locked| locked.version)
+                && held.to_string() != release.version
+            {
+                out.warnings.push(format!(
+                    "{} {} is in the store, but this package is pinned to {held} and will \
+                     keep resolving to it — `vaire unpin {}` to adopt it",
+                    release.package, release.version, release.package
+                ));
+            }
+        }
+    }
+
     // The lockfile records what this run resolved, merged over what was there — a package
     // this run could not reach keeps its previous entry, because that record is the thing
     // somebody else reproduces from. Skipped on a dry run, which writes nothing anywhere.
@@ -234,11 +262,17 @@ fn from_lockfile(previous: Option<&Lockfile>) -> Result<Vec<Wanted>> {
             name: entry.name.clone(),
             want: Want::Exact(entry.version),
             expect: entry.sha256.clone(),
+            // Reproducing a recorded resolution is the lockfile speaking, not the user:
+            // these are rooted by that lockfile already.
+            requested: false,
         })
         .collect())
 }
 
 /// The lockfile entry for a version already in the store, read from its own `source.toml`.
+///
+/// `pinned` is left false here and merged back by [`Lockfile::merged`], which keeps a pin
+/// the previous file recorded — the one place that decision lives.
 fn locked_from_store(store: &Store, name: &str, version: Version) -> Option<Locked> {
     let source = store.source(name, version).ok()?;
     Some(Locked {
@@ -311,6 +345,7 @@ fn pull_one(
                 registry: registry_name,
                 path: String::new(),
                 replaced: Vec::new(),
+                adopted: None,
             },
             warnings: Vec::new(),
             locked: None,
@@ -360,6 +395,7 @@ fn pull_one(
             version,
             registry: Some(registry_name.clone()),
             pinned: false,
+            requested: wanted.requested,
             last_used: None,
         })?;
     }
@@ -367,6 +403,7 @@ fn pull_one(
     // is the protocol's own promise, so this is derived from an invariant rather than
     // bolted on — and safe to be blunt about because the remote keeps every version.
     let replaced = retain(store, ctx.home(), name, version, &mut warnings);
+    let adopted = adopted(ctx, &materialized.path, name, &replaced, version);
 
     Ok(Outcome::Pulled(Box::new(Pulled {
         release: PulledRelease {
@@ -375,6 +412,7 @@ fn pull_one(
             registry: registry_name.clone(),
             path: materialized.path.display().to_string(),
             replaced,
+            adopted,
         },
         warnings,
         locked: Some(Locked {
@@ -386,6 +424,35 @@ fn pull_one(
             pinned: false,
         }),
     })))
+}
+
+/// What this advance changed that the consuming package actually cites (amendment 20).
+///
+/// Only ever computed for a version that **replaced** one — arriving somewhere for the
+/// first time adopts nothing, and there is no range to read records over. `from` is the
+/// highest version retention just removed, which is the version this closure was resolving
+/// against a moment ago.
+///
+/// Degrades to `None` throughout: outside a package there is no consumer to intersect
+/// against, and before the first `vaire index` there is no index to ask. Neither is a
+/// reason to fail a pull that has already succeeded.
+fn adopted(
+    ctx: &Ctx,
+    entry: &Path,
+    name: &str,
+    replaced: &[String],
+    to: Version,
+) -> Option<crate::output::Adopted> {
+    if ctx.is_rootless() {
+        return None;
+    }
+    let from = replaced
+        .iter()
+        .filter_map(|version| version.parse::<Version>().ok())
+        .filter(|version| *version < to)
+        .max()?;
+    let consumer = ctx.open_index().ok()?;
+    crate::release::adopted::digest(&consumer, entry, name, from, to)
 }
 
 /// Ask each registry in turn for a version satisfying `want`.
@@ -495,7 +562,10 @@ fn short(digest: &str) -> String {
 }
 
 /// `acme-core` or `acme-core@1.4.2`.
-fn parse_spec(spec: &str) -> Result<Wanted> {
+///
+/// `standing` marks the result as a request `vaire clean` should honor — true exactly when
+/// there is no package whose lockfile would record this instead.
+fn parse_spec(spec: &str, standing: bool) -> Result<Wanted> {
     // Checked at the boundary where a typed name first becomes a path segment under the
     // store. The registry client checks the same grammar, but only once a registry is being
     // asked — and the store is consulted before that.
@@ -505,6 +575,7 @@ fn parse_spec(spec: &str) -> Result<Wanted> {
             name: name.to_string(),
             want,
             expect: None,
+            requested: standing,
         })
     };
     match spec.rsplit_once('@') {
@@ -546,6 +617,8 @@ fn unsatisfied_dependencies(ctx: &Ctx, store: &Store) -> Result<Vec<Wanted>> {
             name: name.clone(),
             want: Want::Constraint(constraint.clone()),
             expect: None,
+            // Declared, not asked for: the lockfile this run writes is what roots it.
+            requested: false,
         });
     }
     Ok(out)
@@ -565,24 +638,24 @@ mod tests {
 
     #[test]
     fn a_spec_reads_both_forms_people_type() {
-        let wanted = parse_spec("acme-core").unwrap();
+        let wanted = parse_spec("acme-core", false).unwrap();
         assert_eq!(wanted.name, "acme-core");
         assert!(matches!(wanted.want, Want::Constraint(c) if c == "^1"));
 
         // The manifest's own spelling.
         assert!(
-            matches!(parse_spec("acme-core@^2").unwrap().want, Want::Constraint(c) if c == "^2")
+            matches!(parse_spec("acme-core@^2", false).unwrap().want, Want::Constraint(c) if c == "^2")
         );
 
         // A bare triple is exact — which is how a yanked version is still reachable.
         assert!(
-            matches!(parse_spec("acme-core@1.4.2").unwrap().want, Want::Exact(v) if v == Version::new(1, 4, 2))
+            matches!(parse_spec("acme-core@1.4.2", false).unwrap().want, Want::Exact(v) if v == Version::new(1, 4, 2))
         );
 
-        assert!(parse_spec("acme-core@1.4").is_err());
+        assert!(parse_spec("acme-core@1.4", false).is_err());
         // A name is about to become a directory under the user's home; `../../etc` is not
         // one this tool will construct.
-        assert!(parse_spec("../../etc@1.0.0").is_err());
+        assert!(parse_spec("../../etc@1.0.0", false).is_err());
     }
 
     #[test]

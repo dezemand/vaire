@@ -6,6 +6,7 @@
 //! ([`classify`]), and the release record ([`record`]) — while `commands::release`
 //! orchestrates them and owns the git side.
 
+pub mod adopted;
 pub mod classify;
 pub mod record;
 
