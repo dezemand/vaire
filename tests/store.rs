@@ -149,6 +149,7 @@ impl Consumer {
             vaire::commands::pull::Options {
                 spec,
                 registry: None,
+                locked: false,
                 dry_run: false,
             },
         )

@@ -41,6 +41,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_color: bool,
 
+    /// Answer only from the store: refuse a dependency that resolves to a working copy,
+    /// whose version nobody else can obtain. The expected mode for agents and CI, where
+    /// "answered against acme-core 1.4.2" has to be a claim someone can check.
+    #[arg(long, global = true)]
+    pub frozen: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -260,6 +266,10 @@ pub enum Command {
         /// Only ask this registry. Default: every configured one, in priority order.
         #[arg(long)]
         registry: Option<String>,
+        /// Reproduce `knowledge.lock` exactly — the versions it names, checked against the
+        /// digests it records. Takes no package name.
+        #[arg(long, conflicts_with = "spec")]
+        locked: bool,
         /// Report what would be fetched; write nothing.
         #[arg(long = "dry-run")]
         dry_run: bool,

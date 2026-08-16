@@ -62,6 +62,7 @@ question, decided by `vaire index` from the corpus's Git state (§4.1).
 | `--quiet` / `-q` | Suppress progress and non-essential output (errors still print). |
 | `--verbose` / `-v` | Extra diagnostics on stderr. Repeatable. |
 | `--no-color` | Disable ANSI color. Also honored via `NO_COLOR`. |
+| `--frozen` | Answer only from the store: refuse a dependency resolving to a working copy, whose version nobody else can obtain (§4.13). |
 | `--version` / `-V` | Print version and exit. |
 | `--help` / `-h` | Print help for the binary or a subcommand. |
 
@@ -1072,6 +1073,48 @@ authoring and resolving to a published copy of it would quietly answer against y
 Vectors come from your own embedding provider — artifacts ship stripped, so there is
 nothing to adopt. Without one configured the entry is still built and searched lexically,
 reported as a warning: a package you can read is worth more than a pull that refused.
+
+### 4.13 `knowledge.lock` and `--frozen`
+
+```text
+vaire pull --locked            # reproduce the recorded resolution exactly
+vaire --frozen <any command>   # answer only from the store
+```
+
+The store made an answer *obtainable*; these make it **checkable**.
+
+**`knowledge.lock`** is written by `pull` and by the ensure pass, never by hand, and records
+the whole closure — reproducing a resolution means reproducing all of it. Each entry says
+how it resolved, and only one kind carries a checksum:
+
+- `source = "registry"` — a store entry. Records the version, the registry, and the
+  artifact's `sha256`. Reproducible: `pull --locked` fetches exactly those bytes anywhere.
+- `source = "workspace"` — a working copy. Records the version and nothing else, because
+  there is nothing else to record: a checkout has no artifact to checksum and can change
+  between two runs. Writing a digest for it would be a reproducibility claim the tool
+  cannot keep.
+
+That split is the two-worlds gap (registry.v2.md §6) written down rather than papered over.
+A stale lock is safe and merely imprecise — within-major substitutability is the protocol's
+own promise — which is what makes it reasonable to commit in leaf packages, where the
+citability claim lives, and to treat it as informational elsewhere.
+
+**`pull --locked`** fetches the versions the lock names, verified against the digests it
+records rather than against whatever the registry currently claims. That difference is the
+whole point: `fetch` already confirms an artifact matches the registry's *current* claim,
+so the lockfile is the only thing that can notice a registry serving different bytes under a
+version it already published. A refresh merges rather than replaces, so a run that could not
+reach a dependency keeps the record of what it used to resolve to. An entry with no checksum
+is refused, not skipped — passing over one would let a pipeline report a reproduction it did
+not perform.
+
+**`--frozen`** is the global flag that makes "answered against acme-core 1.4.2" a claim
+somebody can check: resolution answers only from the store, and a dependency that resolves
+to a working copy is refused with the `vaire pull` that would fix it. The catalog is not
+consulted at all — it is the index of working copies, which is exactly what this mode
+refuses — so the machine-wide catalog lock is never taken in the mode CI runs in. The
+expected posture for agents and pipelines; ordinary authoring wants the opposite, because a
+checkout is what you are editing.
 
 ## 5. MCP server
 

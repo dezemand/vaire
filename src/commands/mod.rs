@@ -69,6 +69,8 @@ pub struct Ctx {
     /// The embedding provider can own an HTTP connection pool or command configuration;
     /// retain it for the invocation (and all MCP requests) rather than recreating it per call.
     embedder: std::cell::OnceCell<Box<dyn crate::embed::Embedder>>,
+    /// `--frozen`: answer only from the store (registry.v2.md §6).
+    frozen: bool,
 }
 
 impl Ctx {
@@ -84,6 +86,7 @@ impl Ctx {
             home: crate::userconfig::vaire_home(),
             workspace: std::cell::OnceCell::new(),
             embedder: std::cell::OnceCell::new(),
+            frozen: false,
         })
     }
 
@@ -99,7 +102,7 @@ impl Ctx {
     /// `repo` is a placeholder rooted at the vaire home: read commands never touch it, and
     /// the maintain commands that do are never rootless.
     pub fn rootless(home: PathBuf) -> Result<Ctx> {
-        Ctx::rootless_with(home, None)
+        Ctx::rootless_with(home, None, false)
     }
 
     /// [`Ctx::rootless`], plus a package the catalog may not have heard of.
@@ -110,7 +113,31 @@ impl Ctx {
     /// indexed, checked, or `catalog add`ed is genuinely absent from the catalog — and
     /// "search everything" quietly excluding *here* is the one result nobody would read as
     /// correct. Seeded last, so a catalogued path for the same name is not displaced.
-    pub fn rootless_with(home: PathBuf, also: Option<(String, PathBuf)>) -> Result<Ctx> {
+    /// `frozen` is taken here rather than applied afterwards because a rootless session's
+    /// *scope* changes under it, not merely its gate: the catalog is the index of working
+    /// copies, so a frozen session neither consults it nor takes its machine-wide lock, and
+    /// a store entry a working copy would otherwise displace has to stay visible — else the
+    /// package would be invisible **and** the working copy refused, leaving a release the
+    /// store actually holds unusable.
+    pub fn rootless_with(
+        home: PathBuf,
+        also: Option<(String, PathBuf)>,
+        frozen: bool,
+    ) -> Result<Ctx> {
+        let store = crate::store::Store::at(&home);
+        if frozen {
+            let workspace = std::cell::OnceCell::new();
+            let ws = crate::workspace::Workspace::rootless(store.packages()).frozen(store);
+            let _ = workspace.set(ws);
+            return Ok(Ctx {
+                repo: Repo::at(home.clone()),
+                config: Config::default(),
+                home,
+                workspace,
+                embedder: std::cell::OnceCell::new(),
+                frozen,
+            });
+        }
         // A working copy **displaces** the store entry of the same name — it does not merely
         // come later in the list. `Workspace::rootless` keeps every distinct path per name
         // and `locate` refuses to choose between them, so appending both would turn the
@@ -125,7 +152,7 @@ impl Ctx {
             .chain(also.iter())
             .map(|(name, _)| name.as_str())
             .collect();
-        let mut packages: Vec<(String, PathBuf)> = crate::store::Store::at(&home)
+        let mut packages: Vec<(String, PathBuf)> = store
             .packages()
             .into_iter()
             .filter(|(name, _)| !claimed.contains(name.as_str()))
@@ -140,6 +167,7 @@ impl Ctx {
             home,
             workspace,
             embedder: std::cell::OnceCell::new(),
+            frozen: false,
         })
     }
 
@@ -148,6 +176,29 @@ impl Ctx {
         self.workspace
             .get()
             .is_some_and(crate::workspace::Workspace::is_rootless)
+    }
+
+    /// Answer only from the store for this invocation (`--frozen`).
+    ///
+    /// Set before the workspace is built, which is why it is a builder rather than a
+    /// setter: the memoized view carries the restriction, so a later `workspace()` cannot
+    /// hand back an unrestricted one.
+    pub fn with_frozen(mut self, frozen: bool) -> Ctx {
+        self.frozen = frozen;
+        // A rootless context builds its workspace in the constructor, so flipping the flag
+        // afterwards would leave an unrestricted view behind it — silently unfrozen in
+        // exactly the mode agents and CI run in. Re-wrap what is already there.
+        if frozen && let Some(ws) = self.workspace.take() {
+            let _ = self
+                .workspace
+                .set(ws.frozen(crate::store::Store::at(&self.home)));
+        }
+        self
+    }
+
+    /// Whether this invocation answers only from the store.
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
     }
 
     /// Point this invocation at a different vaire home. The seam in-process tests use to
@@ -166,7 +217,10 @@ impl Ctx {
     /// The linked-package view rooted at this package (memoized).
     pub fn workspace(&self) -> Result<&crate::workspace::Workspace> {
         if self.workspace.get().is_none() {
-            let ws = crate::workspace::Workspace::new(&self.repo, &self.config)?;
+            let mut ws = crate::workspace::Workspace::new(&self.repo, &self.config)?;
+            if self.frozen {
+                ws = ws.frozen(crate::store::Store::at(&self.home));
+            }
             let _ = self.workspace.set(ws);
         }
         Ok(self.workspace.get().expect("just initialized"))

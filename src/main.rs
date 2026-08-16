@@ -170,7 +170,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     // package it serves the rootless session, which is the point of exposing it that way:
     // an agent can be pointed at the machine rather than at one checkout.
     if let Command::Mcp = cli.command {
-        let ctx = read_ctx(cli.repo, cli.config, false)?;
+        let ctx = read_ctx(cli.repo, cli.config, false, cli.frozen)?.with_frozen(cli.frozen);
         mcp::serve(ctx)?;
         return Ok(ExitCode::Success);
     }
@@ -194,6 +194,10 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     if let Command::Pull {
         spec: Some(spec),
         registry,
+        // `--locked` is refused for a named pull anyway (it reproduces a whole recorded
+        // resolution), so it rides along only to be reported by the command's own check
+        // rather than swallowed by this pattern.
+        locked,
         dry_run,
     } = &cli.command
         && Ctx::new(cli.repo.clone(), cli.config.clone()).is_err()
@@ -204,6 +208,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             commands::pull::Options {
                 spec: Some(spec),
                 registry: registry.as_deref(),
+                locked: *locked,
                 dry_run: *dry_run,
             },
         )?;
@@ -218,9 +223,10 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     // Read commands fall back to the catalog when there is no package to stand in;
     // maintain commands keep erroring, because there is nothing for them to maintain.
     let ctx = match cli.command.is_read() {
-        true => read_ctx(cli.repo, cli.config, cli.command.wants_all())?,
+        true => read_ctx(cli.repo, cli.config, cli.command.wants_all(), cli.frozen)?,
         false => Ctx::new(cli.repo, cli.config)?,
-    };
+    }
+    .with_frozen(cli.frozen);
 
     match cli.command {
         Command::Resolve { id } => {
@@ -401,6 +407,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Pull {
             spec,
             registry,
+            locked,
             dry_run,
         } => {
             let out = commands::pull::run(
@@ -408,6 +415,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 commands::pull::Options {
                     spec: spec.as_deref(),
                     registry: registry.as_deref(),
+                    locked,
                     dry_run,
                 },
             )?;
@@ -518,6 +526,7 @@ fn read_ctx(
     repo: Option<std::path::PathBuf>,
     config: Option<std::path::PathBuf>,
     all: bool,
+    frozen: bool,
 ) -> Result<Ctx> {
     let home = vaire::userconfig::vaire_home();
     // `--all` widens the closure query, so whatever package you are standing in stays in
@@ -527,7 +536,7 @@ fn read_ctx(
         let standing_in = Ctx::new(repo, config)
             .ok()
             .map(|ctx| (ctx.config.name.clone(), ctx.repo.root().to_path_buf()));
-        return Ctx::rootless_with(home, standing_in);
+        return Ctx::rootless_with(home, standing_in, frozen);
     }
     // An explicit `--repo` / `VAIRE_REPO` naming something that is not a package is a
     // mistake to report, not the ambient "no package anywhere above me" the fallback is
@@ -535,7 +544,7 @@ fn read_ctx(
     // scope, or a typo'd override would silently return results from the whole machine.
     let overridden = repo.is_some() || std::env::var_os("VAIRE_REPO").is_some();
     match Ctx::new(repo, config) {
-        Err(VaireError::NoRepo) if !overridden => Ctx::rootless(home),
+        Err(VaireError::NoRepo) if !overridden => Ctx::rootless_with(home, None, frozen),
         other => other,
     }
 }

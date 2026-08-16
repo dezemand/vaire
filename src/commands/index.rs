@@ -16,6 +16,7 @@ use crate::embed::Embedder;
 use crate::error::Result;
 use crate::index::Index;
 use crate::index::build::{self, Mode};
+use crate::model::Version;
 use crate::output::{DepIndexed, IndexRunOutput};
 
 pub fn run(
@@ -68,7 +69,8 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
     ) {
         eprintln!("note: {note}");
     }
-    let satisfied = crate::workspace::satisfy::satisfy(&ctx.repo, &ctx.config, ctx.home());
+    let satisfied =
+        crate::workspace::satisfy::satisfy(&ctx.repo, &ctx.config, ctx.home(), ctx.is_frozen());
     for warning in &satisfied.warnings {
         eprintln!("warning: {warning}");
     }
@@ -77,6 +79,11 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
     let store = crate::store::Store::at(ctx.home());
     let mut rows = Vec::new();
     let mut snapshot = Vec::new();
+    // What the closure settled on, recorded in `knowledge.lock` at the end of the pass.
+    let mut locked: Vec<crate::lockfile::Locked> = Vec::new();
+    let mut in_closure: Vec<String> = Vec::new();
+    // Why the lockfile could not be written truthfully this run, if it could not.
+    let mut lock_blocked: Vec<String> = Vec::new();
 
     for (id, entry) in ws.closure() {
         match entry {
@@ -98,6 +105,16 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
             // is only the enforcement — and it is also the honest thing: rebuilding would
             // produce the same index, having first had to break the seal to write it.
             Ok(handle) if store.contains(&handle.root) => {
+                in_closure.push(id.to_string());
+                // A store entry that cannot describe itself is a **reason not to write a
+                // lockfile**, not a row to leave out. Omitting it silently would keep the
+                // previous entry's version — or none at all — while the closure reports the
+                // dependency as resolved, so the file would name a resolution that never
+                // happened.
+                match locked_from_store(&store, id.as_str(), &handle.config.version) {
+                    Ok(entry) => locked.push(entry),
+                    Err(e) => lock_blocked.push(format!("{id}: {e}")),
+                }
                 rows.push(DepIndexed {
                     name: id.to_string(),
                     status: "store".to_string(),
@@ -118,6 +135,22 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
                 }));
             }
             Ok(handle) => {
+                in_closure.push(id.to_string());
+                // No digest, deliberately: a working copy has no artifact to checksum and
+                // can change between two runs, so recording one would be a reproducibility
+                // claim the tool cannot keep (registry.v2.md §7).
+                locked.push(crate::lockfile::Locked {
+                    name: id.to_string(),
+                    version: handle
+                        .config
+                        .version
+                        .parse()
+                        .unwrap_or(Version::new(0, 0, 0)),
+                    source: crate::lockfile::Source::Workspace,
+                    registry: None,
+                    sha256: None,
+                    pinned: false,
+                });
                 let mode = dep_mode(&handle.root, embedder);
                 let dep_repo = Repo::discover(Some(&handle.root), &handle.root)?;
                 let summary = build::run(&dep_repo, &handle.config, embedder, mode)?;
@@ -152,7 +185,69 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
         &serde_json::to_string(&snapshot).expect("json array of snapshot entries"),
     )?;
 
+    // And the committed half of the same fact. The snapshot above is index meta — machine
+    // state, rebuilt whenever the index is; `knowledge.lock` is a file someone can commit,
+    // read, and reproduce from. The whole closure is recorded, not just the direct
+    // dependencies, because reproducing a resolution means reproducing all of it.
+    //
+    // Never fatal: a lockfile that could not be written is a lost record, and failing
+    // `vaire index` over one would be worse than the record's absence.
+    //
+    // Two things stop the write, and both leave the existing file **exactly** as it is:
+    //
+    // * A store entry that could not describe itself. A partial lockfile is worse than a
+    //   stale one — stale is safe and merely imprecise (within-major substitutability),
+    //   while partial names a resolution that did not happen.
+    // * A lockfile this vaire will not read: written by a newer one, or recording a digest
+    //   that is not a digest. Refusing to *read* such a file and then overwriting it would
+    //   defeat the refusal entirely — the whole point of declining to reinterpret a newer
+    //   format is that its contents survive to be read by something that can.
+    let blocked = match lock_blocked.is_empty() {
+        false => Some(format!(
+            "a store entry could not be read: {}",
+            lock_blocked.join("; ")
+        )),
+        true => match crate::lockfile::Lockfile::load(ctx.repo.root()) {
+            Ok(previous) => {
+                let merged =
+                    crate::lockfile::Lockfile::merged(previous.as_ref(), locked, &in_closure);
+                merged.write(ctx.repo.root()).err().map(|e| e.to_string())
+            }
+            Err(e) => Some(e.to_string()),
+        },
+    };
+    if let Some(why) = blocked {
+        eprintln!(
+            "warning: {} was left unchanged — {why}",
+            crate::lockfile::FILE_NAME
+        );
+    }
+
     Ok(rows)
+}
+
+/// The lockfile entry for a closure member that lives in the store, read from the entry's
+/// own `source.toml` — the digest is a fact about the artifact, and the store is where that
+/// fact is kept.
+fn locked_from_store(
+    store: &crate::store::Store,
+    name: &str,
+    version: &str,
+) -> Result<crate::lockfile::Locked> {
+    let parsed: Version = version.parse().map_err(|_| {
+        crate::error::VaireError::Config(format!(
+            "the store entry declares version {version:?}, which is not MAJOR.MINOR.PATCH"
+        ))
+    })?;
+    let source = store.source(name, parsed)?;
+    Ok(crate::lockfile::Locked {
+        name: name.to_string(),
+        version: parsed,
+        source: crate::lockfile::Source::Registry,
+        registry: source.registry,
+        sha256: Some(source.artifact_sha256),
+        pinned: false,
+    })
 }
 
 /// Pick the build mode for one dependency: incremental normally (a fresh/missing or

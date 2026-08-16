@@ -74,7 +74,7 @@ struct Demand {
 /// Nothing here is fatal. An unsatisfiable name keeps the caller's existing "not linked"
 /// reporting with a note explaining what the catalog had; a catalog that cannot be opened
 /// at all degrades to exactly that, one warning and no links.
-pub fn satisfy(repo: &Repo, config: &Config, home: &Path) -> Satisfied {
+pub fn satisfy(repo: &Repo, config: &Config, home: &Path, frozen: bool) -> Satisfied {
     let mut out = Satisfied::default();
     // Cheap to build (it is a path) and consulted only after the catalog has nothing, so
     // the ordinary all-linked pass still touches neither it nor the catalog.
@@ -125,6 +125,22 @@ pub fn satisfy(repo: &Repo, config: &Config, home: &Path) -> Satisfied {
                     continue;
                 }
             };
+            // Under `--frozen` the catalog is not consulted at all: it is the index of
+            // *working copies*, and a working copy is precisely what frozen resolution
+            // refuses. Skipping it also means the lock is never taken.
+            if frozen {
+                match satisfy_one(None, &store, repo.root(), &name, &constraint) {
+                    Outcome::Linked(dep) => {
+                        out.linked.push(dep);
+                        progress = true;
+                    }
+                    Outcome::Note(note) => {
+                        out.notes.insert(name, note);
+                    }
+                    Outcome::Skipped => {}
+                }
+                continue;
+            }
             // First name that genuinely needs the catalog: open it now (see above).
             let catalog = match &catalog {
                 Some(catalog) => catalog,
@@ -136,7 +152,7 @@ pub fn satisfy(repo: &Repo, config: &Config, home: &Path) -> Satisfied {
                     }
                 },
             };
-            match satisfy_one(catalog, &store, repo.root(), &name, &constraint) {
+            match satisfy_one(Some(catalog), &store, repo.root(), &name, &constraint) {
                 Outcome::Linked(dep) => {
                     out.linked.push(dep);
                     progress = true;
@@ -223,7 +239,7 @@ pub fn satisfy_name(pkg_root: &Path, name: &str, constraint: &str, home: &Path) 
             return out;
         }
     };
-    match satisfy_one(&catalog, &store, pkg_root, name, constraint) {
+    match satisfy_one(Some(&catalog), &store, pkg_root, name, constraint) {
         Outcome::Linked(dep) => out.linked.push(dep),
         Outcome::Note(note) => {
             out.notes.insert(name.to_string(), note);
@@ -304,7 +320,7 @@ enum Outcome {
 /// release of the same name even when the release is newer. The store is the fallback for
 /// what you merely *consume*.
 fn satisfy_one(
-    catalog: &Catalog,
+    catalog: Option<&Catalog>,
     store: &Store,
     pkg_root: &Path,
     name: &str,
@@ -320,9 +336,13 @@ fn satisfy_one(
         EntryState::Broken | EntryState::Absent => {}
     }
 
-    let selection = match select::select(catalog, name, constraint) {
-        Ok(selection) => selection,
-        Err(e) => return Outcome::Note(format!("could not consult the catalog: {e}")),
+    let selection = match catalog {
+        Some(catalog) => match select::select(catalog, name, constraint) {
+            Ok(selection) => selection,
+            Err(e) => return Outcome::Note(format!("could not consult the catalog: {e}")),
+        },
+        // `--frozen`: nothing local is a candidate, so the store is the only answer.
+        None => Selection::Unknown,
     };
     let target: PathBuf = match &selection {
         Selection::One(candidate) => candidate.path.clone(),

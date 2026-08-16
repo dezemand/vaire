@@ -92,6 +92,27 @@ uses [Semantic Versioning](https://semver.org).
   registration and the catalog do not.
 
 ### Added
+- **`knowledge.lock`, `pull --locked`, and `--frozen`** (cli.md §4.13, registry.v2.md
+  §6–§7) — reproducibility. The store made an answer obtainable; these make it checkable.
+
+  The lockfile is written by `pull` and by indexing, never by hand, and records the whole
+  closure. Each entry says how it resolved, and **only one kind carries a checksum**: a
+  store entry records its digest and can be fetched again anywhere; a working copy records
+  its version and nothing else, because a checkout has no artifact to checksum and can
+  change between two runs. That split is the two-worlds gap written down rather than papered
+  over — read a lockfile and you can see, per dependency, whether the answer can be obtained
+  again.
+
+  `pull --locked` verifies against the digest the lockfile **recorded**, not the one the
+  registry currently publishes. `fetch` already checks the latter, so the lockfile is the
+  only thing that can notice a registry serving different bytes under a version it already
+  published. An entry with no checksum is refused rather than skipped: passing over one
+  would let a pipeline report a reproduction it did not perform.
+
+  `--frozen` answers only from the store and refuses a working copy, naming the `vaire pull`
+  that would fix it. It does not consult the catalog at all — that is the index of working
+  copies, which is precisely what this mode refuses. The expected posture for agents and CI;
+  ordinary authoring wants the opposite, because a checkout is what you are editing.
 - **The store, and `vaire pull`** (cli.md §4.12, registry.v2.md §5–§6) — the consuming half
   of the registry line. A pulled release is verified, unpacked, re-indexed *here*, and
   sealed read-only at `~/.vaire/store/<name>/<version>/`, where it becomes a package

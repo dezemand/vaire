@@ -74,7 +74,7 @@ fn satisfy(ws: &Ws, pkg: &str) -> Satisfied {
     let member = ws.root(pkg);
     let repo = Repo::discover(Some(&member), &member).expect("repo");
     let config = Config::load(&member.join("knowledge.toml")).expect("manifest");
-    satisfy::satisfy(&repo, &config, &ws.home())
+    satisfy::satisfy(&repo, &config, &ws.home(), false)
 }
 
 /// The `.vaire/packages/<dep>` entry of a member.
