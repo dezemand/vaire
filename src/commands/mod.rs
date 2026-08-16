@@ -17,6 +17,8 @@ pub mod init;
 #[cfg(feature = "pack")]
 pub mod pack;
 #[cfg(feature = "pack")]
+pub mod pull;
+#[cfg(feature = "pack")]
 pub mod push;
 pub mod refs;
 pub mod registry;
@@ -109,7 +111,26 @@ impl Ctx {
     /// "search everything" quietly excluding *here* is the one result nobody would read as
     /// correct. Seeded last, so a catalogued path for the same name is not displaced.
     pub fn rootless_with(home: PathBuf, also: Option<(String, PathBuf)>) -> Result<Ctx> {
-        let mut packages = crate::catalog::Catalog::open(&home)?.live_packages()?;
+        // A working copy **displaces** the store entry of the same name — it does not merely
+        // come later in the list. `Workspace::rootless` keeps every distinct path per name
+        // and `locate` refuses to choose between them, so appending both would turn the
+        // two-worlds rule into an ambiguity error the user cannot even clear (`catalog rm`
+        // does not reach a store path).
+        //
+        // Ambiguity *among working copies* is untouched: two checkouts declaring one name is
+        // a real question about which you meant, and the store has no standing to settle it.
+        let live = crate::catalog::Catalog::open(&home)?.live_packages()?;
+        let claimed: std::collections::BTreeSet<&str> = live
+            .iter()
+            .chain(also.iter())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let mut packages: Vec<(String, PathBuf)> = crate::store::Store::at(&home)
+            .packages()
+            .into_iter()
+            .filter(|(name, _)| !claimed.contains(name.as_str()))
+            .collect();
+        packages.extend(live);
         packages.extend(also);
         let workspace = std::cell::OnceCell::new();
         let _ = workspace.set(crate::workspace::Workspace::rootless(packages));

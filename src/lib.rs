@@ -16,6 +16,7 @@
 //! - [`git`]     — the provenance layer: repo root, HEAD, diffs, last-indexed commit.
 //! - [`release`] — computing a version bump from what changed, and recording it.
 //! - [`registry`]— the client seam for remote registries, and the static-file wire contract.
+//! - [`store`]   — pulled releases, unpacked, rebuilt, and sealed read-only.
 //! - [`commands`]— one module per CLI command, each returning a typed [`output::Output`].
 //! - [`output`]  — the returned unit: paths + IDs, rendered as human text or JSON.
 //! - [`mcp`]     — the STDIO MCP server that re-exposes the read commands as tools.
@@ -54,6 +55,8 @@ pub mod registry;
 pub mod release;
 #[cfg(feature = "index")]
 pub mod search;
+#[cfg(feature = "index")]
+pub mod store;
 #[cfg(feature = "index")]
 pub mod userconfig;
 #[cfg(feature = "index")]

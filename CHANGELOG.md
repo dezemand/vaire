@@ -92,6 +92,31 @@ uses [Semantic Versioning](https://semver.org).
   registration and the catalog do not.
 
 ### Added
+- **The store, and `vaire pull`** (cli.md §4.12, registry.v2.md §5–§6) — the consuming half
+  of the registry line. A pulled release is verified, unpacked, re-indexed *here*, and
+  sealed read-only at `~/.vaire/store/<name>/<version>/`, where it becomes a package
+  directory like any other: the resolver links to one exactly as it links to a checkout, and
+  nothing above resolution knows the difference.
+
+  **The shipped index is a claim, never truth.** An artifact carries a prebuilt index and
+  materialization throws it away, rebuilding from the shipped Markdown. Adopting it would
+  make every consumer's answers depend on a stranger's build, and a corpus whose index
+  disagrees with its own text would have no way to be caught. Provenance *is* carried —
+  which commit these files are — because that is a fact about the release rather than a
+  claim about the graph.
+
+  **Nothing is fetched silently.** Resolution reports the `vaire pull` that would satisfy a
+  missing dependency and then stops; acquiring a package stays a decision somebody makes.
+  Resolution order is explicit link → run root → catalog → store, so a working copy outranks
+  a pulled release of the same name: a checkout is what you are authoring, and answering
+  from a published copy of it would quietly answer against yesterday.
+
+  Unpacking is the one place this tool treats input as hostile — entries that are absolute,
+  climb out with `..`, or are links of any kind are refused, only `index.db` may appear under
+  `.vaire/`, and an artifact whose manifest declares a different name than it was served
+  under is refused outright. Retention is one slot per major line: pulling 1.4.2 removes
+  1.4.1 and says so, which is safe because within-major substitutability is the protocol's
+  own promise and free because the registry keeps every version forever.
 - **Remote registries** (cli.md §4.9–§4.11, registry.v2.md §8–§9) — `vaire registry add |
   list | show | rm`, `vaire push`, `vaire yank`, and the `Registry` seam behind them. The
   first implementation needs **no server**: a registry is a handful of JSON documents and

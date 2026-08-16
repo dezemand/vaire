@@ -51,7 +51,7 @@ pub mod scan;
 
 use std::path::{Path, PathBuf};
 
-use crate::db::{Db, col_i64, col_opt_i64, col_text};
+use crate::db::{Db, col_i64, col_opt_i64, col_opt_text, col_text};
 use crate::error::{Result, VaireError};
 
 /// The catalog's schema version, stamped in its own `schema_version` table — the same
@@ -185,6 +185,27 @@ pub struct RegistryRow {
 
 /// The registry kinds this client can construct.
 pub const KIND_STATIC: &str = "static";
+
+/// A materialized release in the store (registry.v2.md §5).
+///
+/// Unlike a sighting, this is not an observation of something that might drift: a store
+/// entry is written once and sealed. The row is an index over the entry's own
+/// `source.toml`, kept so that "what has this machine got" is a query rather than a walk —
+/// and rebuildable from that walk when it is lost.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StoreEntry {
+    pub name: String,
+    pub version: crate::model::Version,
+    /// Which configured registry it came from, when it is still known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
+    /// Held against retention and `gc`. Written by `vaire pin`, which arrives with the
+    /// lockfile.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<i64>,
+}
 
 /// One observation of a package on this machine.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -464,6 +485,81 @@ impl Catalog {
             .db
             .execute("DELETE FROM registries WHERE name = ?1", [name])?
             > 0)
+    }
+
+    // ---- store entries (registry.v2.md §5) ---------------------------------------------
+
+    /// Record a materialized store entry.
+    ///
+    /// An index over `source.toml`, never the fact: the store entries are self-describing,
+    /// so losing these rows costs a walk of `~/.vaire/store` and nothing else. That is why
+    /// nothing here is checked against the filesystem on write — the write follows a
+    /// materialization that just succeeded.
+    pub fn record_release(&self, entry: &StoreEntry) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO releases(name, version, origin, registry, pinned, last_used)
+                  VALUES(?1, ?2, 'store', ?3, ?4, ?5)
+             ON CONFLICT(name, version) DO UPDATE SET
+                  origin    = 'store',
+                  registry  = excluded.registry,
+                  last_used = excluded.last_used,
+                  -- A pin is a statement by the user; re-pulling the same version is not a
+                  -- reason to forget it.
+                  pinned    = CASE WHEN releases.pinned = 1 THEN 1 ELSE excluded.pinned END",
+            turso::params![
+                entry.name.as_str(),
+                entry.version.to_string(),
+                entry.registry.clone(),
+                i64::from(entry.pinned),
+                crate::clock::now(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every recorded store entry, by name then version.
+    ///
+    /// A row whose version text does not parse is **dropped, never defaulted**. Reporting it
+    /// as `0.0.0` would be a fabricated fact with teeth: retention collects the versions of
+    /// pinned rows and protects exactly those, so a pinned row reading as `0.0.0` would stop
+    /// protecting the version it names and the next pull would delete it. The store's own
+    /// `source.toml` is the fact here, so losing an index row costs a walk.
+    pub fn releases(&self) -> Result<Vec<StoreEntry>> {
+        let rows = self.db.query_rows(
+            "SELECT name, version, registry, pinned, last_used
+               FROM releases WHERE origin = 'store' ORDER BY name, version",
+            (),
+            |row| {
+                Ok((
+                    col_text(row, 0)?,
+                    col_text(row, 1)?,
+                    col_opt_text(row, 2)?,
+                    col_i64(row, 3)? != 0,
+                    col_opt_i64(row, 4)?,
+                ))
+            },
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(name, version, registry, pinned, last_used)| {
+                Some(StoreEntry {
+                    name,
+                    version: version.parse().ok()?,
+                    registry,
+                    pinned,
+                    last_used,
+                })
+            })
+            .collect())
+    }
+
+    /// Forget one store entry. Called when the store copy goes, so the index does not
+    /// outlive what it indexes.
+    pub fn forget_release(&self, name: &str, version: crate::model::Version) -> Result<bool> {
+        Ok(self.db.execute(
+            "DELETE FROM releases WHERE name = ?1 AND version = ?2",
+            turso::params![name, version.to_string()],
+        )? > 0)
     }
 
     /// Mark a path `missing` (it did not answer) or `live` (it did).

@@ -1020,6 +1020,59 @@ reason for a yank is usually a mistake about a release rather than a fact about 
 Corpus-independent: after a bad publish, the package being withdrawn is often not the
 directory you are standing in.
 
+### 4.12 `vaire pull`
+
+```text
+vaire pull [<name>[@^MAJOR | @<version>]] [--registry <name>] [--dry-run]
+```
+
+Fetches a release into the **store** (registry.v2.md §5): verified, unpacked, re-indexed
+here, and sealed read-only at `~/.vaire/store/<name>/<version>/`. Bare `vaire pull` takes
+every declared dependency this machine cannot already satisfy, and therefore needs a package
+to stand in; `vaire pull <name>` is a store operation and works from anywhere, which is what
+makes it the first command on a fresh machine.
+
+**This is the only command that acquires a package, and that is the design.** Resolution
+never fetches silently (§6): a dependency nothing on this machine satisfies is reported
+with the `vaire pull` that would fix it, and then somebody decides. A tool that downloaded
+a package because a manifest mentioned one would make "what is in my corpus" a question you
+could not answer without a network trace.
+
+- **The shipped index is a claim, never truth.** An artifact carries a prebuilt index;
+  materialization throws it away and rebuilds from the shipped Markdown with your own
+  vaire. Adopting it would make your answers depend on a publisher's build, and a corpus
+  whose index disagrees with its own text would have no way to be caught. What *is* carried
+  over is provenance — which commit these files are — because that is a fact about the
+  release rather than a claim about the graph.
+- **Containment.** An artifact is an archive from elsewhere, so entries that are absolute,
+  that climb out with `..`, or that are links of any kind are refused; under `.vaire/` only
+  `index.db` is accepted; and an artifact whose manifest declares a different name than it
+  was served under is refused outright. A refusal aborts the whole materialization.
+- **Sealed.** The corpus and `source.toml` are `chmod a-w`, so "these files are release
+  1.4.2" cannot quietly stop being true. `.vaire/` stays writable because the index engine
+  opens a database for writing even to read it — a sealed index would be unreadable, not
+  immutable. Nothing rewrites it regardless: the ensure pass skips store members by path.
+- **Retention is one slot per major line.** Pulling 1.4.2 removes 1.4.1, and says so. Safe
+  because within-major substitutability is the protocol's own promise, and free because the
+  registry keeps every published version forever. A link pointing at what went heals the way
+  every broken link heals — by re-resolving.
+- **Version choice is arithmetic, not a decision**: the highest non-yanked release in the
+  constrained major line. A yanked version is skipped for a new resolution and still
+  fetchable by exact version (`pull acme-core@1.4.2`), which is the whole difference between
+  a yank and a deletion.
+- **Registry choice is first-satisfying**, in priority order — not the highest version
+  across all of them, since a registry is a trust boundary as much as a location. `NotFound`
+  moves on and is forgotten; `PullRestricted` moves on and is *remembered*, so if nothing
+  else serves the package you are told where to ask.
+
+Resolution order once it is there (§6): explicit link → run root → catalog → store. A
+working copy outranks a pulled release of the same name, because a checkout is what you are
+authoring and resolving to a published copy of it would quietly answer against yesterday.
+
+Vectors come from your own embedding provider — artifacts ship stripped, so there is
+nothing to adopt. Without one configured the entry is still built and searched lexically,
+reported as a warning: a package you can read is worth more than a pull that refused.
+
 ## 5. MCP server
 
 ```

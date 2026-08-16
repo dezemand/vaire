@@ -250,6 +250,21 @@ pub enum Command {
         action: CatalogAction,
     },
 
+    /// Fetch a release into the store: verify it, unpack it, rebuild its index here, and
+    /// seal it read-only. Nothing else in the tool ever downloads a package.
+    #[cfg(feature = "pack")]
+    Pull {
+        /// `<name>`, `<name>@^MAJOR`, or `<name>@<version>` for an exact one (including a
+        /// yanked one). Default: every declared dependency this machine cannot satisfy.
+        spec: Option<String>,
+        /// Only ask this registry. Default: every configured one, in priority order.
+        #[arg(long)]
+        registry: Option<String>,
+        /// Report what would be fetched; write nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+
     /// Upload released versions to a registry. Idempotent: what is already published is
     /// skipped, and every artifact is rebuilt from its own release tag, so this works from
     /// a fresh clone.
