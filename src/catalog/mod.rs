@@ -57,9 +57,13 @@ use crate::error::{Result, VaireError};
 /// The catalog's schema version, stamped in its own `schema_version` table — the same
 /// discipline the package index uses. **Bump on any schema change**; a catalog written by
 /// a newer vaire is recreated rather than misread, which costs a rescan and nothing else.
-/// v2 adds `releases.requested` — see the table below. A mismatch recreates the catalog
-/// rather than migrating it, which is affordable precisely because every row is an
-/// observation something can produce again (`vaire catalog scan`, and a walk of the store).
+/// v2 adds `releases.requested` — see the table below.
+///
+/// A version [`Catalog::migrate`] knows is brought forward in place; anything else is still
+/// recreated, which stays affordable because every row is an observation something can
+/// produce again (`vaire catalog scan`, and a walk of the store). What made a migration
+/// worth writing for this one bump is that `vaire clean` reads its roots from these rows, so
+/// forgetting them stopped costing a rescan and started costing deletions.
 pub const SCHEMA_VERSION: u32 = 2;
 
 /// All four tables ship in v1, even where this milestone has no writer for them yet
@@ -272,7 +276,16 @@ impl Catalog {
                         catalog.install_schema()?;
                         return Ok(catalog);
                     }
-                    if catalog.schema_version()? == Some(SCHEMA_VERSION) {
+                    let found = catalog.schema_version()?;
+                    if found == Some(SCHEMA_VERSION) {
+                        return Ok(catalog);
+                    }
+                    // A version this build knows how to bring forward: do that instead of
+                    // recreating. See [`Catalog::migrate`] for why one bump earns the
+                    // machinery the rest of this file deliberately does without.
+                    if let Some(found) = found
+                        && catalog.migrate(found)?
+                    {
                         return Ok(catalog);
                     }
                     // A catalog from a different vaire. Installing over it would be the
@@ -513,8 +526,16 @@ impl Catalog {
     /// materialization that just succeeded.
     pub fn record_release(&self, entry: &StoreEntry) -> Result<()> {
         self.db.execute(
+            // A standing request is **package-scoped**, so a new version of a package that
+            // has one inherits it. Without the `EXISTS`, a rootless pull of 1.0.0 followed
+            // by a manifest-driven pull of 1.1.0 would leave the newcomer unrequested;
+            // retention would then take 1.0.0 and the next sweep would take 1.1.0, quietly
+            // undoing a request nobody withdrew. `vaire clean <name>` is the only withdrawal.
             "INSERT INTO releases(name, version, origin, registry, pinned, requested, last_used)
-                  VALUES(?1, ?2, 'store', ?3, ?4, ?5, ?6)
+                  VALUES(?1, ?2, 'store', ?3, ?4,
+                         MAX(?5, EXISTS(SELECT 1 FROM releases
+                                         WHERE name = ?1 AND requested = 1)),
+                         ?6)
              ON CONFLICT(name, version) DO UPDATE SET
                   origin    = 'store',
                   registry  = excluded.registry,
@@ -536,6 +557,51 @@ impl Catalog {
             ],
         )?;
         Ok(())
+    }
+
+    /// Bring a catalog forward from `found` to [`SCHEMA_VERSION`], returning whether it was
+    /// brought all the way. `false` leaves the caller to recreate.
+    ///
+    /// This file otherwise has no migration machinery on purpose: every row is an
+    /// observation, so recreating costs a rescan and nothing else. **`vaire clean` changed
+    /// what that costs.** A sweep decides what to delete from what the catalog knows, so a
+    /// recreated catalog is not merely empty — it is a machine that has forgotten every
+    /// workspace whose lockfile was holding a release, and the next sweep would take those
+    /// releases. Losing an observation used to mean re-observing it; now it can mean losing
+    /// bytes. One `ADD COLUMN` is a small price for that not being true.
+    /// Each step is **idempotent**, because there is no transaction spanning the schema
+    /// change and the version stamp: a process killed between them leaves a catalog whose
+    /// tables are already migrated and whose recorded version is not, and the next open has
+    /// to be able to finish the job rather than fail on it.
+    fn migrate(&self, found: u32) -> Result<bool> {
+        let mut version = found;
+        // v1 → v2: `releases.requested` (registry.v2.md amendment 61). Defaulted, so every
+        // existing row reads as "not asked for by name", which is what those pulls were.
+        if version == 1 {
+            if !self.has_column("releases", "requested")? {
+                self.db.execute(
+                    "ALTER TABLE releases ADD COLUMN requested INTEGER NOT NULL DEFAULT 0",
+                    (),
+                )?;
+            }
+            version = 2;
+        }
+        if version != SCHEMA_VERSION {
+            return Ok(false);
+        }
+        self.set_schema_version(SCHEMA_VERSION)?;
+        Ok(true)
+    }
+
+    /// Whether `table` already has `column`. Asked by selecting it: a failed query is the
+    /// answer, and it needs no agreement with the engine about which `PRAGMA`s it supports.
+    fn has_column(&self, table: &str, column: &str) -> Result<bool> {
+        Ok(self
+            .db
+            .query_rows(&format!("SELECT {column} FROM {table} LIMIT 0"), (), |_| {
+                Ok(())
+            })
+            .is_ok())
     }
 
     /// Hold (or release) one stored version against retention and `vaire clean`.

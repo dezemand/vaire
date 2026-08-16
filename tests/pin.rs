@@ -216,7 +216,30 @@ impl Drop for Consumer {
     }
 }
 
-/// A publisher that has cut 1.0.0 and 1.1.0, and a consumer holding both in its store.
+/// The same guarantee for a bare vaire home with no `Consumer` around it. A panicking
+/// assertion would otherwise leave the store sealed and defeat the `TempDir` cleanup, which
+/// is the leak `Consumer`'s own `Drop` exists to prevent.
+struct Home(tempfile::TempDir);
+
+impl Home {
+    fn new() -> Home {
+        Home(temp())
+    }
+
+    fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        let _ = vaire::store::unseal(self.0.path());
+    }
+}
+
+/// A publisher that has cut 1.0.0 and 1.1.0, and a consumer whose store holds **only
+/// 1.0.0** — 1.1.0 is published and not yet pulled, which is what lets a test ask what
+/// happens when somebody names a version this machine has never seen.
 fn two_versions(registry: &Path) -> (Publisher, Consumer) {
     let publisher = Publisher::new(registry);
     publisher.publish();
@@ -444,7 +467,7 @@ fn a_package_pulled_by_name_survives_a_sweep_until_it_is_named_again() {
 
     // A rootless reader: pulled by name from outside any package, so no lockfile records
     // it anywhere. Rooting only what a lockfile names would delete a reader's whole corpus.
-    let home = temp();
+    let home = Home::new();
     let ctx = vaire::commands::Ctx::rootless(home.path().to_path_buf()).expect("rootless");
     vaire::commands::registry::add(
         home.path(),
@@ -489,7 +512,6 @@ fn a_package_pulled_by_name_survives_a_sweep_until_it_is_named_again() {
     .expect("clean");
     assert_eq!(swept.removed.len(), 1, "{swept:?}");
     assert!(!store.has("acme-glossary", Version::new(1, 0, 0)));
-    let _ = vaire::store::unseal(home.path());
 }
 
 #[test]
@@ -589,4 +611,97 @@ fn a_first_pull_adopts_nothing_because_there_is_no_range() {
         out.pulled[0].adopted.is_none(),
         "arriving somewhere for the first time adopts nothing"
     );
+}
+
+#[test]
+fn re_pinning_lets_retention_take_the_version_that_was_held_before() {
+    let registry = temp();
+    let (publisher, consumer) = two_versions(registry.path());
+    consumer.pin("acme-glossary@1.0.0").expect("pin");
+    consumer.pull(Some("acme-glossary")); // 1.1.0 arrives; the pin keeps 1.0.0
+    consumer.pin("acme-glossary@1.1.0").expect("re-pin");
+
+    publisher
+        .grow(
+            "knowledge/yaw.md",
+            "---\nid: yaw-rate\ntype: term\nname: Yaw rate\n---\n\
+             # Yaw rate\n\nRotation about the vertical axis.\n",
+        )
+        .publish();
+    consumer.pull(Some("acme-glossary"));
+
+    // The hold moved, so what it used to hold is ordinary again. Leaving the old version
+    // flagged would have retention keep it for good, on the strength of a pin no lockfile
+    // still records.
+    assert!(
+        !consumer.store().has("acme-glossary", Version::new(1, 0, 0)),
+        "the pin that used to hold 1.0.0 moved off it"
+    );
+    assert!(
+        consumer.store().has("acme-glossary", Version::new(1, 1, 0)),
+        "the pin that now holds 1.1.0 keeps it"
+    );
+}
+
+#[test]
+fn a_refused_sweep_does_not_withdraw_the_request_it_refused_to_act_on() {
+    let registry = temp();
+    let publisher = Publisher::new(registry.path());
+    publisher.publish();
+
+    let home = Home::new();
+    vaire::commands::registry::add(
+        home.path(),
+        "lab",
+        &registry.path().display().to_string(),
+        0,
+        true,
+    )
+    .expect("registry add");
+    let ctx = vaire::commands::Ctx::rootless(home.path().to_path_buf()).expect("rootless");
+    vaire::commands::pull::run(
+        &ctx,
+        vaire::commands::pull::Options {
+            spec: Some("acme-glossary"),
+            registry: None,
+            locked: false,
+            dry_run: false,
+        },
+    )
+    .expect("pull");
+
+    // A registered package on the same machine whose lockfile this vaire will not read.
+    let other = temp();
+    std::fs::write(
+        other.path().join("knowledge.toml"),
+        "name = \"acme-other\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        other.path().join("knowledge.lock"),
+        "lockfile_version = 99\n",
+    )
+    .unwrap();
+    vaire::commands::catalog::add(home.path(), Some(other.path())).expect("catalog add");
+
+    let clean = |package: Option<&str>| {
+        vaire::commands::clean::run(
+            home.path(),
+            vaire::commands::clean::Options {
+                package,
+                dry_run: false,
+            },
+        )
+    };
+    assert!(
+        clean(Some("acme-glossary")).is_err(),
+        "the sweep is refused"
+    );
+
+    // The refusal said the sweep did not happen. If the request had been withdrawn anyway,
+    // the next successful sweep would take a package the user never named a second time.
+    std::fs::remove_file(other.path().join("knowledge.lock")).unwrap();
+    let out = clean(None).expect("clean");
+    assert!(out.removed.is_empty(), "{out:?}");
+    assert!(Store::at(home.path()).has("acme-glossary", Version::new(1, 0, 0)));
 }

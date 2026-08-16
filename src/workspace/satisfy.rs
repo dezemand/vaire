@@ -393,10 +393,12 @@ fn stored(
             // The manifest moved on and the pin did not. Refusing would strand the package;
             // naming both is what lets somebody see which one to change.
             true => format!(
-                "'{name}' is pinned to {held}, which no longer satisfies {constraint} —                  `vaire unpin {name}`, or widen the dependency"
+                "'{name}' is pinned to {held}, which no longer satisfies {constraint} — \
+                 `vaire unpin {name}`, or widen the dependency"
             ),
             false => format!(
-                "'{name}' is pinned to {held}, which is not in the store —                  `vaire pull {name}@{held}` to honor the pin"
+                "'{name}' is pinned to {held}, which is not in the store — \
+                 `vaire pull {name}@{held}` to honor the pin"
             ),
         });
     }

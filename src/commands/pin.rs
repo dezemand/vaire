@@ -110,6 +110,14 @@ pub fn pin(ctx: &Ctx, spec: &str) -> Result<PinOutput> {
     let mut warnings = crate::commands::catalog::register_path(&home, &root, false);
     let displaced_by = {
         let catalog = Catalog::open(&home)?;
+        // Recomputed from the lockfiles, not merely set — the flag is a cache of them, and
+        // this write may have *replaced* a pin. Flagging the new version while leaving the
+        // old one flagged would have retention keep both for good, on the strength of a hold
+        // no lockfile still records.
+        crate::commands::clean::refresh_pins(&catalog, &store)?;
+        // Then the one this command just made, unconditionally: `refresh_pins` declines to
+        // touch anything while some *other* workspace's lockfile is unreadable, and a pin
+        // should still take effect when a package elsewhere on the machine is broken.
         catalog.set_pinned(&name, version, true)?;
         working_copy(&catalog, &store, &root, &name, constraint)
     };

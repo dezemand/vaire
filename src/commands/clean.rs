@@ -127,6 +127,18 @@ pub fn run(home: &std::path::Path, options: Options<'_>) -> Result<CleanOutput> 
     // machine-wide stall.
     let (roots, requested) = {
         let catalog = Catalog::open(home)?;
+        // The refusal comes **before** anything is written. Withdrawing the request first
+        // would leave a run that reported "the sweep did not happen" having cleared a
+        // retention flag anyway — and the next successful sweep would then take a package
+        // the user never named twice.
+        let roots = roots(&catalog)?;
+        if !roots.unreadable.is_empty() {
+            return Err(VaireError::Config(format!(
+                "these lockfiles could not be read, and a sweep that treated them as holding \
+                 nothing would delete exactly what they hold:\n  {}",
+                roots.unreadable.join("\n  ")
+            )));
+        }
         // Withdrawing the request is the *point* of naming a package, so it happens even on
         // a dry run — otherwise `--dry-run` would report a sweep the real run would not
         // perform. It is also trivially reversible: pull it again.
@@ -144,16 +156,8 @@ pub fn run(home: &std::path::Path, options: Options<'_>) -> Result<CleanOutput> 
             .filter(|entry| entry.requested)
             .map(|entry| entry.name)
             .collect();
-        (roots(&catalog)?, requested)
+        (roots, requested)
     };
-
-    if !roots.unreadable.is_empty() {
-        return Err(VaireError::Config(format!(
-            "these lockfiles could not be read, and a sweep that treated them as holding \
-             nothing would delete exactly what they hold:\n  {}",
-            roots.unreadable.join("\n  ")
-        )));
-    }
 
     let mut removed = Vec::new();
     let mut kept = 0usize;
