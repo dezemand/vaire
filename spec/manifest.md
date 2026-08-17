@@ -3,7 +3,8 @@
 The committed manifest at a package root. It declares the package's identity, the file scope
 that *is* the package, the entity types it defines, and the other packages it depends on. It
 is the one authored, version-controlled config file; everything under `.vaire/` is derived and
-gitignored (design.md §9).
+gitignored (design.md §9). Release, distribution, and how a declared dependency is actually
+located on a machine are [registry.md](registry.md).
 
 `knowledge.toml` replaces the older `.vaire/config.toml` — see §8 for how `vaire init`
 migrates an existing corpus.
@@ -15,14 +16,23 @@ package. Discovery walks up from the working directory to the nearest ancestor c
 `knowledge.toml` (precedence: `--repo` > `VAIRE_REPO` > walk-up). An explicit `--repo`/
 `VAIRE_REPO` path that lacks one is an error, not a silent guess.
 
-`.vaire/` sits beside the manifest and holds only the derived index (`.vaire/index.db`) plus a
-self-contained `.vaire/.gitignore`. It is no longer a corpus marker.
+`.vaire/` sits beside the manifest and holds only derived state — the index, the links to
+where dependencies live, and packed artifacts — behind a self-contained `.vaire/.gitignore`.
+It is no longer a corpus marker.
+
+`knowledge.lock` also sits at the package root, but it is *written* rather than authored: it
+records what resolution actually chose, and whether that choice can be obtained again
+(registry.md §7). Commit it in leaf packages, where the citability claim lives.
 
 ```text
 my-package/
 ├── knowledge.toml      # committed manifest — the package marker
+├── knowledge.lock      # written by pull and by indexing; never by hand
 ├── knowledge/…         # entity files
-└── .vaire/             # derived, gitignored (index)
+└── .vaire/             # derived, gitignored
+    ├── index.db        #   the index
+    ├── packages/…      #   where each dependency was found
+    └── dist/…          #   packed artifacts
 ```
 
 ## 2. The manifest
@@ -126,7 +136,7 @@ concern layered on top of this file; the manifest only declares the constraints.
 A reference to another package is written `@<name>/<type>:<id>` (design.md §6) and must name
 a declared dependency, resolvable through the linked-package lookup — the referencing
 package's own `.vaire/packages/<name>`, the run-root itself, or the run-root's links
-(cli.md §6.5). `vaire check` enforces the full set (packages.md §8):
+(cli.md §6.5). `vaire check` enforces the full set:
 
 | finding | severity | when |
 |---|---|---|

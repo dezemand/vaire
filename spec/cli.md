@@ -9,7 +9,9 @@ scope: The `vaire` command-line interface and its STDIO MCP surface
 
 The command surface for `vaire`, the derived index over the knowledge corpus. This spec
 defines invocation, global conventions, every command, its flags, its human and JSON
-output shapes, and exit codes. For the architecture behind it, see [design.md](design.md).
+output shapes, and exit codes. For the architecture behind it, see [design.md](design.md);
+for the manifest, [manifest.md](manifest.md); for what release, publish, pull, pin and
+clean are actually *doing*, [registry.md](registry.md).
 
 ## 1. Model
 
@@ -491,7 +493,7 @@ Checks:
   owning package's context, does not exist). Existence-based, so the dependency's own
   `types` vocabulary is irrelevant.
 - **Undeclared import** — an `@pkg/…` reference whose package is not in the manifest
-  `[dependencies]` (packages.md §8). A pure table check — no cross-package resolution needed.
+  `[dependencies]` (manifest.md §5). A pure table check — no cross-package resolution needed.
 - **Missing dependency** — a *declared* dependency that is unavailable (not linked,
   broken link, name mismatch — cli.md §6.5). Reported **once per dependency** with the
   exact fix; its edges are skipped by the dangling pass (no spam).
@@ -720,7 +722,7 @@ gzipped tar with a single top-level directory `<name>-<version>/` holding the ma
 every corpus file the manifest's include/exclude selects, **every file those reference**
 by relative link or image (transitively through referenced Markdown), and a freshly
 exported `.vaire/index.db`. This is the unit a registry stores and a consumer pulls
-(design: the project registry doc, v0.2).
+(registry.md §9).
 
 - **The committed tree is the only input.** Packing is commit-as-publish taken
   literally: the corpus root must be a Git repository with commits (a corpus nested in a
@@ -983,7 +985,7 @@ vaire registry show <name>
 vaire registry rm <name>
 ```
 
-The remotes this machine publishes to and pulls from (registry.v2.md §8). The third of the
+The remotes this machine publishes to and pulls from (registry.md §9). The third of the
 three "add"s, and the last one the grammar had to keep apart.
 
 - **A registry is a decision, never an observation.** Nothing ambient writes these rows: a
@@ -1017,7 +1019,7 @@ than letting a push fail somewhere less obvious.
 vaire push [<version>] [--registry <name>] [--access <state>] [--access-hint <text>] [--dry-run]
 ```
 
-Uploads released versions (registry.v2.md §3.4). **Split from `release` deliberately**:
+Uploads released versions (registry.md §3.3). **Split from `release` deliberately**:
 cutting a version is a git act, uploading is idempotent plumbing. A failed upload must not
 re-run a ritual, and CI must be able to publish a tag it did not cut.
 
@@ -1076,7 +1078,7 @@ directory you are standing in.
 vaire pull [<name>[@^MAJOR | @<version>]] [--registry <name>] [--dry-run]
 ```
 
-Fetches a release into the **store** (registry.v2.md §5): verified, unpacked, re-indexed
+Fetches a release into the **store** (registry.md §5): verified, unpacked, re-indexed
 here, and sealed read-only at `~/.vaire/store/<name>/<version>/`. Bare `vaire pull` takes
 every declared dependency this machine cannot already satisfy, and therefore needs a package
 to stand in; `vaire pull <name>` is a store operation and works from anywhere, which is what
@@ -1127,7 +1129,7 @@ reported as a warning: a package you can read is worth more than a pull that ref
 it advanced over changed **that this package cites** — not the publisher's changelog, which
 describes everything that happened to a package most of whose entities a given consumer has
 never referenced. Both halves are already in the graph: a release record carries
-`added`/`changed`/`retired` edges to the entities it touched (registry.v2.md amendment 20),
+`added`/`changed`/`retired` edges to the entities it touched (registry.md §3.2),
 and this package's index carries edges to what it references. The digest is their
 intersection, with the total as the denominator that makes it legible:
 
@@ -1166,7 +1168,7 @@ how it resolved, and only one kind carries a checksum:
   between two runs. Writing a digest for it would be a reproducibility claim the tool
   cannot keep.
 
-That split is the two-worlds gap (registry.v2.md §6) written down rather than papered over.
+That split is the two-worlds rule (registry.md §6.2) written down rather than papered over.
 A stale lock is safe and merely imprecise — within-major substitutability is the protocol's
 own promise — which is what makes it reasonable to commit in leaf packages, where the
 citability claim lives, and to treat it as informational elsewhere.
@@ -1195,7 +1197,7 @@ vaire pin <name>@<version>     # hold this exact version
 vaire unpin <name>             # let it move again
 ```
 
-Within a major line, substitutability is the protocol's own promise (registry.v2.md §3.1) —
+Within a major line, substitutability is the protocol's own promise (registry.md §3.1) —
 which is what lets retention replace 1.4.1 with 1.4.2 in the store without asking, and lets
 resolution take the highest satisfying version. A pin is the deliberate opt-out, for the
 cases where that promise turns out not to hold: a release that broke you anyway, a result
@@ -1214,7 +1216,7 @@ particular consumer in hand. That flag is a cache of the lockfiles, recomputed r
 tracked: two consumers may pin the same version, and one of them letting go settles nothing.
 
 **A pin selects a release; it does not change which world answers.** Resolution order is
-untouched (registry.v2.md §6) — an explicit link, then a working copy the catalog knows,
+untouched (registry.md §6.1) — an explicit link, then a working copy the catalog knows,
 then the store — and a pin chooses *within the store*. If it displaced a checkout, cloning a
 package with a pinned lockfile would silently stop using your own working copy of that
 dependency. Where a working copy does answer first, the pin is inert here and `pin` says so;
