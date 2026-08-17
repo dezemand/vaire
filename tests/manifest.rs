@@ -77,7 +77,7 @@ fn rejects_bad_version() {
 
 #[test]
 fn rejects_non_caret_major_dependency_constraint() {
-    // Only `^MAJOR` is legal (packages.md §6): pins and ranges are invalid.
+    // Only `^MAJOR` is legal (manifest.md §5): pins and ranges are invalid.
     assert!(
         load("name = \"p\"\nversion = \"1.0.0\"\n\n[dependencies]\nother = \"1.2.3\"\n").is_err()
     );

@@ -1,4 +1,4 @@
-//! Satisfying declared dependencies from what this machine has (registry.v2.md §6).
+//! Satisfying declared dependencies from what this machine has (registry.md §6).
 //!
 //! A manifest declares *what* a package depends on; where that dependency lives is a
 //! consumer question, and the catalog is what answers it. For each declared dependency
@@ -428,7 +428,7 @@ enum Outcome {
 
 /// Fill (or heal) one `.vaire/packages/<name>` entry under `pkg_root`.
 ///
-/// The catalog first, then the store (registry.v2.md §6). That order is the two-worlds
+/// The catalog first, then the store (registry.md §6). That order is the two-worlds
 /// decision made concrete: a working copy is what you author, so it wins over a pulled
 /// release of the same name even when the release is newer. The store is the fallback for
 /// what you merely *consume*.

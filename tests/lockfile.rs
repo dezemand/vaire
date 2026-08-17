@@ -1,4 +1,4 @@
-//! `knowledge.lock` and `--frozen` — reproducibility (registry.v2.md §6–§7).
+//! `knowledge.lock` and `--frozen` — reproducibility (registry.md §6–§7).
 //!
 //! The store made an answer *obtainable*; these make it **checkable**. The lockfile records
 //! what resolution chose and whether that choice can be obtained again; `--frozen` refuses

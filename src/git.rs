@@ -152,7 +152,7 @@ pub fn create_tag(repo_root: &Path, name: &str, message: &str) -> Result<()> {
 }
 
 /// Delete a tag. Only ever used to unwind a release whose *own* commit could not be
-/// completed — never to retract a published one (that is yank, registry.v2.md §13).
+/// completed — never to retract a published one (that is yank, registry.md §9.2).
 pub fn delete_tag(repo_root: &Path, name: &str) -> Result<()> {
     require_safe_rev(name)?;
     let _ = run(repo_root, &["tag", "-d", "--end-of-options", name])?;

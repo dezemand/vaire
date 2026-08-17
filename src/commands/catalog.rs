@@ -187,7 +187,7 @@ pub fn register_path(home: &Path, root: &Path, no_register: bool) -> Vec<String>
 }
 
 /// One-shot migration of the retired `local-packages` root into the catalog
-/// (registry.v2.md §14).
+/// (cli.md §6.7).
 ///
 /// v0.2.0 kept a configured root and re-walked it on every maintain command. The catalog
 /// replaces both halves — ambient registration for what you author, the store for what you

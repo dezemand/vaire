@@ -1384,7 +1384,7 @@ impl Output for ReleaseOutput {
 }
 
 /// The release `vaire status` says is pending — the ambient half of the classifier, so a
-/// release is never a surprise (registry.v2.md §3.1).
+/// release is never a surprise (registry.md §3.1).
 #[derive(Debug, Serialize)]
 pub struct PendingRelease {
     /// The last released version's tag, absent when the package has never been released.
@@ -1564,7 +1564,7 @@ impl Output for CatalogRemoveOutput {
     }
 }
 
-// ---- registries (registry.v2.md §8, §12) ------------------------------------------------
+// ---- registries (registry.md §9) ------------------------------------------------
 
 /// `vaire registry add`.
 #[derive(Debug, Serialize)]
@@ -2027,7 +2027,7 @@ impl Output for PullOutput {
 }
 
 /// What a newly-adopted release changed that this package actually cites
-/// (registry.v2.md amendment 20).
+/// (registry.md §3.2).
 ///
 /// A release record carries edges to the entities it touched, and this package's index
 /// carries edges to the entities it references. The interesting set is the intersection:

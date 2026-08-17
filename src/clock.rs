@@ -24,7 +24,7 @@ pub fn today_utc() -> String {
 }
 
 /// An epoch timestamp as an RFC 3339 UTC instant (`2026-08-01T09:30:00Z`) — the form the
-/// registry wire contract uses for `published_at` (registry.v2.md §8.3).
+/// registry wire contract uses for `published_at` (registry.md §9.1).
 ///
 /// Seconds precision, `Z` only. A registry timestamp is provenance a human reads, never
 /// something ordering depends on (versions order themselves), so sub-second resolution and
@@ -71,7 +71,7 @@ mod tests {
     fn rfc3339_carries_the_time_of_day() {
         assert_eq!(timestamp_utc(0), "1970-01-01T00:00:00Z");
         assert_eq!(timestamp_utc(86_399), "1970-01-01T23:59:59Z");
-        // The spec's own example instant (registry.v2.md §8.3).
+        // The spec's own example instant (registry.md §9.1).
         assert_eq!(timestamp_utc(1_785_576_600), "2026-08-01T09:30:00Z");
     }
 }

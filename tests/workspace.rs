@@ -508,7 +508,7 @@ fn suggest_returns_pre_qualified_dep_ids() {
 
 #[test]
 fn unresolved_defaults_to_this_packages_worklist() {
-    // A dependency's loose ends are its owner's worklist (packages.md §7).
+    // A dependency's loose ends are its owner's worklist (cli.md §3.5).
     let ws = Ws::acceptance();
     let out = commands::unresolved::run(&ws.ctx("acme-web"), None, None, false).unwrap();
     let descs: Vec<&str> = out

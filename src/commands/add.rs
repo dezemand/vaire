@@ -7,7 +7,7 @@
 //! mutates a file and needs no index, so it runs before `Ctx` is built; it discovers the
 //! package root by walking up to the nearest `knowledge.toml` (or honours `--config`).
 //!
-//! `^MAJOR` is the only legal constraint (packages.md §6); the default is `^1`. Adding a
+//! `^MAJOR` is the only legal constraint (manifest.md §5); the default is `^1`. Adding a
 //! package already present **updates** its constraint in place (idempotent).
 //!
 //! `--link` creates (or replaces) the `.vaire/packages/<name>` symlink. The manifest never

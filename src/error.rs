@@ -27,7 +27,7 @@ pub enum ExitCode {
     /// `6` — `vaire check` found violations (or warnings under `--strict`).
     CheckViolations = 6,
     /// `7` — `vaire release` classified a MAJOR and stopped, because a MAJOR is a claim
-    /// about meaning that only a maintainer can make (registry.v2.md §3.1). Distinct from
+    /// about meaning that only a maintainer can make (registry.md §3.1). Distinct from
     /// a generic failure on purpose: an automated release pipeline must be able to tell
     /// "this needs a human" from "this broke", and report the first as a pending decision
     /// rather than a red build.

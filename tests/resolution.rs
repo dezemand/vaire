@@ -1,4 +1,4 @@
-//! Satisfying declared dependencies from the catalog (registry.v2.md §6).
+//! Satisfying declared dependencies from the catalog (registry.md §6).
 //!
 //! Two layers. The selection engine is driven in-process against a hermetic catalog, which
 //! keeps these tests parallel-safe (Turso locks a database exclusively on open, so a shared

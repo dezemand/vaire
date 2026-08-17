@@ -552,7 +552,7 @@ fn external_diagram_edges(node_id: &NodeId, diagram_path: &str, content: &str) -
 
 /// Build an index of the corpus **as it stood at `rev`**, into `db_path`.
 ///
-/// The release classifier's baseline (registry.v2.md §3.1): rather than keeping the last
+/// The release classifier's baseline (registry.md §3.1): rather than keeping the last
 /// release's artifact around to read its index out of, the tree at that release's tag is
 /// re-indexed with today's code. `vaire pack` is byte-deterministic from a commit, so
 /// this reproduces what that release shipped without any artifact archaeology — and it

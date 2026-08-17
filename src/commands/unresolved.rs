@@ -2,7 +2,7 @@
 //!
 //! The work list for the entity-creation pass (design.md §8), derived fresh from the
 //! files on each call — there is no stored queue. Default scope is the CURRENT package:
-//! a descriptor is package-agnostic (packages.md §7) and a dependency's loose ends are
+//! a descriptor is package-agnostic (cli.md §3.5) and a dependency's loose ends are
 //! its owner's worklist. `--all-packages` widens to the linked closure, each row tagged
 //! with its package.
 

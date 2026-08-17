@@ -71,7 +71,7 @@ pub struct Ctx {
     /// The embedding provider can own an HTTP connection pool or command configuration;
     /// retain it for the invocation (and all MCP requests) rather than recreating it per call.
     embedder: std::cell::OnceCell<Box<dyn crate::embed::Embedder>>,
-    /// `--frozen`: answer only from the store (registry.v2.md §6).
+    /// `--frozen`: answer only from the store (registry.md §6).
     frozen: bool,
 }
 
@@ -93,7 +93,7 @@ impl Ctx {
     }
 
     /// A **rootless** context: no package to stand in, scope taken from the catalog
-    /// (registry.v2.md §9). Built when a read command runs outside any package, and by
+    /// (cli.md §6.8). Built when a read command runs outside any package, and by
     /// `--all` from inside one.
     ///
     /// The catalog is read once here and the handle dropped immediately — Turso locks a

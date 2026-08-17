@@ -539,7 +539,7 @@ fn emit_error(err: &VaireError, json: bool) {
 /// The context a **read** command runs in.
 ///
 /// Ordinarily the package you are standing in. Outside one — or with `--all` — the
-/// rootless session, scoped by the catalog (registry.v2.md §9). The fallback is confined
+/// rootless session, scoped by the catalog (cli.md §6.8). The fallback is confined
 /// to reads on purpose: a maintain command has nothing to maintain without a package, and
 /// its `no corpus found` error is the right answer rather than a scope substitution.
 ///

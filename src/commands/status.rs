@@ -88,7 +88,7 @@ pub fn run(ctx: &Ctx) -> Result<StatusOutput> {
 }
 
 /// What `vaire release` would do right now, so a release is never a surprise
-/// (registry.v2.md §3.1).
+/// (registry.md §3.1).
 ///
 /// Wholly best-effort: `status` reports, it never fails, so every step that could go
 /// wrong — no git, no tags, an unreadable baseline — simply yields `None`. Two things

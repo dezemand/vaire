@@ -1,5 +1,5 @@
 //! The store and `vaire pull` — the consuming half of the registry line
-//! (registry.v2.md §5–§6).
+//! (registry.md §5–§6).
 //!
 //! Every test drives the real publish → pull loop over a `file://` registry, because the
 //! interesting properties are all end-to-end: what a consumer ends up holding, whether it

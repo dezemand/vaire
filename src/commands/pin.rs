@@ -1,4 +1,4 @@
-//! `vaire pin` / `vaire unpin` — holding one exact version (registry.v2.md §5).
+//! `vaire pin` / `vaire unpin` — holding one exact version (registry.md §5).
 //!
 //! Within a major line, substitutability is the protocol's own promise (§3.1), which is
 //! what lets 1.4.2 replace 1.4.1 in the store without asking and lets resolution take the

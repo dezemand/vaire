@@ -90,7 +90,7 @@ fn provider_name(p: EmbeddingProvider) -> &'static str {
 }
 
 /// Interactive `vaire configure` (no section). Embeddings are the only section left —
-/// where packages live is the catalog's business now, not a setting (registry.v2.md §14) —
+/// where packages live is the catalog's business now, not a setting (cli.md §6.7) —
 /// so this goes straight to those prompts rather than offering a menu of one.
 pub fn run_interactive(home: &Path) -> Result<ConfigureOutput> {
     let cfg = UserConfig::load_from(home)?;

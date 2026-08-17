@@ -36,7 +36,7 @@ pub struct Version {
     pub patch: u64,
 }
 
-/// The size of a version change (registry.v2.md §3.1). Ordered by severity, so the
+/// The size of a version change (registry.md §3.1). Ordered by severity, so the
 /// "highest applicable" rule for a mixed diff is `max()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "lowercase")]

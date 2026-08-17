@@ -1,5 +1,5 @@
 //! Choosing which package on this machine satisfies a declared dependency
-//! (registry.v2.md §6).
+//! (registry.md §6).
 //!
 //! v0.2.0 answered "is there something called this?" by walking a configured root, which
 //! could only match on a name. The catalog answers the same question as a lookup, and the

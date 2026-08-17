@@ -1,5 +1,5 @@
 //! `vaire registry add|list|rm|show` (cli.md §4.9) — the remotes this machine publishes to
-//! and pulls from (registry.v2.md §8, §12).
+//! and pulls from (registry.md §9).
 //!
 //! The third of the three "add"s, and the grammar is what keeps them apart: `add` declares
 //! a dependency, `catalog add` records a package on this machine, `registry add` configures
