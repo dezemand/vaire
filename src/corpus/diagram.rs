@@ -133,9 +133,12 @@ pub fn scan_prose(prose: &str, prose_start_line: u32) -> Vec<(DiagramMarker, u32
         let is_code = fences.is_code(line);
 
         if !was_in_fence && is_code {
-            // Just opened a fence: check its info string.
+            // Just opened a fence: check its info string. CommonMark defines the fence
+            // language as the *first word* of the info string, so ```` ```mermaid title=x
+            // ```` is still a mermaid fence, not an unrecognised one.
             let trimmed = line.trim_start();
-            let lang = trimmed.trim_start_matches(['`', '~']).trim();
+            let info = trimmed.trim_start_matches(['`', '~']).trim();
+            let lang = info.split_whitespace().next().unwrap_or("");
             if DIAGRAM_FENCE_LANGS.contains(&lang) {
                 in_diagram_fence = true;
                 block.clear();
@@ -158,7 +161,26 @@ pub fn scan_prose(prose: &str, prose_start_line: u32) -> Vec<(DiagramMarker, u32
             block.push('\n');
         }
     }
+    // CommonMark closes an unterminated fence at end of input — flush whatever a still-open
+    // diagram block collected rather than silently dropping it.
+    if in_diagram_fence {
+        for (marker, rel_line) in scan_source(&block) {
+            out.push((marker, block_start_line + rel_line - 1));
+        }
+    }
     out
+}
+
+/// De-duplicate diagram-origin edges by `(from, to)`, keeping the first occurrence — the
+/// same target can be marked in more than one fenced block or linked diagram file for one
+/// node, and each occurrence must not become its own `edges` row. Other origins pass
+/// through untouched.
+pub fn dedupe_diagram_edges(edges: &mut Vec<crate::model::edge::Edge>) {
+    let mut seen = std::collections::HashSet::new();
+    edges.retain(|e| match &e.origin {
+        crate::model::edge::RefOrigin::Diagram => seen.insert((e.from.clone(), e.to.clone())),
+        _ => true,
+    });
 }
 
 #[cfg(test)]
@@ -234,6 +256,60 @@ mod tests {
         let prose = "```rust\nlet x = \"vaire/system:gateway\";\n```\n";
         let refs = scan_prose(prose, 1);
         assert!(refs.is_empty(), "got {refs:?}");
+    }
+
+    #[test]
+    fn fence_info_string_with_trailing_words_still_recognised() {
+        let prose = "```mermaid title=\"x\"\nclick A href \"vaire/system:gateway\"\n```\n";
+        let refs = scan_prose(prose, 1);
+        assert_eq!(refs.len(), 1, "got {refs:?}");
+    }
+
+    #[test]
+    fn unclosed_fence_is_flushed_at_end_of_input() {
+        let prose = "```plantuml\ncomponent A [[vaire/system:gateway]]\n";
+        let refs = scan_prose(prose, 1);
+        assert_eq!(
+            refs.len(),
+            1,
+            "an unterminated fence still closes at EOF: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn dedupe_diagram_edges_collapses_repeated_targets_keeps_other_origins() {
+        use crate::model::edge::{Edge, RefOrigin};
+        use crate::model::id::{NodeId, NodeType};
+
+        let from = NodeId::new(NodeType::new("record"), "arch");
+        let to = NodeId::new(NodeType::new("system"), "gateway");
+        let mut edges = vec![
+            Edge {
+                from: from.clone(),
+                to: to.clone(),
+                origin: RefOrigin::Diagram,
+                source_file: "a.puml".into(),
+                line: 1,
+            },
+            Edge {
+                from: from.clone(),
+                to: to.clone(),
+                origin: RefOrigin::Diagram,
+                source_file: "b.puml".into(),
+                line: 3,
+            },
+            Edge {
+                from: from.clone(),
+                to: to.clone(),
+                origin: RefOrigin::Inline,
+                source_file: "arch.md".into(),
+                line: 5,
+            },
+        ];
+        dedupe_diagram_edges(&mut edges);
+        assert_eq!(edges.len(), 2, "got {edges:?}");
+        assert_eq!(edges[0].source_file, "a.puml", "first occurrence is kept");
+        assert!(edges.iter().any(|e| e.origin == RefOrigin::Inline));
     }
 
     #[test]

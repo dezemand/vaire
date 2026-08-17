@@ -5,8 +5,9 @@
 
 mod common;
 
-use common::Corpus;
+use common::{Corpus, DummyEmbedder};
 use vaire::commands;
+use vaire::index::build::Mode;
 use vaire::index::check::{Violation, Warning};
 
 #[test]
@@ -144,5 +145,78 @@ fn inline_reference_still_drifts_even_with_a_matching_diagram_edge() {
             .any(|w| matches!(w, Warning::Drift { to, .. } if to == "system:gateway")),
         "an inline reference not declared in frontmatter still drifts, diagram edge or not: {:?}",
         report.warnings
+    );
+}
+
+#[test]
+fn repeated_marker_across_fenced_blocks_is_one_edge() {
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/gateway.md",
+        "---\nid: gateway\ntype: system\nname: Gateway\n---\n# Gateway\n",
+    )
+    .add(
+        "knowledge/arch.md",
+        "---\nid: arch\ntype: record\n---\n# Architecture\n\n\
+         ```plantuml\ncomponent A [[vaire/system:gateway]]\n```\n\n\
+         ```mermaid\nclick B href \"vaire/system:gateway\"\n```\n",
+    )
+    .commit()
+    .build();
+
+    let refs = commands::refs::run(&c.ctx(), "record:arch", 1, None).unwrap();
+    let matches: Vec<_> = refs
+        .refs
+        .iter()
+        .filter(|r| r.id == "system:gateway")
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "the same target marked twice must still be one edge: {:?}",
+        refs.refs
+    );
+}
+
+#[test]
+fn incremental_reindex_picks_up_a_marker_newly_added_to_an_existing_diagram_file() {
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/gateway.md",
+        "---\nid: gateway\ntype: system\nname: Gateway\n---\n# Gateway\n",
+    )
+    .add(
+        "knowledge/arch.md",
+        "---\nid: arch\ntype: record\n---\n# Architecture\n\nSee ![wiring](../assets/wiring.puml).\n",
+    )
+    // The diagram file starts out with no `vaire/` marker at all — no diagram edge, so
+    // nothing in `edges` yet points a future invalidation check at `arch.md`.
+    .add("assets/wiring.puml", "@startuml\ncomponent \"API Gateway\"\n@enduml\n")
+    .commit();
+    c.build_with(&DummyEmbedder { dims: 8 }, Mode::Full);
+
+    let refs = commands::refs::run(&c.ctx(), "record:arch", 1, None).unwrap();
+    assert!(
+        !refs.refs.iter().any(|r| r.id == "system:gateway"),
+        "no marker yet: {:?}",
+        refs.refs
+    );
+
+    // Add the marker to the diagram file only — `arch.md` itself does not change.
+    c.add(
+        "assets/wiring.puml",
+        "@startuml\ncomponent \"API Gateway\" [[vaire/system:gateway]]\n@enduml\n",
+    )
+    .commit();
+    c.build_with(&DummyEmbedder { dims: 8 }, Mode::Incremental);
+
+    let refs = commands::refs::run(&c.ctx(), "record:arch", 1, None).unwrap();
+    assert!(
+        refs.refs
+            .iter()
+            .any(|r| r.id == "system:gateway" && r.ref_type == "diagram"),
+        "the marker added to an unchanged referencing node's linked diagram file must \
+         still surface after an incremental reindex: {:?}",
+        refs.refs
     );
 }

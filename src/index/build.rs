@@ -253,6 +253,11 @@ pub fn run(
             }
         }
     }
+    // The same target can be marked in more than one fenced block or linked diagram
+    // file for one node — collapse to one edge per (from, to) regardless of source.
+    for prepared in &mut prepared {
+        crate::corpus::diagram::dedupe_diagram_edges(&mut prepared.node.edges);
+    }
 
     // Read cached vectors from the live index when updating in place, or from the previous
     // index when staging a rebuild. Either way an unchanged section keeps its vector.
@@ -612,6 +617,9 @@ pub fn snapshot(root: &Path, config: &Config, rev: &str, db_path: &Path) -> Resu
             }
         }
     }
+    for prepared in &mut prepared {
+        crate::corpus::diagram::dedupe_diagram_edges(&mut prepared.node.edges);
+    }
 
     remove_db_files(db_path)?;
     let index = Index::create_for_bulk_load(db_path)?;
@@ -745,19 +753,21 @@ fn partition_changed(
     }
     // An edited external diagram file (`.puml`/`.mmd`/etc.) is not itself a corpus node,
     // so it never appears in `to_index` above and its edges would otherwise go stale
-    // (issue #23). Force any node whose last-indexed diagram edges came from a changed
-    // diagram file back into `to_index`, so its content is re-fetched and re-scanned.
+    // (issue #23). Force any node that *links* to a changed diagram file back into
+    // `to_index`, so its content is re-fetched and re-scanned. This reads `diagram_links`
+    // — the link relationship, recorded independent of whether a marker (and so an edge)
+    // exists yet — rather than the `edges` table, so it also catches the first marker
+    // ever added to a previously-marker-free diagram file, and a brand-new diagram file a
+    // node already linked to (a dangling link still records a `diagram_links` row).
     if !diagram_changed.is_empty() && db_path.exists() {
         let existing = Index::open(db_path)?;
         for path in &diagram_changed {
-            let referencing: Vec<String> = existing
-                .query_rows(
-                    "SELECT DISTINCT n.path FROM edges e JOIN nodes n ON n.id = e.from_id \
-                     WHERE e.ref_type = 'diagram' AND e.source_file = ?1",
-                    [path.as_str()],
-                    |r| col_text(r, 0),
-                )
-                .unwrap_or_default();
+            let referencing: Vec<String> = existing.query_rows(
+                "SELECT DISTINCT n.path FROM diagram_links dl JOIN nodes n ON n.id = dl.from_id \
+                 WHERE dl.path = ?1",
+                [path.as_str()],
+                |r| col_text(r, 0),
+            )?;
             for rel in referencing {
                 if head_set.contains(&rel) && !to_index.contains(&rel) {
                     to_index.push(rel);
@@ -842,6 +852,17 @@ fn index_node(
                 e.source_file.as_str(),
                 i64::from(e.line),
             ],
+        )?;
+    }
+
+    // Every diagram file this node's prose links to — recorded independent of whether it
+    // currently carries a `vaire/` marker (or exists at all), so `partition_changed` can
+    // invalidate this node the moment such a file changes, not only once it already has
+    // an edge to lose (issue #23).
+    for path in diagram_link_paths(&node.path, &node.prose) {
+        index.execute(
+            "INSERT INTO diagram_links(from_id, path) VALUES(?1, ?2)",
+            turso::params![id.as_str(), path.as_str()],
         )?;
     }
 
@@ -943,6 +964,10 @@ fn delete_file(index: &Index, rel: &str) -> Result<()> {
     for id in &ids {
         index.execute(
             "DELETE FROM edges WHERE from_id = ?1 AND ref_type = 'diagram'",
+            [id.as_str()],
+        )?;
+        index.execute(
+            "DELETE FROM diagram_links WHERE from_id = ?1",
             [id.as_str()],
         )?;
     }
