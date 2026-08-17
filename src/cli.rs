@@ -317,6 +317,30 @@ pub enum Command {
         undo: bool,
     },
 
+    /// Hold a dependency at one exact version: it survives retention and `vaire clean`,
+    /// and resolution takes it over anything newer in the same major line.
+    Pin {
+        /// `<name>@<version>`, e.g. `acme-core@1.4.2`. The version must already be in the
+        /// store — a pin records the digest of the artifact it holds.
+        spec: String,
+    },
+
+    /// Release a hold, so the dependency resolves to the highest satisfying version again.
+    Unpin {
+        /// The package to stop holding.
+        name: String,
+    },
+
+    /// Remove store entries nothing needs: what no lockfile names, no pin holds, and
+    /// nobody asked for by name. Everything removed is still published.
+    Clean {
+        /// Stop holding this package, then sweep. Its locked and pinned versions survive.
+        package: Option<String>,
+        /// Report what would go; delete nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+
     /// The remote registries this machine publishes to and pulls from.
     Registry {
         #[command(subcommand)]

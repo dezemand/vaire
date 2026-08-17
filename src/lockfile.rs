@@ -72,7 +72,8 @@ pub struct Locked {
     /// says "this answer cannot be reproduced".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
-    /// Held against retention and `gc`, and honored by resolution. Written by `vaire pin`.
+    /// Held against retention and `vaire clean`, and honored by resolution. Written by
+    /// `vaire pin`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
 }
@@ -191,7 +192,11 @@ impl Lockfile {
     /// no longer declares is forgotten, which is why `declared` is passed rather than
     /// inferred.
     ///
-    /// A pin survives a refresh that does not mention it, for the same reason a pin exists.
+    /// A **pinned entry is not refreshed at all**. Carrying the flag forward onto a newly
+    /// resolved version would move the pin to whatever just arrived, which is precisely the
+    /// thing it was written to prevent — the hold would survive in name while releasing what
+    /// it held. Moving one is `vaire unpin` followed by a resolution, in that order, because
+    /// both halves are decisions.
     pub fn merged(
         previous: Option<&Lockfile>,
         resolved: Vec<Locked>,
@@ -203,9 +208,9 @@ impl Lockfile {
                 merged.insert(entry.name.clone(), entry.clone());
             }
         }
-        for mut entry in resolved {
-            if let Some(old) = merged.get(&entry.name) {
-                entry.pinned = entry.pinned || old.pinned;
+        for entry in resolved {
+            if merged.get(&entry.name).is_some_and(|old| old.pinned) {
+                continue;
             }
             merged.insert(entry.name.clone(), entry);
         }
@@ -358,5 +363,23 @@ mod tests {
             merged.get("acme-core").unwrap().pinned,
             "a pin that a routine refresh could clear would not be a pin"
         );
+    }
+
+    #[test]
+    fn a_refresh_does_not_move_a_pin_onto_the_version_it_just_resolved() {
+        let mut pinned = from_registry("acme-core", "1.4.2");
+        pinned.pinned = true;
+        let previous = Lockfile::new(vec![pinned]);
+
+        // A `vaire pull` that fetched the newer release. Keeping the flag but taking the new
+        // version would leave the hold in name only, releasing exactly what it held.
+        let merged = Lockfile::merged(
+            Some(&previous),
+            vec![from_registry("acme-core", "1.5.0")],
+            &["acme-core".into()],
+        );
+        let entry = merged.get("acme-core").unwrap();
+        assert_eq!(entry.version.to_string(), "1.4.2", "the pin did not move");
+        assert!(entry.pinned);
     }
 }

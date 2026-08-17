@@ -10,12 +10,14 @@ pub mod add;
 pub mod backlinks;
 pub mod catalog;
 pub mod check;
+pub mod clean;
 pub mod configure;
 pub mod deps;
 pub mod index;
 pub mod init;
 #[cfg(feature = "pack")]
 pub mod pack;
+pub mod pin;
 #[cfg(feature = "pack")]
 pub mod pull;
 #[cfg(feature = "pack")]

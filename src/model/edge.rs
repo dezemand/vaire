@@ -12,6 +12,12 @@ pub enum RefOrigin {
     Frontmatter(String),
     /// An inline `[[...]]` wikilink in prose.
     Inline,
+    /// A `vaire/type:id` link target found inside a diagram source (issue #23) — a
+    /// fenced ```` ```plantuml ````/```` ```mermaid ```` block, or an external
+    /// `.puml`/`.mmd`/`.drawio` file the prose links to. Kept distinct from `Inline` so
+    /// `check`'s drift rule never fires on it — a diagram edge is not fixable the way a
+    /// prose one is.
+    Diagram,
 }
 
 impl RefOrigin {
@@ -20,6 +26,7 @@ impl RefOrigin {
         match self {
             RefOrigin::Frontmatter(key) => key,
             RefOrigin::Inline => "inline",
+            RefOrigin::Diagram => "diagram",
         }
     }
 }

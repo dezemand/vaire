@@ -6,6 +6,7 @@
 //! the typed `id:` (frontmatter-driven discovery), and scan prose for wikilinks and
 //! section headings.
 
+pub mod diagram;
 pub mod frontmatter;
 pub mod markdown;
 pub mod repo;

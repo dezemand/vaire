@@ -177,8 +177,12 @@ JSON:
 }
 ```
 
-`ref_type` is the edge origin: a frontmatter key (`participants`, `references`, `project`)
-or `inline` for a wikilink in prose. `line` is the 1-based source line.
+`ref_type` is the edge origin: a frontmatter key (`participants`, `references`, `project`),
+`inline` for a wikilink in prose, or `diagram` for a `vaire/type:id` link target found
+inside a diagram source (§6.4) — a fenced ```` ```plantuml ````/```` ```mermaid ```` block
+or an external `.puml`/`.mmd`/`.drawio` file the prose links to. `line` is the 1-based
+source line — for a `diagram` edge, the line **inside the diagram source**, not the node's
+own file, since that is where the marker is written.
 
 ### 3.3 `vaire refs <id>`
 
@@ -1119,6 +1123,29 @@ Vectors come from your own embedding provider — artifacts ship stripped, so th
 nothing to adopt. Without one configured the entry is still built and searched lexically,
 reported as a warning: a package you can read is worth more than a pull that refused.
 
+**The adopted-changes digest.** A pull that *replaces* a version reports what the releases
+it advanced over changed **that this package cites** — not the publisher's changelog, which
+describes everything that happened to a package most of whose entities a given consumer has
+never referenced. Both halves are already in the graph: a release record carries
+`added`/`changed`/`retired` edges to the entities it touched (registry.v2.md amendment 20),
+and this package's index carries edges to what it references. The digest is their
+intersection, with the total as the denominator that makes it legible:
+
+```text
+✓ pulled 1 package
+  acme-glossary  1.1.0      from 'lab'
+      replaced 1.0.0
+      1 of the 4 entities touched by 1.0.0→1.1.0 cited here:
+        changed  term:torque-vectoring
+```
+
+A first pull reports none — arriving somewhere for the first time adopts nothing, and there
+is no range to read records over. Neither can anything here fail a pull: the bytes arrived
+and are sound, so a digest that could not be computed is a missing courtesy, not a failed
+acquisition. `removed` entities are the one change that cannot appear, because a removed
+entity has no address left to point at (§4.7) — survivable, since removals only happen in a
+MAJOR and a MAJOR is never adopted silently.
+
 ### 4.13 `knowledge.lock` and `--frozen`
 
 ```text
@@ -1160,6 +1187,91 @@ consulted at all — it is the index of working copies, which is exactly what th
 refuses — so the machine-wide catalog lock is never taken in the mode CI runs in. The
 expected posture for agents and pipelines; ordinary authoring wants the opposite, because a
 checkout is what you are editing.
+
+### 4.14 `vaire pin` / `vaire unpin`
+
+```text
+vaire pin <name>@<version>     # hold this exact version
+vaire unpin <name>             # let it move again
+```
+
+Within a major line, substitutability is the protocol's own promise (registry.v2.md §3.1) —
+which is what lets retention replace 1.4.1 with 1.4.2 in the store without asking, and lets
+resolution take the highest satisfying version. A pin is the deliberate opt-out, for the
+cases where that promise turns out not to hold: a release that broke you anyway, a result
+being reproduced, a citation that has to name an exact version.
+
+It does three things, in three places:
+
+- **Resolution** takes the pinned version instead of the highest satisfying one.
+- **Retention** keeps it when a newer version in the same major line arrives.
+- **`vaire clean`** treats it as a root.
+
+The pin is recorded in `knowledge.lock`, which is per-consumer and committed, so it travels
+with the package — a colleague cloning it reproduces the hold. It is *also* flagged in the
+catalog's `releases` row, because retention and `clean` run over the whole store with no
+particular consumer in hand. That flag is a cache of the lockfiles, recomputed rather than
+tracked: two consumers may pin the same version, and one of them letting go settles nothing.
+
+**A pin selects a release; it does not change which world answers.** Resolution order is
+untouched (registry.v2.md §6) — an explicit link, then a working copy the catalog knows,
+then the store — and a pin chooses *within the store*. If it displaced a checkout, cloning a
+package with a pinned lockfile would silently stop using your own working copy of that
+dependency. Where a working copy does answer first, the pin is inert here and `pin` says so;
+it still applies wherever that checkout is absent.
+
+**You can only pin what you have.** A lockfile entry is a claim about bytes, carrying their
+digest, so the version must already be in the store; the refusal names the `vaire pull` that
+fixes it. A pin outside the declared `^MAJOR` is refused too, at the moment it is typed
+rather than at the next resolution where it would simply appear not to work.
+
+**A refresh never moves a pin.** `pull` and the ensure pass leave a pinned entry exactly as
+it is — carrying the flag forward onto a newly resolved version would keep the hold in name
+while releasing what it held. A pull that fetched something newer says that the pin is why
+nothing changed. Moving a pin is `unpin` and then a resolution, in that order, because both
+halves are decisions.
+
+`unpin` clears the hold and leaves the entry: what it records is still what resolved, and
+dropping it would erase a reproducible answer in order to release a hold on it.
+
+### 4.15 `vaire clean`
+
+```text
+vaire clean                    # remove store entries nothing needs
+vaire clean --dry-run          # report what would go
+vaire clean <name>             # stop holding this package, then sweep
+```
+
+The store is disposable by design: the remote keeps every published version forever (a yank
+is a flag, never a deletion), so anything removed here can be fetched again. That is what
+lets a sweep be blunt — and what it must not be is surprising, so the rule is stated as what
+is **kept**:
+
+- **Locked** — a version some registered workspace's `knowledge.lock` names. That record is
+  what somebody reproduces a resolution from.
+- **Pinned** — a version some workspace pinned. A pin exists precisely to survive automatic
+  removal.
+- **Requested** — a package pulled *by name from outside any package*. That pull writes no
+  lockfile, deliberately, because there is no resolution to record — and it is exactly how a
+  rootless reader (§6.8) assembles a corpus. Rooting only what a lockfile names would delete
+  their whole library. A named pull *inside* a package is not a standing request: the
+  lockfile records it instead.
+
+Everything else is a leftover — a version retention could not remove, a major line no
+manifest declares any more, a transitive dependency that left every closure.
+
+Roots come from the catalog, so a package this machine has never recorded contributes none:
+its lockfile is a file nobody knows to read. `vaire pin` records the package it runs in for
+that reason, and the maintain commands register ambiently.
+
+`vaire clean <name>` withdraws the standing request for a package — the way to say "I am
+done with this" about something pulled by name. Its locked and pinned versions still
+survive; the request is the only thing withdrawn.
+
+**A lockfile that cannot be read stops the sweep.** One written by a newer vaire, or
+carrying a digest that is not one, is refused rather than reinterpreted (§4.13); treating
+that refusal as "holds nothing" would delete exactly the entries it was protecting. The
+error names the file.
 
 ## 5. MCP server
 
