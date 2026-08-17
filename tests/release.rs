@@ -657,8 +657,9 @@ fn an_unreadable_tag_listing_is_an_error_not_an_empty_history() {
 // `--summary` — prose from outside, checked before it becomes history (cli.md §4.7)
 // ---------------------------------------------------------------------------------------
 
-/// Write a summary file *outside* the corpus root by default — in CI it arrives as a build
-/// artifact, which may land either side of the tree, and both must work.
+/// Write a summary file *inside* the corpus root — the harder of the two cases, and the one
+/// CI produces, since a build artifact lands in the checkout. (Outside the root is covered
+/// by `a_summary_outside_the_corpus_is_read_the_same_way`.)
 fn summary_file(c: &Corpus, text: &str) -> std::path::PathBuf {
     let path = c.root().join("release-summary.md");
     std::fs::write(&path, text).unwrap();
@@ -924,4 +925,81 @@ fn a_dry_run_reports_the_notes_a_major_owes_instead_of_refusing_over_them() {
     )
     .expect_err("the real run still demands the notes");
     assert!(matches!(err, VaireError::Release(_)), "{err:?}");
+}
+
+#[test]
+fn the_input_files_are_not_corpus_the_release_is_judged_on() {
+    let c = corpus();
+    released_once(&c);
+    c.add(
+        "knowledge/jane.md",
+        "---\nid: jane-doe\ntype: person\nname: Jane Doe\nsuperseded_by: department:platform\n---\n# Jane Doe\n",
+    )
+    .commit();
+
+    // A maintainer's scratch notes file, sitting in the checkout, that happens to carry
+    // `id:`/`type:` frontmatter — so the working-tree pass indexes it as a node — and a
+    // reference of its own that resolves to nothing. It is exempt from the release commit;
+    // it must be exempt from the release's checks for the same reason, or the release is
+    // refused over content nobody is publishing.
+    let notes = c.root().join("release-notes.md");
+    std::fs::write(
+        &notes,
+        "---\nid: scratch-notes\ntype: department\nrelated: department:nonexistent\n---\n\
+         Jane's entity now redirects to the department.\n",
+    )
+    .unwrap();
+    let summary = summary_file(
+        &c,
+        "Jane's entity was retired in favour of the department.\n",
+    );
+
+    let out = release(
+        &c,
+        Options {
+            major: true,
+            notes: Some(&notes),
+            summary: Some(&summary),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.version, "2.0.0", "{out:?}");
+    assert!(out.summary, "{out:?}");
+
+    // Neither input is in the release commit, and neither refused it.
+    let files = vaire::git::list_files_at_head(c.root()).unwrap();
+    for input in ["release-notes.md", "release-summary.md"] {
+        assert!(
+            !files.contains(&input.to_string()),
+            "{input} is an input, never release content: {files:?}"
+        );
+    }
+}
+
+#[test]
+fn a_summary_outside_the_corpus_is_read_the_same_way() {
+    let c = corpus();
+    released_once(&c);
+    c.add(
+        "knowledge/ingest.md",
+        "---\nid: ingest\ntype: system\nname: Ingest\n---\n# Ingest\n\nEvent ingestion.\n",
+    )
+    .commit();
+
+    // A path outside the root is not in the tree at all, so it needs no exemption from
+    // either gate — the release must read it exactly as it reads one inside.
+    let outside = tempfile::tempdir().unwrap();
+    let summary = outside.path().join("release-summary.md");
+    std::fs::write(&summary, "Ingestion moved in-house: [[system:ingest]].\n").unwrap();
+
+    let out = release(
+        &c,
+        Options {
+            summary: Some(&summary),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.version, "1.1.0", "{out:?}");
+    let record = std::fs::read_to_string(c.root().join("releases/1-1-0.md")).unwrap();
+    assert!(record.contains("Ingestion moved in-house"), "{record}");
 }

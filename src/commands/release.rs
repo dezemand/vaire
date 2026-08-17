@@ -179,7 +179,7 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
                 notes.as_deref(),
                 Some(summary),
             )?;
-            let verdict = check_written_record(ctx, &written);
+            let verdict = check_written_record(ctx, &written, &input_paths(root, options));
             rollback(ctx, root, &written);
             verdict?;
         }
@@ -211,7 +211,7 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
     // nothing has vetted. Check it *before* it becomes history: past the commit below the
     // release is immutable, and a dangling reference would ship to every consumer.
     if summary.is_some()
-        && let Err(refusal) = check_written_record(ctx, &written)
+        && let Err(refusal) = check_written_record(ctx, &written, &input_paths(root, options))
     {
         rollback(ctx, root, &written);
         return Err(refusal);
@@ -263,24 +263,33 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
 
 /// Re-run the integrity checks with the record on disk, and refuse if it broke anything.
 ///
-/// The corpus already passed `check` a moment ago and the working tree is clean by gate,
-/// so the working tree is exactly HEAD plus this one file: any violation now is the
-/// record's doing, which is what makes the message able to point at the summary. Findings
-/// that name the record come first; a violation naming nothing (a manifest-level one) still
-/// refuses, because a release must not be cut over a corpus that fails its own checks.
-fn check_written_record(ctx: &Ctx, written: &record::Record) -> Result<()> {
+/// The corpus already passed `check` a moment ago and the tree is clean by gate, so the
+/// working tree is HEAD plus this one file — plus, in a pipeline, the `--notes`/`--summary`
+/// inputs sitting in the checkout as build artifacts. Those are **excluded**: they are
+/// exempt from the release commit for the same reason, and a maintainer's scratch notes
+/// file that happens to carry `id:`/`type:` frontmatter would otherwise index as a node and
+/// refuse the release over references belonging to nothing being published.
+///
+/// What remains is the record's doing, which is what lets the message point at the summary.
+/// Findings that name the record are listed; a violation naming nothing (a manifest-level
+/// one) still refuses, because a release must not be cut over a corpus failing its checks.
+fn check_written_record(ctx: &Ctx, written: &record::Record, inputs: &[String]) -> Result<()> {
     let (report, _) = crate::commands::check::run(ctx, false, true, false)?;
-    if report.violations.is_empty() {
+    let violations: Vec<&crate::index::check::Violation> = report
+        .violations
+        .iter()
+        .filter(|violation| !inputs.iter().any(|input| violation.involves(input)))
+        .collect();
+    if violations.is_empty() {
         return Ok(());
     }
-    let mine: Vec<String> = report
-        .violations
+    let mine: Vec<String> = violations
         .iter()
         .filter(|violation| violation.involves(&written.path))
         .map(|violation| format!("\n  {}: {}", violation.kind(), violation.detail()))
         .collect();
     if mine.is_empty() {
-        return Err(VaireError::CheckViolations(report.violations.len()));
+        return Err(VaireError::CheckViolations(violations.len()));
     }
     Err(VaireError::Release(format!(
         "the summary made {} unpublishable — {} left the corpus with {} nothing can \
@@ -400,20 +409,7 @@ fn preflight_git(ctx: &Ctx, options: &Options<'_>) -> Result<()> {
     // A release commit must contain the manifest and the record it just wrote, and
     // nothing else. Committing somebody's unrelated work-in-progress under a release
     // message would misattribute it forever.
-    // The notes and summary files are inputs to this command, not stray work — and in CI
-    // they arrive as build artifacts landing in the checkout, so they are routinely inside
-    // the tree. See `working_tree_dirty_except`.
-    let ignore: Vec<String> = [options.notes, options.summary]
-        .into_iter()
-        .flatten()
-        .filter_map(|input| {
-            let input = input.canonicalize().ok()?;
-            let root = root.canonicalize().ok()?;
-            let rel = input.strip_prefix(&root).ok()?;
-            Some(rel.to_string_lossy().replace('\\', "/"))
-        })
-        .collect();
-    if crate::git::working_tree_dirty_except(root, &ignore)? {
+    if crate::git::working_tree_dirty_except(root, &input_paths(root, *options))? {
         return Err(VaireError::Release(
             "the working tree has uncommitted changes — commit or stash them first, so \
              the release commit contains only the release"
@@ -436,6 +432,29 @@ fn preflight_git(ctx: &Ctx, options: &Options<'_>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The `--notes`/`--summary` files, as package-root-relative paths, for the ones that live
+/// inside the tree at all.
+///
+/// These are **inputs to the command, not stray work**, and in CI they routinely arrive as
+/// build artifacts landing in the checkout — so both places that would otherwise mistake
+/// them for corpus need the same list: the dirty-tree gate (which must not read them as
+/// uncommitted work) and the post-write check (which must not index them as nodes). A file
+/// outside the root is not in the tree and needs excluding from neither.
+fn input_paths(root: &Path, options: Options<'_>) -> Vec<String> {
+    let Ok(root) = root.canonicalize() else {
+        return Vec::new();
+    };
+    [options.notes, options.summary]
+        .into_iter()
+        .flatten()
+        .filter_map(|input| {
+            let input = input.canonicalize().ok()?;
+            let rel = input.strip_prefix(&root).ok()?;
+            Some(rel.to_string_lossy().replace('\\', "/"))
+        })
+        .collect()
 }
 
 /// Refuse before writing anything if the release could not complete.

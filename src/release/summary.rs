@@ -106,14 +106,22 @@ pub fn parse(text: &str, origin: &str) -> Result<Summary> {
             frontmatter: doc.frontmatter,
         },
         // No frontmatter block: the whole file is prose. But a file that *opens* with a
-        // fence and still did not split has a malformed block — an unterminated fence or
-        // YAML that is not a mapping — and silently demoting it to prose would write the
-        // author's intended frontmatter into the record as body text.
+        // fence and still did not split has a malformed block — and silently demoting it to
+        // prose would write the author's intended frontmatter into the record as body text.
+        //
+        // Leading whitespace is trimmed before asking, because it is one of the ways to be
+        // malformed rather than a way to be prose: a blank first line makes `split` refuse
+        // the file, so `---` on line 2 is a frontmatter block that will never be read.
         None => {
-            if text.trim_start_matches('\u{feff}').starts_with("---") {
+            if text
+                .trim_start_matches('\u{feff}')
+                .trim_start()
+                .starts_with("---")
+            {
                 return Err(VaireError::Release(format!(
-                    "{origin}: the leading `---` block is not valid frontmatter — it needs a \
-                     closing `---` fence and must parse as a YAML mapping"
+                    "{origin}: the leading `---` block is not valid frontmatter — it must \
+                     start the file, needs a closing `---` fence, and must parse as a YAML \
+                     mapping"
                 )));
             }
             Summary {
@@ -197,11 +205,19 @@ mod tests {
 
     #[test]
     fn a_malformed_frontmatter_block_is_an_error_not_prose() {
-        // Opens a fence, never closes it: the author meant frontmatter.
-        let err = parse("---\nname: Thing\nProse.\n", "summary.md")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("closing `---`"), "{err}");
+        for text in [
+            // Opens a fence, never closes it: the author meant frontmatter.
+            "---\nname: Thing\nProse.\n",
+            // Closed, but a blank line pushed it off line 1 — so the block will never be
+            // read, and demoting it to prose would print it in the record body.
+            "\n---\nname: Thing\n---\nProse.\n",
+            "  \n---\nname: Thing\n---\nProse.\n",
+            // Not a mapping.
+            "---\n- one\n- two\n---\nProse.\n",
+        ] {
+            let err = parse(text, "summary.md").unwrap_err().to_string();
+            assert!(err.contains("not valid frontmatter"), "{text:?}: {err}");
+        }
     }
 
     #[test]

@@ -830,13 +830,16 @@ except to declare a major dependency, or to deliberately cut a major.
     and add keys of its own. Naming `id`, `type`, `date`, `bump`, `added`, `changed`,
     `retired` or `generated_summary` is **refused by name**, never silently dropped: an
     author who set `added:` believes they described the release.
-  - **`check` runs again with the record in place**, before the commit. The tree is clean
-    by gate, so the working tree is exactly HEAD plus that one file and any violation is
-    the summary's doing — an address it imagined refuses the release and names itself. On
-    refusal the record is removed and the manifest has not moved yet, so the tree is
-    byte-identical to where it started and a corrected summary simply re-runs. (Frontmatter
-    references are bare `type:id`; the `[[…]]` form is the `frontmatter_wikilink` warning,
-    and warnings do not refuse.)
+  - **`check` runs again with the record in place**, before the commit. The record is the
+    only thing the release adds to the corpus, and the tree is clean by gate, so any
+    violation is the summary's doing — an address it imagined refuses the release and names
+    itself. The `--notes`/`--summary` inputs are **excluded** from that pass exactly as they
+    are excluded from the release commit: a notes file left in the checkout can carry
+    `id:`/`type:` frontmatter of its own, and a release must not be refused over content
+    nobody is publishing. On refusal the record is removed and the manifest has not moved
+    yet, so the tree is byte-identical to where it started and a corrected summary simply
+    re-runs. (Frontmatter references are bare `type:id`; the `[[…]]` form is the
+    `frontmatter_wikilink` warning, and warnings do not refuse.)
   - **`generated_summary: true`** marks the record, so a reader can tell narration that
     came from outside the classifier from prose the tool derived. Who wrote it is the
     author's to declare (`summary_by:` and friends ride along as free keys) — Vairë only

@@ -200,13 +200,22 @@ fn aliases(version: Version, summary: Option<&Summary>) -> String {
 /// the characters YAML reads as syntax — a colon in `Workshop D: Agents` would otherwise
 /// turn one key into two and stop the file being a node at all.
 fn yaml_string(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        // A line break inside a one-line scalar would end the key mid-value.
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
+    let mut escaped = String::with_capacity(value.len() + 2);
+    for c in value.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            // A line break inside a one-line scalar would end the key mid-value.
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            // Any other control character is invalid raw inside a double-quoted scalar, and
+            // a record that stops parsing as YAML stops being a node at all — an unqueryable
+            // release that no later version can correct, since a published one is immutable.
+            c if c.is_control() => escaped.push_str(&format!("\\u{:04x}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
     format!("\"{escaped}\"")
 }
 
@@ -311,6 +320,28 @@ mod tests {
         assert_eq!(
             doc.frontmatter.get("name").and_then(|v| v.as_str()),
             Some("Workshop D: Agents")
+        );
+    }
+
+    #[test]
+    fn a_title_carrying_control_characters_still_renders_a_parseable_node() {
+        // A record that stops parsing as YAML stops being a node, and a published version
+        // is immutable — so no later release could correct it.
+        let summary = crate::release::summary::parse(
+            "---\nname: \"bell \\u0007 esc \\u001b tab\\t end\"\n---\nP.\n",
+            "s.md",
+        )
+        .unwrap();
+        assert!(
+            summary.name().unwrap().contains('\u{7}'),
+            "the fixture must actually carry a control character"
+        );
+        let out = rendered(Some(&summary));
+        let doc = crate::corpus::frontmatter::split(&out).expect("record is frontmatter-parseable");
+        assert_eq!(
+            doc.frontmatter.get("name").and_then(|v| v.as_str()),
+            Some("bell \u{7} esc \u{1b} tab\t end"),
+            "the title round-trips through the escape"
         );
     }
 }
