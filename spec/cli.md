@@ -1659,13 +1659,28 @@ answering source labelled.
 | `4` | No corpus repo found, or index not built yet (read commands). |
 | `5` | ID not found (`resolve`, `backlinks`, `refs` on a non-existent node). |
 | `6` | `vaire check` found violations (or warnings under `--strict`). |
+| `7` | `vaire release` classified a **MAJOR** and stopped, awaiting a maintainer (§4.7). |
 
-With `--json`, every non-zero exit also writes a JSON error to stdout so machine callers
+**`6` and `7` are outcomes, not failures**, and the difference matters to whoever is
+branching on them. A run that exits `6` or `7` did everything it was asked: it emits its
+ordinary output — the check report, the release classification — and reports a *state* in
+the exit code. Everything from `1` to `5` is a run that could not do its job.
+
+`7` is separate from `1` for exactly that reason. A MAJOR is a claim about meaning that
+only a maintainer can make, so an automated release pipeline has to be able to tell "this
+needs a human" from "this broke", and report the first as a pending decision rather than a
+red build.
+
+With `--json`, an **error** exit (`1`–`5`) writes a JSON error to stdout so machine callers
 parse one shape:
 
 ```json
 { "error": { "code": 5, "kind": "id_not_found", "message": "no node with id 'person:nobody'" } }
 ```
+
+An **outcome** exit writes the command's own JSON instead — a `check` report carrying its
+findings, or a release output whose `status` is `blocked`. There is nothing to report as an
+error, and shaping one would hide the very findings the caller wanted.
 
 ## 8. Examples
 
