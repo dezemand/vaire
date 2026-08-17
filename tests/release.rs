@@ -652,3 +652,354 @@ fn an_unreadable_tag_listing_is_an_error_not_an_empty_history() {
         "a non-repository must error rather than report no tags"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// `--summary` — prose from outside, checked before it becomes history (cli.md §4.7)
+// ---------------------------------------------------------------------------------------
+
+/// Write a summary file *inside* the corpus root — the harder of the two cases, and the one
+/// CI produces, since a build artifact lands in the checkout. (Outside the root is covered
+/// by `a_summary_outside_the_corpus_is_read_the_same_way`.)
+fn summary_file(c: &Corpus, text: &str) -> std::path::PathBuf {
+    let path = c.root().join("release-summary.md");
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn a_summary_becomes_a_section_and_its_references_become_edges() {
+    let c = corpus();
+    released_once(&c);
+    c.add(
+        "knowledge/ingest.md",
+        "---\nid: ingest\ntype: system\nname: Ingest\n---\n# Ingest\n\nEvent ingestion.\n",
+    )
+    .commit();
+
+    let summary = summary_file(
+        &c,
+        "Ingestion moved in-house: [[system:ingest]] now owns what \
+         [[department:platform]] used to do by hand.\n",
+    );
+    let out = release(
+        &c,
+        Options {
+            summary: Some(&summary),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.version, "1.1.0", "{out:?}");
+    assert!(out.summary, "the output reports that prose rode along");
+
+    let record = std::fs::read_to_string(c.root().join("releases/1-1-0.md")).unwrap();
+    assert!(record.contains("## Summary"), "{record}");
+    assert!(record.contains("generated_summary: true"), "{record}");
+    assert!(record.contains("[[system:ingest]] now owns"), "{record}");
+    // The computed lists are untouched by the prose.
+    assert!(record.contains("added: [system:ingest]"), "{record}");
+
+    // The summary's references are ordinary edges: a release record that mentions an
+    // entity is discoverable from that entity, which is the whole reason records exist.
+    let refs = vaire::commands::refs::run(&c.ctx(), "release:1-1-0", 1, None).unwrap();
+    let targets: Vec<&str> = refs.refs.iter().map(|r| r.id.as_str()).collect();
+    assert!(targets.contains(&"department:platform"), "{targets:?}");
+
+    // The release commit carries the manifest and the record, and nothing else — the
+    // summary file itself is an input, not release content.
+    let files = vaire::git::list_files_at_head(c.root()).unwrap();
+    assert!(
+        files.contains(&"releases/1-1-0.md".to_string()),
+        "{files:?}"
+    );
+    assert!(
+        !files.contains(&"release-summary.md".to_string()),
+        "the summary file is an input, never committed: {files:?}"
+    );
+}
+
+#[test]
+fn an_address_the_summary_imagined_refuses_the_release_and_leaves_no_trace() {
+    let c = corpus();
+    released_once(&c);
+    c.add(
+        "knowledge/ingest.md",
+        "---\nid: ingest\ntype: system\nname: Ingest\n---\n# Ingest\n\nEvent ingestion.\n",
+    )
+    .commit();
+    let before = vaire::git::head(c.root()).unwrap();
+
+    let summary = summary_file(&c, "Routing now flows through [[system:getway]].\n");
+    let err = release::run(
+        &c.ctx(),
+        Options {
+            summary: Some(&summary),
+            ..Default::default()
+        },
+    )
+    .expect_err("a reference nothing can resolve must refuse the release");
+
+    let message = err.to_string();
+    assert!(message.contains("system:getway"), "{message}");
+    assert!(message.contains("releases/1-1-0.md"), "{message}");
+
+    // Nothing committed, nothing tagged, and the record it was about to write is gone —
+    // the tree is exactly where it started, so a fixed summary can simply be re-run.
+    assert_eq!(vaire::git::head(c.root()).unwrap(), before);
+    assert!(
+        vaire::git::resolve_rev(c.root(), "v1.1.0")
+            .unwrap()
+            .is_none(),
+        "a refused release leaves no tag"
+    );
+    assert!(
+        !c.root().join("releases/1-1-0.md").exists(),
+        "the record is rolled back"
+    );
+    // The manifest never moved, so the retry computes the same version.
+    let manifest = std::fs::read_to_string(c.root().join("knowledge.toml")).unwrap();
+    assert!(manifest.contains("version = \"1.0.0\""), "{manifest}");
+
+    // And the retry with a real address succeeds where the first attempt refused.
+    let summary = summary_file(&c, "Routing now flows through [[system:ingest]].\n");
+    let out = release(
+        &c,
+        Options {
+            summary: Some(&summary),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.version, "1.1.0", "{out:?}");
+}
+
+#[test]
+fn a_dry_run_rehearses_the_summary_gate_and_writes_nothing() {
+    let c = corpus();
+    released_once(&c);
+    c.add(
+        "knowledge/ingest.md",
+        "---\nid: ingest\ntype: system\nname: Ingest\n---\n# Ingest\n\nEvent ingestion.\n",
+    )
+    .commit();
+
+    // A dry run's job is to predict the real run, including the one gate only a written
+    // record can answer.
+    let bad = summary_file(&c, "Routing flows through [[system:getway]].\n");
+    let err = release::run(
+        &c.ctx(),
+        Options {
+            dry_run: true,
+            summary: Some(&bad),
+            ..Default::default()
+        },
+    )
+    .expect_err("the rehearsal must refuse what the real run would refuse");
+    assert!(err.to_string().contains("system:getway"), "{err:?}");
+    assert!(
+        !c.root().join("releases/1-1-0.md").exists(),
+        "a dry run leaves nothing behind, even when it wrote to check"
+    );
+
+    let good = summary_file(&c, "Ingestion moved in-house: [[system:ingest]].\n");
+    let out = release(
+        &c,
+        Options {
+            dry_run: true,
+            summary: Some(&good),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.status, ReleaseStatus::Planned);
+    assert!(out.summary, "{out:?}");
+    assert!(
+        !c.root().join("releases/1-1-0.md").exists(),
+        "a dry run writes nothing"
+    );
+    assert!(
+        vaire::git::resolve_rev(c.root(), "v1.1.0")
+            .unwrap()
+            .is_none(),
+        "a dry run tags nothing"
+    );
+}
+
+#[test]
+fn a_summary_may_retitle_the_record_but_never_restate_the_classification() {
+    let c = corpus();
+    released_once(&c);
+    c.add(
+        "knowledge/ingest.md",
+        "---\nid: ingest\ntype: system\nname: Ingest\n---\n# Ingest\n\nEvent ingestion.\n",
+    )
+    .commit();
+
+    // The keys the classifier owns are refused by name — never silently dropped, or the
+    // author believes they described a release they did not.
+    let claimed = summary_file(
+        &c,
+        "---\nadded: [system:nothing]\nbump: major\n---\nProse.\n",
+    );
+    let err = release::run(
+        &c.ctx(),
+        Options {
+            summary: Some(&claimed),
+            ..Default::default()
+        },
+    )
+    .expect_err("a summary cannot restate what the classifier computed");
+    let message = err.to_string();
+    assert!(message.contains("added"), "{message}");
+    assert!(message.contains("bump"), "{message}");
+
+    // A title and keys of the author's own are theirs to set.
+    let titled = summary_file(
+        &c,
+        "---\nname: \"Ingestion in-house\"\nsummary_by: an agent\n---\nIngestion moved.\n",
+    );
+    let out = release(
+        &c,
+        Options {
+            summary: Some(&titled),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.version, "1.1.0", "{out:?}");
+    let record = std::fs::read_to_string(c.root().join("releases/1-1-0.md")).unwrap();
+    assert!(record.contains("name: \"Ingestion in-house\""), "{record}");
+    assert!(record.contains("summary_by: an agent"), "{record}");
+    // The version spellings survive the retitle: they are how the record is found.
+    assert!(
+        record.contains("aliases: [\"1.1.0\", \"v1.1.0\"]"),
+        "{record}"
+    );
+    assert!(record.contains("id: 1-1-0"), "{record}");
+
+    // …so the record still answers to its address, and the version spellings still find it
+    // even though the title no longer mentions a version at all.
+    assert!(
+        vaire::commands::resolve::run(&c.ctx(), "release:1-1-0").is_ok(),
+        "a retitled record keeps its address"
+    );
+    let found = vaire::commands::suggest::run(&c.ctx(), "1.1.0", None, None, true).unwrap();
+    assert!(
+        found
+            .suggestions
+            .iter()
+            .any(|candidate| candidate.id == "release:1-1-0"),
+        "the dotted version must still find the record: {found:?}"
+    );
+}
+
+#[test]
+fn a_dry_run_reports_the_notes_a_major_owes_instead_of_refusing_over_them() {
+    let c = corpus();
+    released_once(&c);
+    std::fs::remove_file(c.root().join("knowledge/jane.md")).unwrap();
+    c.add(
+        "knowledge/platform.md",
+        "---\nid: platform\ntype: department\nname: Platform\n---\n# Platform\n\nThe platform group.\n",
+    )
+    .commit();
+
+    // The plan an agent needs in order to draft the very notes the real run demands. A dry
+    // run writes nothing, so reporting the debt is a faithful prediction, not a loosened gate.
+    let out = release(
+        &c,
+        Options {
+            major: true,
+            dry_run: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.status, ReleaseStatus::Planned);
+    assert_eq!(out.version, "2.0.0", "{out:?}");
+    assert!(out.notes_required, "{out:?}");
+    assert_eq!(out.classification.removed, ["person:jane-doe"]);
+
+    // The real run still refuses.
+    let err = release::run(
+        &c.ctx(),
+        Options {
+            major: true,
+            ..Default::default()
+        },
+    )
+    .expect_err("the real run still demands the notes");
+    assert!(matches!(err, VaireError::Release(_)), "{err:?}");
+}
+
+#[test]
+fn the_input_files_are_not_corpus_the_release_is_judged_on() {
+    let c = corpus();
+    released_once(&c);
+    c.add(
+        "knowledge/jane.md",
+        "---\nid: jane-doe\ntype: person\nname: Jane Doe\nsuperseded_by: department:platform\n---\n# Jane Doe\n",
+    )
+    .commit();
+
+    // A maintainer's scratch notes file, sitting in the checkout, that happens to carry
+    // `id:`/`type:` frontmatter — so the working-tree pass indexes it as a node — and a
+    // reference of its own that resolves to nothing. It is exempt from the release commit;
+    // it must be exempt from the release's checks for the same reason, or the release is
+    // refused over content nobody is publishing.
+    let notes = c.root().join("release-notes.md");
+    std::fs::write(
+        &notes,
+        "---\nid: scratch-notes\ntype: department\nrelated: department:nonexistent\n---\n\
+         Jane's entity now redirects to the department.\n",
+    )
+    .unwrap();
+    let summary = summary_file(
+        &c,
+        "Jane's entity was retired in favour of the department.\n",
+    );
+
+    let out = release(
+        &c,
+        Options {
+            major: true,
+            notes: Some(&notes),
+            summary: Some(&summary),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.version, "2.0.0", "{out:?}");
+    assert!(out.summary, "{out:?}");
+
+    // Neither input is in the release commit, and neither refused it.
+    let files = vaire::git::list_files_at_head(c.root()).unwrap();
+    for input in ["release-notes.md", "release-summary.md"] {
+        assert!(
+            !files.contains(&input.to_string()),
+            "{input} is an input, never release content: {files:?}"
+        );
+    }
+}
+
+#[test]
+fn a_summary_outside_the_corpus_is_read_the_same_way() {
+    let c = corpus();
+    released_once(&c);
+    c.add(
+        "knowledge/ingest.md",
+        "---\nid: ingest\ntype: system\nname: Ingest\n---\n# Ingest\n\nEvent ingestion.\n",
+    )
+    .commit();
+
+    // A path outside the root is not in the tree at all, so it needs no exemption from
+    // either gate — the release must read it exactly as it reads one inside.
+    let outside = tempfile::tempdir().unwrap();
+    let summary = outside.path().join("release-summary.md");
+    std::fs::write(&summary, "Ingestion moved in-house: [[system:ingest]].\n").unwrap();
+
+    let out = release(
+        &c,
+        Options {
+            summary: Some(&summary),
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.version, "1.1.0", "{out:?}");
+    let record = std::fs::read_to_string(c.root().join("releases/1-1-0.md")).unwrap();
+    assert!(record.contains("Ingestion moved in-house"), "{record}");
+}

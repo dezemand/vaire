@@ -777,7 +777,8 @@ JSON:
 ### 4.7 `vaire release`
 
 ```text
-vaire release [--major] [--dry-run] [--notes <file>] [--allow-branch] [--yes] [--push] [--json]
+vaire release [--major] [--dry-run] [--notes <file>] [--summary <file>]
+              [--allow-branch] [--yes] [--push] [--json]
 ```
 
 Cut a release: classify what changed since the last one, compute the version, write the
@@ -801,8 +802,12 @@ except to declare a major dependency, or to deliberately cut a major.
   the removal already forces MAJOR. A package with **no prior tag** publishes the version
   its manifest already declares — a first release is a declaration, not an increment.
 - **MAJOR is never automatic** (exit `7`, distinct so a pipeline can report *pending*
-  rather than *broken*). It needs `--major` **and** `--notes <file>`, the human-written
-  invalidated assumptions dependents read to decide about re-confirmation. `--major` also
+  rather than *broken*). It needs `--major` **and** `--notes <file>`, the invalidated
+  assumptions dependents read to decide about re-confirmation. A **dry run reports the
+  missing notes** (`notes_required`) instead of refusing over them — it writes nothing, so
+  "would cut 2.0.0, and it will need notes" is a faithful prediction, and it is the only
+  way to hand a drafter the plan for the notes they are being asked to write. The real run
+  still refuses. `--major` also
   *escalates*: a one-word edit reversing a truth is a semantic act the classifier cannot
   see, and the maintainer owns meaning while the tool owns structure.
 - **The release record is the changelog, written as corpus.** `releases/<version>.md`, an
@@ -813,8 +818,44 @@ except to declare a major dependency, or to deliberately cut a major.
   left to point at. The type and directory are `release_type`/`release_dir` in the
   manifest — conventions, not reserved words. **The classifier excludes release records
   from its own diff**, or no release after the first could ever be a PATCH.
+- **Prose may come from outside — `--summary <file>`.** The record's *structure* is
+  computed; its narration is not something a diff can write. `--summary` takes a Markdown
+  file and lands it as a `## Summary` section, so a changelog someone (or something) wrote
+  ships inside the release it describes. **Vairë never calls a model**: the seam is a file,
+  the tool holds no prompt and no API client, and a package stays releasable by a
+  maintainer who has no model at all. That also makes the producer irrelevant — a separate
+  CI job, an agent, or a person typing.
+
+  Three rules make outside prose safe to admit:
+
+  - **The classification stays computed.** A summary may set `name` (a release titled
+    *Gateway consolidation* rather than *1.5.0*; the version stays the `id` and the
+    headline), extend `aliases` (union — the version spellings can never be displaced),
+    and add keys of its own. Naming `id`, `type`, `date`, `bump`, `added`, `changed`,
+    `retired` or `generated_summary` is **refused by name**, never silently dropped: an
+    author who set `added:` believes they described the release.
+  - **`check` runs again with the record in place**, before the commit. The record is the
+    only thing the release adds to the corpus, and the tree is clean by gate, so any
+    violation is the summary's doing — an address it imagined refuses the release and names
+    itself. The `--notes`/`--summary` inputs are **excluded** from that pass exactly as they
+    are excluded from the release commit: a notes file left in the checkout can carry
+    `id:`/`type:` frontmatter of its own, and a release must not be refused over content
+    nobody is publishing. On refusal the record is removed and the manifest has not moved
+    yet, so the tree is byte-identical to where it started and a corrected summary simply
+    re-runs. (Frontmatter references are bare `type:id`; the `[[…]]` form is the
+    `frontmatter_wikilink` warning, and warnings do not refuse.)
+  - **`generated_summary: true`** marks the record, so a reader can tell narration that
+    came from outside the classifier from prose the tool derived. Who wrote it is the
+    author's to declare (`summary_by:` and friends ride along as free keys) — Vairë only
+    asserts what it knows.
+
+  `--dry-run --summary` rehearses all of it, including the write-and-check, and leaves
+  nothing behind. Pairing that with `--dry-run --json` is the whole CI shape: one job
+  emits the plan, a second — in an image that carries an agent, so the Vairë image never
+  has to — turns it into prose, a third cuts the release.
 - **Gates.** A clean working tree (the release commit contains the release and nothing
-  else — the `--notes` file is an input, not stray work), HEAD on the repository's
+  else — the `--notes` and `--summary` files are inputs, not stray work, and in CI they
+  routinely arrive as build artifacts inside the checkout), HEAD on the repository's
   mainline (`--allow-branch` escapes; a tag cut on a topic branch names a commit the
   mainline may never contain), the package as its own Git repository, a version whose tag
   does not already exist, a record path the include globs actually select, and `vaire
@@ -849,12 +890,16 @@ JSON:
   "record": "releases/1-5-0.md",
   "commit": "d8ecc979227…",
   "warnings": 3,
+  "summary": true,
   "advisories": [{ "id": "department:platform", "inbound": 14 }]
 }
 ```
 
 `advisories` carries the backlink weighting — changed entities with ten or more inbound
 references, present on `planned` and `released` alike, and absent when there are none.
+`summary` says the record carries `--summary` prose, and `notes_required` marks a planned
+MAJOR that still owes its notes; both are absent rather than `false`, so an ordinary
+release's JSON is unchanged.
 
 `status` is one of `released`, `planned` (`--dry-run`), `nothing`, or `blocked` (a MAJOR
 awaiting a maintainer, exit `7`).

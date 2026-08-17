@@ -23,7 +23,7 @@ use crate::index::Index;
 use crate::index::build::{self, Mode};
 use crate::model::{Bump, Version};
 use crate::output::ReleaseOutput;
-use crate::release::{classify, record};
+use crate::release::{classify, record, summary};
 
 /// Everything the CLI can ask of a release.
 #[derive(Debug, Default, Clone, Copy)]
@@ -37,6 +37,9 @@ pub struct Options<'a> {
     pub yes: bool,
     /// A file holding the invalidated-assumptions notes a MAJOR requires.
     pub notes: Option<&'a Path>,
+    /// A file holding release-summary prose (and optionally frontmatter) to carry into the
+    /// record — the seam an agent writes through, since Vairë itself never calls a model.
+    pub summary: Option<&'a Path>,
     /// Release from a branch that is not the repository's mainline.
     pub allow_branch: bool,
 }
@@ -123,7 +126,12 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
     };
 
     let notes = read_notes(options.notes)?;
-    if bump == Some(Bump::Major) && notes.is_none() {
+    // A dry run reports the missing notes instead of refusing over them. It writes
+    // nothing, so "would cut 2.0.0, and it will need notes" is a faithful prediction — and
+    // it is the only way to hand an agent the plan for a major it is being asked to draft
+    // the notes *for*. The real run below still refuses.
+    let notes_required = bump == Some(Bump::Major) && notes.is_none();
+    if notes_required && !options.dry_run {
         return Err(VaireError::Release(format!(
             "a major release must say what it invalidates — write the notes and pass \
              `--notes <file>`.\n  \
@@ -133,6 +141,9 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
             classification.retired.len()
         )));
     }
+    // Parsed before anything is written, so a reserved key or a malformed fence refuses the
+    // release without having touched the corpus.
+    let summary = options.summary.map(summary::read).transpose()?;
 
     let tag = crate::release::tag_name(&package, version, false);
     let record_path = record::path_for(&ctx.config, version);
@@ -154,6 +165,24 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
     }
 
     if options.dry_run {
+        // A dry run whose whole job is to predict the real one must also predict the one
+        // gate only a written record can answer. With a summary in hand it takes the real
+        // path — write, check, then put the tree back byte-for-byte — so a summary that
+        // would refuse the release refuses the rehearsal.
+        if let Some(summary) = &summary {
+            let written = record::write(
+                root,
+                &ctx.config,
+                version,
+                bump,
+                &classification,
+                notes.as_deref(),
+                Some(summary),
+            )?;
+            let verdict = check_written_record(ctx, &written, &input_paths(root, options));
+            rollback(ctx, root, &written);
+            verdict?;
+        }
         return Ok(ReleaseOutput::planned(
             package,
             version,
@@ -162,6 +191,8 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
             tag,
             record_path.to_string_lossy().replace('\\', "/"),
         )
+        .with_summary(summary.is_some())
+        .with_notes_required(notes_required)
         .with_advisories(heavily_cited));
     }
     // Only now: a question, which a dry run must never ask.
@@ -174,7 +205,19 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
         bump,
         &classification,
         notes.as_deref(),
+        summary.as_ref(),
     )?;
+    // The record is corpus the moment it lands, and prose from outside can carry references
+    // nothing has vetted. Check it *before* it becomes history: past the commit below the
+    // release is immutable, and a dangling reference would ship to every consumer.
+    if summary.is_some()
+        && let Err(refusal) = check_written_record(ctx, &written, &input_paths(root, options))
+    {
+        rollback(ctx, root, &written);
+        return Err(refusal);
+    }
+    // Only past that gate does the manifest move — which is what makes the rollback above
+    // a single unlink rather than an edit to undo.
     write_manifest_version(&ctx.repo.config_path(), version)?;
 
     let message = match bump {
@@ -214,7 +257,71 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
         commit,
         report.warnings.len(),
     )
+    .with_summary(summary.is_some())
     .with_advisories(heavily_cited))
+}
+
+/// Re-run the integrity checks with the record on disk, and refuse if it broke anything.
+///
+/// The corpus already passed `check` a moment ago and the tree is clean by gate, so the
+/// working tree is HEAD plus this one file — plus, in a pipeline, the `--notes`/`--summary`
+/// inputs sitting in the checkout as build artifacts. Those are **excluded**: they are
+/// exempt from the release commit for the same reason, and a maintainer's scratch notes
+/// file that happens to carry `id:`/`type:` frontmatter would otherwise index as a node and
+/// refuse the release over references belonging to nothing being published.
+///
+/// What remains is the record's doing, which is what lets the message point at the summary.
+/// Findings that name the record are listed; a violation naming nothing (a manifest-level
+/// one) still refuses, because a release must not be cut over a corpus failing its checks.
+fn check_written_record(ctx: &Ctx, written: &record::Record, inputs: &[String]) -> Result<()> {
+    let (report, _) = crate::commands::check::run(ctx, false, true, false)?;
+    let violations: Vec<&crate::index::check::Violation> = report
+        .violations
+        .iter()
+        .filter(|violation| !inputs.iter().any(|input| violation.involves(input)))
+        .collect();
+    if violations.is_empty() {
+        return Ok(());
+    }
+    let mine: Vec<String> = violations
+        .iter()
+        .filter(|violation| violation.involves(&written.path))
+        .map(|violation| format!("\n  {}: {}", violation.kind(), violation.detail()))
+        .collect();
+    if mine.is_empty() {
+        return Err(VaireError::CheckViolations(violations.len()));
+    }
+    Err(VaireError::Release(format!(
+        "the summary made {} unpublishable — {} left the corpus with {} nothing can \
+         resolve:{}\n  \
+         Nothing was committed. Fix the summary (an address it names must exist, and \
+         frontmatter references are bare `type:id`, never `[[type:id]]`) and run it again",
+        written.path,
+        match mine.len() {
+            1 => "it",
+            _ => "they",
+        },
+        match mine.len() {
+            1 => "a reference",
+            _ => "references",
+        },
+        mine.join("")
+    )))
+}
+
+/// Undo a record that failed its own check: remove the file, then restore the index.
+///
+/// Best-effort by design. Nothing has been committed at this point, the manifest has not
+/// moved yet, and `preflight_writes` proved the record path was free — so removing the file
+/// returns the tree to exactly where it started. The index is a disposable cache: an
+/// ordinary incremental build rebuilds it from the committed tree (never inheriting
+/// working-tree rows), and a failure to do so is one `vaire index` away and must not mask
+/// the refusal the caller is about to report.
+fn rollback(ctx: &Ctx, root: &Path, written: &record::Record) {
+    let _ = std::fs::remove_file(root.join(&written.path));
+    if let Ok(embedder) = ctx.embedder() {
+        let _ = build::run(&ctx.repo, &ctx.config, embedder, Mode::Incremental);
+    }
 }
 
 /// How many inbound references make an edit worth a second look before it ships as a
@@ -302,18 +409,7 @@ fn preflight_git(ctx: &Ctx, options: &Options<'_>) -> Result<()> {
     // A release commit must contain the manifest and the record it just wrote, and
     // nothing else. Committing somebody's unrelated work-in-progress under a release
     // message would misattribute it forever.
-    // The notes file is an input to this command, not stray work — see
-    // `working_tree_dirty_except`.
-    let ignore: Vec<String> = options
-        .notes
-        .and_then(|notes| notes.canonicalize().ok())
-        .and_then(|notes| {
-            let root = root.canonicalize().ok()?;
-            let rel = notes.strip_prefix(&root).ok()?;
-            Some(vec![rel.to_string_lossy().replace('\\', "/")])
-        })
-        .unwrap_or_default();
-    if crate::git::working_tree_dirty_except(root, &ignore)? {
+    if crate::git::working_tree_dirty_except(root, &input_paths(root, *options))? {
         return Err(VaireError::Release(
             "the working tree has uncommitted changes — commit or stash them first, so \
              the release commit contains only the release"
@@ -336,6 +432,29 @@ fn preflight_git(ctx: &Ctx, options: &Options<'_>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The `--notes`/`--summary` files, as package-root-relative paths, for the ones that live
+/// inside the tree at all.
+///
+/// These are **inputs to the command, not stray work**, and in CI they routinely arrive as
+/// build artifacts landing in the checkout — so both places that would otherwise mistake
+/// them for corpus need the same list: the dirty-tree gate (which must not read them as
+/// uncommitted work) and the post-write check (which must not index them as nodes). A file
+/// outside the root is not in the tree and needs excluding from neither.
+fn input_paths(root: &Path, options: Options<'_>) -> Vec<String> {
+    let Ok(root) = root.canonicalize() else {
+        return Vec::new();
+    };
+    [options.notes, options.summary]
+        .into_iter()
+        .flatten()
+        .filter_map(|input| {
+            let input = input.canonicalize().ok()?;
+            let rel = input.strip_prefix(&root).ok()?;
+            Some(rel.to_string_lossy().replace('\\', "/"))
+        })
+        .collect()
 }
 
 /// Refuse before writing anything if the release could not complete.

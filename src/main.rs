@@ -350,6 +350,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             dry_run,
             yes,
             notes,
+            summary,
             allow_branch,
             push,
             onto,
@@ -370,6 +371,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                     dry_run,
                     yes,
                     notes: notes.as_deref(),
+                    summary: summary.as_deref(),
                     allow_branch,
                 },
             )?;

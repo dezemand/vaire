@@ -214,6 +214,12 @@ pub enum Command {
         /// dependents read to decide whether their references still hold.
         #[arg(long)]
         notes: Option<PathBuf>,
+        /// File holding release-summary prose to carry into the record, with optional
+        /// frontmatter. Vairë never calls a model: this is the seam a separate step —
+        /// an agent, or you — writes through, and the record is re-checked with it in
+        /// place before anything is committed.
+        #[arg(long)]
+        summary: Option<PathBuf>,
         /// Release from a branch that is not the repository's mainline.
         #[arg(long = "allow-branch")]
         allow_branch: bool,
