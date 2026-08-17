@@ -45,7 +45,11 @@ use crate::error::{Result, VaireError};
 /// manifest `name`) and `edges.to_package` (NULL = local; set for an `@pkg/` target).
 /// v4: lookup indexes for incremental replacement and section/embedding joins.
 /// v5: `nodes.alias_text` — name + aliases denormalized for alias matching.
-pub const SCHEMA_VERSION: u32 = 5;
+/// v6: `diagram_links(from_id, path)` — every diagram file a node's prose links to,
+/// recorded regardless of whether that file currently carries a `vaire/` marker (or
+/// even exists), so an edit to an external diagram file can invalidate the nodes that
+/// link to it (issue #23) without relying on there already being a `diagram` edge.
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// The schema as individual statements, run in order on a fresh database. Kept inline
 /// (rather than a `.sql` asset) so the binary is self-contained. No `PRAGMA`s: WAL is
@@ -85,6 +89,16 @@ const SCHEMA_STMTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS edges_to   ON edges(to_id)",
     "CREATE INDEX IF NOT EXISTS edges_from ON edges(from_id)",
     "CREATE INDEX IF NOT EXISTS edges_source_file ON edges(source_file)",
+    // Every diagram file a node's prose links to (issue #23), independent of whether that
+    // file currently carries a `vaire/` marker or even exists — this is the *link*
+    // relationship, not the derived edge, so incremental indexing can invalidate a node
+    // when its linked diagram file changes even before that file had any marker at all.
+    "CREATE TABLE IF NOT EXISTS diagram_links (
+        from_id TEXT NOT NULL,
+        path    TEXT NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS diagram_links_from ON diagram_links(from_id)",
+    "CREATE INDEX IF NOT EXISTS diagram_links_path ON diagram_links(path)",
     "CREATE TABLE IF NOT EXISTS unresolved (
         record_id   TEXT NOT NULL,
         type_guess  TEXT,                   -- nullable: [[?: ...]] has no type

@@ -22,6 +22,8 @@ use crate::corpus::section::Section;
 use crate::embed::{Embedder, cache};
 use crate::error::Result;
 use crate::index::db::{Index, col_blob, col_text, col_u32};
+use crate::model::edge::Edge;
+use crate::model::id::NodeId;
 use crate::model::node::Node;
 use crate::model::reference::Reference;
 use crate::search::vector::{decode_vector, encode_vector};
@@ -131,7 +133,7 @@ pub fn run(
     // an empty diff would strand every intervening edit — the anchor advances to HEAD
     // below, so nothing would ever re-examine those commits.
     let incremental_changes = match incremental {
-        true => partition_changed(root, &scanner, last_commit.as_deref().unwrap())?,
+        true => partition_changed(root, &scanner, last_commit.as_deref().unwrap(), &db_path)?,
         false => None,
     };
     let incremental = incremental_changes.is_some();
@@ -210,6 +212,53 @@ pub fn run(
             prepared.push(node);
         }
     }
+    // External diagram files (issue #23): a `.puml`/`.mmd`/etc. a node's prose links to
+    // is not a corpus node — it's not in `to_index`, matches no include glob — so its
+    // `vaire/` markers have to be fetched by path once the referencing set is known.
+    // Diagram files are frequently shared by several nodes, so fetch each path once.
+    let mut diagram_paths: Vec<String> = Vec::new();
+    for prepared in &prepared {
+        for path in diagram_link_paths(&prepared.node.path, &prepared.node.prose) {
+            if !diagram_paths.contains(&path) {
+                diagram_paths.push(path);
+            }
+        }
+    }
+    if !diagram_paths.is_empty() {
+        let diagram_contents: HashMap<String, String> = if committed {
+            crate::git::show_many_at_head(root, &diagram_paths)?
+                .into_iter()
+                .zip(diagram_paths.iter())
+                .filter_map(|(content, path)| Some((path.clone(), content?)))
+                .collect()
+        } else {
+            diagram_paths
+                .iter()
+                .filter_map(|path| {
+                    std::fs::read_to_string(root.join(path))
+                        .ok()
+                        .map(|c| (path.clone(), c))
+                })
+                .collect()
+        };
+        for prepared in &mut prepared {
+            for path in diagram_link_paths(&prepared.node.path, &prepared.node.prose) {
+                if let Some(content) = diagram_contents.get(&path) {
+                    prepared.node.edges.extend(external_diagram_edges(
+                        &prepared.node.id,
+                        &path,
+                        content,
+                    ));
+                }
+            }
+        }
+    }
+    // The same target can be marked in more than one fenced block or linked diagram
+    // file for one node — collapse to one edge per (from, to) regardless of source.
+    for prepared in &mut prepared {
+        crate::corpus::diagram::dedupe_diagram_edges(&mut prepared.node.edges);
+    }
+
     // Read cached vectors from the live index when updating in place, or from the previous
     // index when staging a rebuild. Either way an unchanged section keeps its vector.
     let cache_source = previous.as_ref().unwrap_or(&index);
@@ -454,13 +503,51 @@ fn prepare_node(
     let prose_start = doc.prose_start_line;
     let mut node = frontmatter::to_node(rel, doc)?;
     node.edges.retain(|e| match &e.origin {
-        crate::model::edge::RefOrigin::Inline => true,
+        crate::model::edge::RefOrigin::Inline | crate::model::edge::RefOrigin::Diagram => true,
         crate::model::edge::RefOrigin::Frontmatter(_) => {
             e.to.package().is_some() || configured.contains(e.to.node_type.as_str())
         }
     });
     apply_scoping(&mut node, &config.scope_field);
     Some(PreparedNode { node, prose_start })
+}
+
+/// Relative diagram-file paths a node's prose links to (Markdown links/images whose
+/// target names a diagram extension — issue #23), resolved against the node's own file
+/// and de-duplicated. Reuses the same link-extraction the packer already applies to
+/// prose, minus the `pack` feature gate.
+fn diagram_link_paths(rel: &str, prose: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (target, _line) in crate::corpus::markdown::relative_link_targets(prose) {
+        if !crate::corpus::diagram::is_diagram_path(&target) {
+            continue;
+        }
+        if let Some(resolved) = crate::corpus::markdown::resolve_relative(rel, &target)
+            && !out.contains(&resolved)
+        {
+            out.push(resolved);
+        }
+    }
+    out
+}
+
+/// Scan an external diagram file's already-fetched content for `vaire/` markers and
+/// turn resolved ones into edges from `node_id`. Per the issue, `source_file`/`line`
+/// point at the diagram file itself — a reference lives where it is written.
+fn external_diagram_edges(node_id: &NodeId, diagram_path: &str, content: &str) -> Vec<Edge> {
+    crate::corpus::diagram::scan_source(content)
+        .into_iter()
+        .filter_map(|(marker, line)| match marker {
+            crate::corpus::diagram::DiagramMarker::Resolved(target) => Some(Edge {
+                from: node_id.clone(),
+                to: target,
+                origin: crate::model::edge::RefOrigin::Diagram,
+                source_file: diagram_path.to_string(),
+                line,
+            }),
+            crate::corpus::diagram::DiagramMarker::Malformed(_) => None,
+        })
+        .collect()
 }
 
 /// Build an index of the corpus **as it stood at `rev`**, into `db_path`.
@@ -494,11 +581,45 @@ pub fn snapshot(root: &Path, config: &Config, rev: &str, db_path: &Path) -> Resu
     let contents = crate::git::show_many_at(root, rev, &files)?;
     let configured: HashSet<&str> = config.types.iter().map(String::as_str).collect();
 
-    let prepared: Vec<PreparedNode> = files
+    let mut prepared: Vec<PreparedNode> = files
         .iter()
         .zip(contents)
         .filter_map(|(rel, content)| prepare_node(rel, &content?, config, &configured))
         .collect();
+
+    // External diagram files, same as the live build: fetched at the same `rev` so the
+    // snapshot's edges are byte-identical to what a working-tree build at that commit
+    // would produce.
+    let mut diagram_paths: Vec<String> = Vec::new();
+    for prepared in &prepared {
+        for path in diagram_link_paths(&prepared.node.path, &prepared.node.prose) {
+            if !diagram_paths.contains(&path) {
+                diagram_paths.push(path);
+            }
+        }
+    }
+    if !diagram_paths.is_empty() {
+        let diagram_contents: HashMap<String, String> =
+            crate::git::show_many_at(root, rev, &diagram_paths)?
+                .into_iter()
+                .zip(diagram_paths.iter())
+                .filter_map(|(content, path)| Some((path.clone(), content?)))
+                .collect();
+        for prepared in &mut prepared {
+            for path in diagram_link_paths(&prepared.node.path, &prepared.node.prose) {
+                if let Some(content) = diagram_contents.get(&path) {
+                    prepared.node.edges.extend(external_diagram_edges(
+                        &prepared.node.id,
+                        &path,
+                        content,
+                    ));
+                }
+            }
+        }
+    }
+    for prepared in &mut prepared {
+        crate::corpus::diagram::dedupe_diagram_edges(&mut prepared.node.edges);
+    }
 
     remove_db_files(db_path)?;
     let index = Index::create_for_bulk_load(db_path)?;
@@ -607,6 +728,7 @@ fn partition_changed(
     root: &Path,
     scanner: &Scanner,
     last: &str,
+    db_path: &Path,
 ) -> Result<Option<(Vec<String>, Vec<String>)>> {
     let Some(changed) = crate::git::changed_files(root, last)? else {
         return Ok(None);
@@ -615,14 +737,42 @@ fn partition_changed(
         crate::git::list_files_at_head(root)?.into_iter().collect();
     let mut to_index = Vec::new();
     let mut to_delete = Vec::new();
+    let mut diagram_changed = Vec::new();
     for rel in changed {
         if !scanner.is_match(Path::new(&rel)) {
+            if crate::corpus::diagram::is_diagram_path(&rel) {
+                diagram_changed.push(rel);
+            }
             continue;
         }
         if head_set.contains(&rel) {
             to_index.push(rel);
         } else {
             to_delete.push(rel);
+        }
+    }
+    // An edited external diagram file (`.puml`/`.mmd`/etc.) is not itself a corpus node,
+    // so it never appears in `to_index` above and its edges would otherwise go stale
+    // (issue #23). Force any node that *links* to a changed diagram file back into
+    // `to_index`, so its content is re-fetched and re-scanned. This reads `diagram_links`
+    // — the link relationship, recorded independent of whether a marker (and so an edge)
+    // exists yet — rather than the `edges` table, so it also catches the first marker
+    // ever added to a previously-marker-free diagram file, and a brand-new diagram file a
+    // node already linked to (a dangling link still records a `diagram_links` row).
+    if !diagram_changed.is_empty() && db_path.exists() {
+        let existing = Index::open(db_path)?;
+        for path in &diagram_changed {
+            let referencing: Vec<String> = existing.query_rows(
+                "SELECT DISTINCT n.path FROM diagram_links dl JOIN nodes n ON n.id = dl.from_id \
+                 WHERE dl.path = ?1",
+                [path.as_str()],
+                |r| col_text(r, 0),
+            )?;
+            for rel in referencing {
+                if head_set.contains(&rel) && !to_index.contains(&rel) {
+                    to_index.push(rel);
+                }
+            }
         }
     }
     Ok(Some((to_index, to_delete)))
@@ -702,6 +852,17 @@ fn index_node(
                 e.source_file.as_str(),
                 i64::from(e.line),
             ],
+        )?;
+    }
+
+    // Every diagram file this node's prose links to — recorded independent of whether it
+    // currently carries a `vaire/` marker (or exists at all), so `partition_changed` can
+    // invalidate this node the moment such a file changes, not only once it already has
+    // an edge to lose (issue #23).
+    for path in diagram_link_paths(&node.path, &node.prose) {
+        index.execute(
+            "INSERT INTO diagram_links(from_id, path) VALUES(?1, ?2)",
+            turso::params![id.as_str(), path.as_str()],
         )?;
     }
 
@@ -797,6 +958,19 @@ fn delete_file(index: &Index, rel: &str) -> Result<()> {
     index.execute("DELETE FROM nodes WHERE path = ?1", [rel])?;
     index.execute("DELETE FROM node_files WHERE path = ?1", [rel])?;
     index.execute("DELETE FROM edges WHERE source_file = ?1", [rel])?;
+    // A diagram edge's source_file names the diagram file, not this node's own file (the
+    // marker lives where it's written) — so re-deriving this node's edges also means
+    // clearing any diagram edges it previously originated, keyed by from_id instead.
+    for id in &ids {
+        index.execute(
+            "DELETE FROM edges WHERE from_id = ?1 AND ref_type = 'diagram'",
+            [id.as_str()],
+        )?;
+        index.execute(
+            "DELETE FROM diagram_links WHERE from_id = ?1",
+            [id.as_str()],
+        )?;
+    }
     index.execute("DELETE FROM unresolved WHERE source_file = ?1", [rel])?;
     Ok(())
 }

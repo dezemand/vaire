@@ -177,8 +177,12 @@ JSON:
 }
 ```
 
-`ref_type` is the edge origin: a frontmatter key (`participants`, `references`, `project`)
-or `inline` for a wikilink in prose. `line` is the 1-based source line.
+`ref_type` is the edge origin: a frontmatter key (`participants`, `references`, `project`),
+`inline` for a wikilink in prose, or `diagram` for a `vaire/type:id` link target found
+inside a diagram source (§6.4) — a fenced ```` ```plantuml ````/```` ```mermaid ```` block
+or an external `.puml`/`.mmd`/`.drawio` file the prose links to. `line` is the 1-based
+source line — for a `diagram` edge, the line **inside the diagram source**, not the node's
+own file, since that is where the marker is written.
 
 ### 3.3 `vaire refs <id>`
 

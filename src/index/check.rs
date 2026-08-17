@@ -315,7 +315,7 @@ impl Index {
                AND NOT EXISTS (
                    SELECT 1 FROM edges f
                    WHERE f.from_id = e.from_id AND f.to_id = e.to_id
-                     AND f.to_package IS e.to_package AND f.ref_type <> 'inline'
+                     AND f.to_package IS e.to_package AND f.ref_type NOT IN ('inline', 'diagram')
                )
              GROUP BY e.from_id, e.to_id, e.to_package
              ORDER BY MIN(e.source_file), MIN(e.line)",
