@@ -255,7 +255,10 @@ fn a_marker_that_does_not_parse_is_reported_rather_than_dropped() {
     };
     assert_eq!(id, "record:arch");
     assert_eq!(path, "knowledge/arch.md", "named where it was written");
-    assert_eq!(*line, 8, "and on which line — inside the fence, in file coordinates");
+    assert_eq!(
+        *line, 8,
+        "and on which line — inside the fence, in file coordinates"
+    );
 }
 
 /// The same, for a marker in an external diagram file — where the line reported has to be
@@ -283,7 +286,10 @@ fn a_malformed_marker_in_an_external_diagram_names_that_file() {
     let Warning::MalformedDiagramRef { path, line, .. } = found else {
         unreachable!()
     };
-    assert_eq!(path, "knowledge/arch.puml", "a reference lives where it is written");
+    assert_eq!(
+        path, "knowledge/arch.puml",
+        "a reference lives where it is written"
+    );
     assert_eq!(*line, 2);
 }
 
@@ -291,16 +297,24 @@ fn a_malformed_marker_in_an_external_diagram_names_that_file() {
 #[test]
 fn fixing_the_marker_clears_the_warning() {
     let c = Corpus::empty();
-    c.add("knowledge/gateway.md", "---\nid: gateway\ntype: system\n---\n# Gateway\n")
-        .add(
-            "knowledge/arch.md",
-            "---\nid: arch\ntype: record\n---\n# Architecture\n\n\
+    c.add(
+        "knowledge/gateway.md",
+        "---\nid: gateway\ntype: system\n---\n# Gateway\n",
+    )
+    .add(
+        "knowledge/arch.md",
+        "---\nid: arch\ntype: record\n---\n# Architecture\n\n\
              ```plantuml\ncomponent \"Gateway\" [[vaire/Not A Reference]]\n```\n",
-        )
-        .commit()
-        .build();
+    )
+    .commit()
+    .build();
     let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
-    assert!(report.warnings.iter().any(|w| matches!(w, Warning::MalformedDiagramRef { .. })));
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, Warning::MalformedDiagramRef { .. }))
+    );
 
     std::fs::write(
         c.root().join("knowledge/arch.md"),
@@ -312,7 +326,10 @@ fn fixing_the_marker_clears_the_warning() {
 
     let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
     assert!(
-        !report.warnings.iter().any(|w| matches!(w, Warning::MalformedDiagramRef { .. })),
+        !report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, Warning::MalformedDiagramRef { .. })),
         "a corrected marker leaves nothing behind: {:?}",
         report.warnings
     );

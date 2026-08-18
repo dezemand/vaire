@@ -857,15 +857,26 @@ fn a_publish_interrupted_before_its_index_write_is_finished_by_the_next_one() {
     publish(&registry, &artifact, "1.0.0").unwrap();
     // Simulate the interruption: the artifact landed, the index never recorded it.
     std::fs::remove_file(dir.path().join("v1/index/acme-core.json")).unwrap();
-    assert!(dir.path().join("v1/artifacts/acme-core/acme-core-1.0.0.tgz").is_file());
+    assert!(
+        dir.path()
+            .join("v1/artifacts/acme-core/acme-core-1.0.0.tgz")
+            .is_file()
+    );
 
     let published = publish(&registry, &artifact, "1.0.0")
         .expect("the same bytes finish the publish they find half-done");
     assert_eq!(published.version, Version::new(1, 0, 0));
 
     let index = index_doc(dir.path(), "acme-core");
-    assert_eq!(index.releases.len(), 1, "the release is recorded exactly once");
-    assert_eq!(index.get(Version::new(1, 0, 0)).unwrap().sha256, published.sha256);
+    assert_eq!(
+        index.releases.len(),
+        1,
+        "the release is recorded exactly once"
+    );
+    assert_eq!(
+        index.get(Version::new(1, 0, 0)).unwrap().sha256,
+        published.sha256
+    );
 
     // And it stays idempotent afterwards, which is the ordinary re-push path.
     publish(&registry, &artifact, "1.0.0").expect_err("a recorded version is taken");
@@ -882,11 +893,20 @@ fn a_version_occupied_by_other_bytes_is_never_adopted_by_a_resume() {
     let scratch = temp();
     let registry = registry(dir.path());
 
-    publish(&registry, &artifact(scratch.path(), "theirs.tgz", b"theirs"), "1.0.0").unwrap();
+    publish(
+        &registry,
+        &artifact(scratch.path(), "theirs.tgz", b"theirs"),
+        "1.0.0",
+    )
+    .unwrap();
     std::fs::remove_file(dir.path().join("v1/index/acme-core.json")).unwrap();
 
-    let refused = publish(&registry, &artifact(scratch.path(), "ours.tgz", b"ours"), "1.0.0")
-        .expect_err("different bytes are a taken version, not a half-done publish");
+    let refused = publish(
+        &registry,
+        &artifact(scratch.path(), "ours.tgz", b"ours"),
+        "1.0.0",
+    )
+    .expect_err("different bytes are a taken version, not a half-done publish");
     assert!(
         matches!(refused, RegistryError::VersionExists { .. }),
         "{refused:?}"
@@ -904,7 +924,12 @@ fn a_traversing_name_in_the_enumeration_is_refused_not_followed() {
     let dir = temp();
     let scratch = temp();
     let registry = registry(dir.path());
-    publish(&registry, &artifact(scratch.path(), "a.tgz", b"payload"), "1.0.0").unwrap();
+    publish(
+        &registry,
+        &artifact(scratch.path(), "a.tgz", b"payload"),
+        "1.0.0",
+    )
+    .unwrap();
 
     // A document naming something outside the registry, beside the legitimate entry.
     std::fs::write(

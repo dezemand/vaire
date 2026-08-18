@@ -289,7 +289,9 @@ fn a_catalog_from_an_older_unmigratable_schema_is_recreated_not_relabelled() {
             .record(&pkg, "acme-core", "1.0.0", Origin::Registered)
             .expect("record");
         // An older shape with no migration step to bring it forward.
-        catalog.set_schema_version(0).expect("stamp an older version");
+        catalog
+            .set_schema_version(0)
+            .expect("stamp an older version");
     }
 
     // The tables are created `IF NOT EXISTS`, so installing over an older shape would
@@ -450,16 +452,14 @@ fn catalog_add_refuses_a_release_in_the_store() {
     )
     .expect("manifest");
 
-    let refused = cmd::add(home.path(), Some(&entry)).expect_err("a store entry is not a workspace");
+    let refused =
+        cmd::add(home.path(), Some(&entry)).expect_err("a store entry is not a workspace");
     let message = refused.to_string();
     assert!(
         message.contains("release in the store"),
         "the refusal says what it found: {message}"
     );
-    assert!(
-        names(home.path()).is_empty(),
-        "and nothing was recorded"
-    );
+    assert!(names(home.path()).is_empty(), "and nothing was recorded");
 }
 
 /// A scan is skipped rather than refused, because pointing one at a directory that happens

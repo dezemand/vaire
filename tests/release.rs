@@ -84,7 +84,10 @@ fn a_first_release_records_everything_it_publishes() {
 
     assert_eq!(
         out.classification.added,
-        vec!["department:platform".to_string(), "person:jane-doe".to_string()],
+        vec![
+            "department:platform".to_string(),
+            "person:jane-doe".to_string()
+        ],
         "the founding entities are what 1.0.0 added"
     );
     assert!(
