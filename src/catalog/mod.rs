@@ -894,6 +894,7 @@ pub const DISPLACED_SUFFIX: &str = ".unreadable";
 /// claims. Keeping the file costs a few kilobytes and leaves the mistake recoverable;
 /// removing it makes this function's judgement final.
 fn displace_db_files(path: &Path, why: &str) -> Result<()> {
+    let to_base = displaced_destination(path);
     for suffix in ["", "-wal", "-shm"] {
         // Built from the OS string, not from `Display`: a path that is not valid UTF-8
         // would come back lossily converted, and the `-wal` name we constructed would then
@@ -902,30 +903,66 @@ fn displace_db_files(path: &Path, why: &str) -> Result<()> {
         let mut from = path.as_os_str().to_os_string();
         from.push(suffix);
         let from = PathBuf::from(from);
-        let mut to = path.as_os_str().to_os_string();
-        to.push(DISPLACED_SUFFIX);
+        let mut to = to_base.as_os_str().to_os_string();
         to.push(suffix);
         let to = PathBuf::from(to);
         match std::fs::rename(&from, &to) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            // The move is a courtesy; installing a working catalog is the job. If the
-            // file cannot be moved aside it still has to leave, and a removal that also
-            // fails is a real error — the fresh database would otherwise inherit it.
-            Err(_) => match std::fs::remove_file(&from) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            },
+            // A failure here is **not** downgraded to a removal. Deleting what could not
+            // be moved would defeat the only thing this function is for, and it would do
+            // it in precisely the situation that most warrants care — something is already
+            // wrong with the directory. An unusable catalog is recoverable; a deleted pin
+            // is not.
+            Err(e) => {
+                return Err(VaireError::Config(format!(
+                    "the catalog at {} could not be read and could not be moved aside \
+                     either ({e}), so it has been left alone rather than deleted. Move or \
+                     remove {} by hand and it will be rebuilt",
+                    from.display(),
+                    from.display()
+                )));
+            }
         }
     }
     eprintln!(
         "warning: the catalog at {} was rebuilt because {why}; the previous file is kept \
-         beside it as {}{DISPLACED_SUFFIX}. `vaire catalog scan <dir>` restores the \
-         packages this machine knows — pins and pulled-by-name records are not \
-         re-observable, so check `vaire pin` and `vaire clean --dry-run` before sweeping",
+         beside it as {}. `vaire catalog scan <dir>` restores the packages this machine \
+         knows — pins and pulled-by-name records are not re-observable, so check `vaire \
+         pin` and `vaire clean --dry-run` before sweeping",
         path.display(),
-        path.display()
+        to_base.display()
     );
     Ok(())
+}
+
+/// Where this displacement should put the catalog it is setting aside.
+///
+/// A fixed name would make the *second* corruption undo the first rescue: the newly
+/// rebuilt (and therefore nearly empty) catalog would land on top of the one still
+/// holding the pins somebody wanted back. Generations are tried until one is free, and
+/// the whole file set moves to a single generation together — a `catalog.db.unreadable`
+/// paired with somebody else's `-wal` would be neither database.
+fn displaced_destination(path: &Path) -> PathBuf {
+    // Enough generations to make collision a non-issue; past that, something is wrong
+    // that another suffix will not fix, and the oldest is reused rather than looping.
+    const GENERATIONS: u32 = 64;
+    let mut candidate = PathBuf::new();
+    for generation in 1..=GENERATIONS {
+        let mut base = path.as_os_str().to_os_string();
+        base.push(DISPLACED_SUFFIX);
+        if generation > 1 {
+            base.push(format!("-{generation}"));
+        }
+        candidate = PathBuf::from(base);
+        let taken = ["", "-wal", "-shm"].iter().any(|suffix| {
+            let mut probe = candidate.as_os_str().to_os_string();
+            probe.push(suffix);
+            PathBuf::from(probe).exists()
+        });
+        if !taken {
+            return candidate;
+        }
+    }
+    candidate
 }

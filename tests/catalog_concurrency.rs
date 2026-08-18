@@ -305,3 +305,64 @@ fn a_catalog_from_a_newer_vaire_is_refused_rather_than_rebuilt() {
         "the sighting a newer vaire recorded is untouched"
     );
 }
+
+/// Displacing twice must not undo the first rescue.
+///
+/// With a fixed name, a second corruption drops the newly rebuilt — and therefore nearly
+/// empty — catalog straight on top of the one still holding the pins somebody wanted
+/// back. Keeping the file is the whole point of moving it rather than deleting it, so
+/// each displacement takes its own generation.
+#[test]
+fn a_second_displacement_does_not_overwrite_the_first() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().to_path_buf();
+
+    Catalog::open(&home).expect("catalog");
+    std::fs::write(home.join("catalog.db"), b"first corruption").expect("corrupt once");
+    Catalog::open(&home).expect("rebuilt");
+
+    std::fs::write(home.join("catalog.db"), b"second corruption").expect("corrupt twice");
+    Catalog::open(&home).expect("rebuilt again");
+
+    assert_eq!(
+        std::fs::read(home.join("catalog.db.unreadable")).expect("first is still there"),
+        b"first corruption",
+        "the first displacement survived the second"
+    );
+    assert_eq!(
+        std::fs::read(home.join("catalog.db.unreadable-2")).expect("second is kept too"),
+        b"second corruption",
+        "and the second went to its own generation"
+    );
+}
+
+/// If it cannot be moved aside, it is left alone — never removed.
+///
+/// Downgrading a failed move to a deletion would defeat the only thing displacement is
+/// for, in exactly the circumstance that most warrants care: something is already wrong
+/// with the directory. An unusable catalog is recoverable; a deleted pin is not.
+#[test]
+fn a_catalog_that_cannot_be_moved_aside_is_not_deleted() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().to_path_buf();
+    Catalog::open(&home).expect("catalog");
+    std::fs::write(home.join("catalog.db"), b"corrupt").expect("corrupt it");
+    // The file stays readable and writable; the *directory* refuses the rename.
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+
+    let opened = Catalog::open(&home);
+    let restore = std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755));
+    if opened.is_ok() {
+        restore.expect("restore");
+        eprintln!("skipped: this user can rename inside a read-only directory");
+        return;
+    }
+    restore.expect("restore");
+    assert_eq!(
+        std::fs::read(home.join("catalog.db")).expect("still there"),
+        b"corrupt",
+        "what could not be moved was left exactly as it was"
+    );
+}

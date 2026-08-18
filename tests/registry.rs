@@ -931,20 +931,27 @@ fn a_traversing_name_in_the_enumeration_is_refused_not_followed() {
     )
     .unwrap();
 
-    // A document naming something outside the registry, beside the legitimate entry.
+    // A document naming something outside the index directory, beside the legitimate
+    // entry. The traversal is deliberately one that *resolves*: `v1/index/../outside.json`
+    // lands on a real file, so if the name is ever followed the test sees it listed. A
+    // wilder target (`../../../../etc/passwd`) would prove nothing — it would be skipped
+    // for not existing, with or without the boundary check.
     std::fs::write(
         dir.path().join("v1/packages.json"),
-        serde_json::to_vec(&["../../../../etc/passwd", "acme-core"]).unwrap(),
+        serde_json::to_vec(&["../outside", "acme-core"]).unwrap(),
     )
     .unwrap();
-    // Somewhere for the traversal to actually land, so the test fails loudly if the name
-    // is ever followed rather than merely returning nothing.
-    std::fs::create_dir_all(dir.path().join("v1/index")).unwrap();
     std::fs::write(
-        dir.path().join("outside.json"),
+        dir.path().join("v1/outside.json"),
         serde_json::to_vec(&PackageIndex::new("outside")).unwrap(),
     )
     .unwrap();
+    // The fixture has to be reachable by the very path the unchecked name would build,
+    // or the test is asserting nothing.
+    assert!(
+        dir.path().join("v1/index/../outside.json").is_file(),
+        "the traversal fixture must resolve, or this test proves nothing"
+    );
 
     let listed = registry.list().expect("listing survives a bad name");
     assert_eq!(

@@ -198,7 +198,11 @@ them means the next sweep deletes the releases they were holding. Two rules foll
   *overwrite* it.
 
 What is displaced is kept beside the catalog rather than removed, so a wrong guess here costs
-a file to look at rather than the record of what this machine holds.
+a file to look at rather than the record of what this machine holds. Each displacement takes
+its own generation: under a fixed name the *second* corruption would drop the newly rebuilt —
+and therefore nearly empty — catalog on top of the one still holding the pins somebody wanted
+back. A file that cannot be moved aside is left alone rather than deleted, because the case
+where the move fails is the case where something is already wrong with the directory.
 
 ## 5. The store
 

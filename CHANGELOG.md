@@ -217,7 +217,11 @@ the protocol. See [`spec/registry.md`](spec/registry.md) for the whole layer.
   rebuilt**, which is the lockfile's rule applied to the same problem: declining to *read* a
   format you do not know is only coherent if you also decline to *overwrite* it. What does
   get displaced is kept beside the catalog as `catalog.db.unreadable`, so a wrong guess costs
-  a file to look at rather than the record of what this machine holds.
+  a file to look at rather than the record of what this machine holds — each displacement
+  taking its own generation, since a fixed name would let a second corruption drop the newly
+  rebuilt catalog on top of the one still holding the pins somebody wanted back. A file that
+  cannot be moved aside is left alone rather than removed: downgrading that to a deletion
+  would defeat the point in exactly the case that most warrants care.
 - **A first release records what it publishes.** It has no baseline to diff, which is not the
   same as having nothing to say: everything the corpus holds is what that release published,
   and it is now recorded as `added`. The empty version was not neutral — a record's edges are
