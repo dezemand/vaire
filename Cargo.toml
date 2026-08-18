@@ -83,7 +83,7 @@ walkdir = "2"
 thiserror = "2"
 
 # Blocking HTTP for the OpenAI embedding provider (rustls TLS, no async runtime)
-ureq = { version = "2", optional = true }
+ureq = { version = "2", optional = true, features = ["native-certs"] }
 url = { version = "2", optional = true }
 directories = { version = "6.0.0", optional = true }
 
