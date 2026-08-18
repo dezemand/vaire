@@ -140,10 +140,13 @@ pub fn parse(text: &str, origin: &str) -> Result<Summary> {
     // Refused by name, never silently dropped: an author who set `added:` believes they
     // described the release, and a record that quietly disagreed with its own edges would
     // be worse than a failed release.
-    let taken: Vec<&str> = COMPUTED_KEYS
-        .iter()
-        .copied()
-        .filter(|key| summary.frontmatter.contains_key(*key))
+    // Case-insensitively: `Added:` must not slip past the refusal and land in the record
+    // beside the computed `added:`. The error names the author's own spelling.
+    let taken: Vec<&str> = summary
+        .frontmatter
+        .keys()
+        .map(String::as_str)
+        .filter(|key| COMPUTED_KEYS.iter().any(|c| key.eq_ignore_ascii_case(c)))
         .collect();
     if !taken.is_empty() {
         return Err(VaireError::Release(format!(
@@ -201,6 +204,19 @@ mod tests {
             let err = parse(&text, "summary.md").unwrap_err().to_string();
             assert!(err.contains(key), "{key}: {err}");
         }
+    }
+
+    #[test]
+    fn the_refusal_is_not_fooled_by_case() {
+        for key in ["Added", "RETIRED", "Bump", "Generated_Summary"] {
+            let text = format!("---\n{key}: whatever\n---\nProse.\n");
+            let err = parse(&text, "summary.md").unwrap_err().to_string();
+            assert!(err.contains(key), "{key}: {err}");
+        }
+        // The folding guards the computed names only — an author's own capitalized key
+        // is still theirs.
+        let s = parse("---\nTheme: platform\n---\nProse.\n", "summary.md").unwrap();
+        assert_eq!(s.free_frontmatter().unwrap(), "Theme: platform\n");
     }
 
     #[test]
