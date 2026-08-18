@@ -195,6 +195,15 @@ the protocol. See [`spec/registry.md`](spec/registry.md) for the whole layer.
   this"; the catalog does not.
 
 ### Fixed
+- **TLS trusts what the operating system trusts.** HTTPS previously validated against a
+  bundled root snapshot (`webpki-roots` 0.26, a line frozen upstream), which no longer
+  contains the root GitHub's newer certificate chains use — so `vaire upgrade` could not
+  download release assets and a registry on `raw.githubusercontent.com` could not be
+  pulled, while `api.github.com` (an older root) still worked. All HTTP now validates
+  against the platform trust store instead, which also follows corporate-proxy roots the
+  OS has been told to trust. Note for 0.2.1 users: the old binary carries the frozen
+  snapshot, so `vaire upgrade` cannot fetch this release — reinstall via the install
+  script once.
 - **Cross-process safety for shared state, measured rather than assumed.** The catalog design
   assumed short WAL transactions made concurrent invocations safe. They do not: **the storage
   engine takes an exclusive lock when a database is opened**, so a second process cannot open
