@@ -274,12 +274,17 @@ fn publish_one(
                     short(&theirs),
                     short(&artifact.sha256),
                 ))),
-                // The artifact is there and the index does not describe it — a half-written
-                // publish, or an index edited by hand. Either way this push cannot claim the
-                // version and cannot confirm it either.
+                // The artifact is there, the index does not describe it, and the bytes are
+                // not the ones this tag packs — a half-written publish of *something else*,
+                // or an index edited by hand. A half-written publish of this release would
+                // have been finished by `publish` itself rather than reaching here, so what
+                // is left is a version occupied by bytes nobody can now account for.
                 None => Err(VaireError::Registry(format!(
-                    "{} {version} is already published, but the registry's index does not \
-                     record it — the registry is in an inconsistent state",
+                    "{} {version} is occupied by an artifact this tag does not produce, and \
+                     the registry's index does not record it either — a publish that was \
+                     interrupted by something other than this release. Nothing here can \
+                     claim the version: remove that artifact if it is yours to remove, or \
+                     release a new version",
                     artifact.name
                 ))),
             };

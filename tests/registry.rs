@@ -836,3 +836,95 @@ fn a_registry_is_forgotten_only_when_it_is_removed() {
             .removed
     );
 }
+
+// ---- resuming a publish that was interrupted --------------------------------------------
+
+/// A publish is three writes and only the first is atomic, so the window between them is
+/// real: an interrupted push leaves the artifact placed and the index silent. That state
+/// has to be *finishable*.
+///
+/// Refusing it would make it permanent — the create-only `PUT` means the identity is
+/// immutably taken, so no later push could ever claim it, and a release would be stranded
+/// with nothing to do but skip a version. The whole point of splitting `release` from
+/// `push` is that transport is retryable (registry.md §3.3).
+#[test]
+fn a_publish_interrupted_before_its_index_write_is_finished_by_the_next_one() {
+    let dir = temp();
+    let scratch = temp();
+    let registry = registry(dir.path());
+    let artifact = artifact(scratch.path(), "a.tgz", b"payload");
+
+    publish(&registry, &artifact, "1.0.0").unwrap();
+    // Simulate the interruption: the artifact landed, the index never recorded it.
+    std::fs::remove_file(dir.path().join("v1/index/acme-core.json")).unwrap();
+    assert!(dir.path().join("v1/artifacts/acme-core/acme-core-1.0.0.tgz").is_file());
+
+    let published = publish(&registry, &artifact, "1.0.0")
+        .expect("the same bytes finish the publish they find half-done");
+    assert_eq!(published.version, Version::new(1, 0, 0));
+
+    let index = index_doc(dir.path(), "acme-core");
+    assert_eq!(index.releases.len(), 1, "the release is recorded exactly once");
+    assert_eq!(index.get(Version::new(1, 0, 0)).unwrap().sha256, published.sha256);
+
+    // And it stays idempotent afterwards, which is the ordinary re-push path.
+    publish(&registry, &artifact, "1.0.0").expect_err("a recorded version is taken");
+}
+
+/// Resuming is decided by the bytes, never by the gap.
+///
+/// A missing index entry is not permission to overwrite: if what occupies the version is
+/// somebody else's artifact, this push has no claim on it and says so rather than
+/// adopting bytes it did not produce.
+#[test]
+fn a_version_occupied_by_other_bytes_is_never_adopted_by_a_resume() {
+    let dir = temp();
+    let scratch = temp();
+    let registry = registry(dir.path());
+
+    publish(&registry, &artifact(scratch.path(), "theirs.tgz", b"theirs"), "1.0.0").unwrap();
+    std::fs::remove_file(dir.path().join("v1/index/acme-core.json")).unwrap();
+
+    let refused = publish(&registry, &artifact(scratch.path(), "ours.tgz", b"ours"), "1.0.0")
+        .expect_err("different bytes are a taken version, not a half-done publish");
+    assert!(
+        matches!(refused, RegistryError::VersionExists { .. }),
+        "{refused:?}"
+    );
+}
+
+/// A name in the enumeration document is input like any other, and it is about to become
+/// a path segment.
+///
+/// The document is written by whoever publishes to the registry, so a hostile or merely
+/// broken one must not be able to steer a read out of the registry root — the same
+/// boundary check every other entry point applies (registry.md §10.2).
+#[test]
+fn a_traversing_name_in_the_enumeration_is_refused_not_followed() {
+    let dir = temp();
+    let scratch = temp();
+    let registry = registry(dir.path());
+    publish(&registry, &artifact(scratch.path(), "a.tgz", b"payload"), "1.0.0").unwrap();
+
+    // A document naming something outside the registry, beside the legitimate entry.
+    std::fs::write(
+        dir.path().join("v1/packages.json"),
+        serde_json::to_vec(&["../../../../etc/passwd", "acme-core"]).unwrap(),
+    )
+    .unwrap();
+    // Somewhere for the traversal to actually land, so the test fails loudly if the name
+    // is ever followed rather than merely returning nothing.
+    std::fs::create_dir_all(dir.path().join("v1/index")).unwrap();
+    std::fs::write(
+        dir.path().join("outside.json"),
+        serde_json::to_vec(&PackageIndex::new("outside")).unwrap(),
+    )
+    .unwrap();
+
+    let listed = registry.list().expect("listing survives a bad name");
+    assert_eq!(
+        listed.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        vec!["acme-core"],
+        "the ill-formed name is skipped and the good one still lists"
+    );
+}

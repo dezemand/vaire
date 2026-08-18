@@ -220,3 +220,100 @@ fn incremental_reindex_picks_up_a_marker_newly_added_to_an_existing_diagram_file
         refs.refs
     );
 }
+
+/// A `vaire/` target that does not parse is **reported, not silently dropped** — the
+/// promise design.md §6 makes in as many words.
+///
+/// It has nowhere else to surface. It is not an edge (there is no address to point at),
+/// and it cannot become a loose end: `[[?type: descriptor]]` needs a space, and a diagram
+/// is deliberately not where an open question is recorded. So without this it would be
+/// indistinguishable from a shape nobody meant as a reference — which is exactly how a
+/// typo evaporates.
+#[test]
+fn a_marker_that_does_not_parse_is_reported_rather_than_dropped() {
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/arch.md",
+        "---\nid: arch\ntype: record\n---\n# Architecture\n\n\
+         ```plantuml\ncomponent \"Gateway\" [[vaire/Not A Reference]]\n```\n",
+    )
+    .commit()
+    .build();
+
+    let (report, failed) = commands::check::run(&c.ctx(), false, false, false).unwrap();
+    assert!(
+        !failed,
+        "the marker was ignored, so the corpus is intact — this is a warning, not a failure"
+    );
+    let found = report
+        .warnings
+        .iter()
+        .find(|w| matches!(w, Warning::MalformedDiagramRef { .. }))
+        .unwrap_or_else(|| panic!("no malformed-marker warning in {:?}", report.warnings));
+    let Warning::MalformedDiagramRef { id, path, line, .. } = found else {
+        unreachable!()
+    };
+    assert_eq!(id, "record:arch");
+    assert_eq!(path, "knowledge/arch.md", "named where it was written");
+    assert_eq!(*line, 8, "and on which line — inside the fence, in file coordinates");
+}
+
+/// The same, for a marker in an external diagram file — where the line reported has to be
+/// the diagram's own, because that is where somebody has to go to fix it.
+#[test]
+fn a_malformed_marker_in_an_external_diagram_names_that_file() {
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/arch.md",
+        "---\nid: arch\ntype: record\n---\n# Architecture\n\n![diagram](arch.puml)\n",
+    )
+    .add(
+        "knowledge/arch.puml",
+        "@startuml\ncomponent \"Gateway\" [[vaire/Not A Reference]]\n@enduml\n",
+    )
+    .commit()
+    .build();
+
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
+    let found = report
+        .warnings
+        .iter()
+        .find(|w| matches!(w, Warning::MalformedDiagramRef { .. }))
+        .unwrap_or_else(|| panic!("no malformed-marker warning in {:?}", report.warnings));
+    let Warning::MalformedDiagramRef { path, line, .. } = found else {
+        unreachable!()
+    };
+    assert_eq!(path, "knowledge/arch.puml", "a reference lives where it is written");
+    assert_eq!(*line, 2);
+}
+
+/// And it stops being reported once it is fixed — the row is re-derived, not accumulated.
+#[test]
+fn fixing_the_marker_clears_the_warning() {
+    let c = Corpus::empty();
+    c.add("knowledge/gateway.md", "---\nid: gateway\ntype: system\n---\n# Gateway\n")
+        .add(
+            "knowledge/arch.md",
+            "---\nid: arch\ntype: record\n---\n# Architecture\n\n\
+             ```plantuml\ncomponent \"Gateway\" [[vaire/Not A Reference]]\n```\n",
+        )
+        .commit()
+        .build();
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
+    assert!(report.warnings.iter().any(|w| matches!(w, Warning::MalformedDiagramRef { .. })));
+
+    std::fs::write(
+        c.root().join("knowledge/arch.md"),
+        "---\nid: arch\ntype: record\n---\n# Architecture\n\n\
+         ```plantuml\ncomponent \"Gateway\" [[vaire/system:gateway]]\n```\n",
+    )
+    .unwrap();
+    c.build_with(&DummyEmbedder { dims: 8 }, Mode::WorkingTree);
+
+    let (report, _) = commands::check::run(&c.ctx(), false, false, false).unwrap();
+    assert!(
+        !report.warnings.iter().any(|w| matches!(w, Warning::MalformedDiagramRef { .. })),
+        "a corrected marker leaves nothing behind: {:?}",
+        report.warnings
+    );
+}

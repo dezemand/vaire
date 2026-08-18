@@ -34,7 +34,21 @@ pub fn add(home: &Path, path: Option<&Path>) -> Result<CatalogRecordOutput> {
             target.display()
         )));
     }
+    // A store entry is a package directory, so nothing about the path itself refuses this
+    // — which is exactly why it has to be refused here. A sighting says "observed at a
+    // path, and may have changed since"; a sealed release is the opposite claim, and
+    // recording one would make a single directory arrive under two identities, one of them
+    // outranking the store in resolution (registry.md §4.3).
     let config = Config::load(&manifest)?;
+    if crate::store::Store::at(home).contains(&target) {
+        return Err(VaireError::Config(format!(
+            "{} is a release in the store, not a working copy — the store already records \
+             what this machine holds, and a sighting would claim this directory is one \
+             somebody edits. Register the checkout you author {} in instead",
+            target.display(),
+            config.name
+        )));
+    }
     let catalog = Catalog::open(home)?;
     catalog.record(&target, &config.name, &config.version, Origin::Registered)?;
     let recorded = catalog
@@ -62,9 +76,18 @@ pub fn scan_dir(home: &Path, dir: &Path) -> Result<CatalogRecordOutput> {
         )));
     }
     let walk = scan::walk(dir);
+    let store = crate::store::Store::at(home);
     let catalog = Catalog::open(home)?;
     let mut recorded = Vec::new();
     for found in &walk.found {
+        // Skipped rather than refused: pointing a scan at a directory that happens to
+        // contain the vaire home is an ordinary thing to do (`vaire catalog scan ~`), and
+        // failing the whole import over it would be useless. A store entry is simply not
+        // what this command imports — it is a sealed release the store already records,
+        // and a sighting would claim somebody edits it (registry.md §4.3).
+        if store.contains(&found.path) {
+            continue;
+        }
         catalog.record(
             &found.path,
             &found.config.name,

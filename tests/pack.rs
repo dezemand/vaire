@@ -107,12 +107,19 @@ fn the_artifact_index_is_current_schema_portable_and_cacheless() {
         index.meta("last_indexed_commit").unwrap(),
         Some(common::head(c.root()))
     );
-    assert!(
-        index
-            .meta("packed_by")
-            .unwrap()
-            .is_some_and(|v| v.starts_with("vaire ")),
-        "packed_by stamps the packing vaire"
+    // The artifact records its own *format*, and nothing about the build that produced it.
+    // The digest of these bytes is what a lockfile pins and what `push` re-derives from a
+    // tag, so anything varying with the packing binary would make the same release hash
+    // differently after a `vaire upgrade` — and a re-push then report it as somebody
+    // else's version.
+    assert_eq!(
+        index.meta("artifact_format").unwrap().as_deref(),
+        Some(vaire::index::export::ARTIFACT_FORMAT)
+    );
+    assert_eq!(
+        index.meta("packed_by").unwrap(),
+        None,
+        "the packing vaire's identity is not part of the artifact"
     );
 
     let nodes = index.scalar_i64("SELECT count(*) FROM nodes", ()).unwrap() as usize;

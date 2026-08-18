@@ -175,8 +175,26 @@ pub fn diff(
 }
 
 /// The classification of a package that has never been released.
-pub fn initial() -> Classification {
-    empty(Outcome::Initial)
+///
+/// There is no baseline to diff, but there **is** something to record: everything the
+/// corpus holds is what this release publishes, so it all counts as `added`. The empty
+/// alternative is not neutral. A release record's edges are how "which release published
+/// this?" is answered ([`crate::release::record`], registry.md §3.2), and no later release
+/// re-adds an entity that was already there — so a first release that recorded nothing
+/// would leave every founding entity permanently unattributed, in the one package where
+/// that is most of them.
+///
+/// Release records themselves are excluded, on the same grounds as in [`diff`].
+pub fn initial(current: &Index, current_release_type: &str) -> Result<Classification> {
+    let entities = read_entities(current, current_release_type)?;
+    Ok(Classification {
+        outcome: Outcome::Initial,
+        // `BTreeMap` keys, so sorted — a record's edge list does not depend on scan order.
+        added: entities.into_keys().collect(),
+        changed: Vec::new(),
+        retired: Vec::new(),
+        removed: Vec::new(),
+    })
 }
 
 /// The classification of a package with nothing new since its last release — the answer

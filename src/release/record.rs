@@ -240,9 +240,13 @@ mod tests {
     }
 
     fn classification() -> Classification {
-        let mut c = crate::release::classify::initial();
-        c.added = vec!["system:gateway".to_string()];
-        c
+        Classification {
+            outcome: crate::release::classify::Outcome::Bump(Bump::Minor),
+            added: vec!["system:gateway".to_string()],
+            changed: Vec::new(),
+            retired: Vec::new(),
+            removed: Vec::new(),
+        }
     }
 
     fn rendered(summary: Option<&Summary>) -> String {

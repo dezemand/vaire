@@ -188,4 +188,120 @@ fn a_corrupt_catalog_is_recreated_rather_than_repaired() {
         catalog.sightings().expect("readable").is_empty(),
         "the recreated catalog starts empty — rescanning is what refills it"
     );
+    // Rebuilt, but not thrown away: what could not be read is kept beside the new file.
+    // A pin and a pulled-by-name record are the only note anywhere that a stored release
+    // is spoken for, so the judgement "this is garbage" must stay reversible.
+    assert!(
+        home.join("catalog.db.unreadable").is_file(),
+        "the displaced catalog is kept beside the new one"
+    );
+}
+
+/// A catalog this process cannot **open** is a fault of the machine, not of the file.
+///
+/// The distinction matters because the two look identical from the engine: both arrive as
+/// "I/O error". Deleting on the strength of that would mean a home directory with the
+/// wrong permissions — a restored backup, a `sudo` that got in somewhere — silently
+/// costing every pin and pulled-by-name record on the machine, and `vaire clean` then
+/// deleting the releases those were holding.
+#[test]
+fn an_unreachable_catalog_is_an_error_and_is_left_alone() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().to_path_buf();
+    let pkg = package_at(&home, "acme-core");
+    {
+        let catalog = Catalog::open(&home).expect("catalog");
+        catalog
+            .record(&pkg, "acme-core", "1.0.0", Origin::Registered)
+            .expect("record");
+    }
+    let db = home.join("catalog.db");
+    let before = std::fs::read(&db).expect("readable before");
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+    let opened = Catalog::open(&home);
+    // Running as root defeats the premise rather than the fix; skip instead of asserting
+    // something the environment cannot demonstrate.
+    if opened.is_ok() {
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).expect("restore");
+        eprintln!("skipped: this user can read a 000 file");
+        return;
+    }
+    let message = opened.err().expect("refused").to_string();
+    assert!(
+        message.contains("left exactly as it is"),
+        "the refusal says the file was not touched: {message}"
+    );
+
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).expect("restore");
+    assert_eq!(
+        std::fs::read(&db).expect("still there"),
+        before,
+        "an unreachable catalog is left byte-for-byte as it was"
+    );
+    assert!(
+        !home.join("catalog.db.unreadable").exists(),
+        "nothing was displaced either — there was nothing wrong with the file"
+    );
+    let catalog = Catalog::open(&home).expect("readable again once permissions allow");
+    assert_eq!(
+        catalog.sightings().expect("readable").len(),
+        1,
+        "the sighting survived the refusal"
+    );
+}
+
+/// A catalog from a newer vaire is refused, exactly as `knowledge.lock` is.
+///
+/// Refusing to *read* a format you do not know is only coherent if you also refuse to
+/// *overwrite* it. Rebuilding here would forget which workspaces and pins hold the store's
+/// releases — which is what the next `vaire clean` consults before deleting them.
+#[test]
+fn a_catalog_from_a_newer_vaire_is_refused_rather_than_rebuilt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().to_path_buf();
+    let pkg = package_at(&home, "acme-core");
+    {
+        let catalog = Catalog::open(&home).expect("catalog");
+        catalog
+            .record(&pkg, "acme-core", "1.0.0", Origin::Registered)
+            .expect("record");
+    }
+    {
+        let db = vaire::db::Db::connect(&home.join("catalog.db")).expect("raw handle");
+        db.execute("DELETE FROM schema_version", ()).expect("clear");
+        db.execute(
+            "INSERT INTO schema_version(version) VALUES(?1)",
+            [i64::from(vaire::catalog::SCHEMA_VERSION + 1)],
+        )
+        .expect("stamp a newer schema");
+    }
+
+    let message = Catalog::open(&home)
+        .err()
+        .expect("a newer catalog is refused")
+        .to_string();
+    assert!(
+        message.contains("newer vaire") && message.contains("vaire upgrade"),
+        "the refusal names the cause and the way out: {message}"
+    );
+    assert!(
+        !home.join("catalog.db.unreadable").exists(),
+        "a refusal displaces nothing"
+    );
+
+    // And the rows are still there for the vaire that can read them.
+    let db = vaire::db::Db::connect(&home.join("catalog.db")).expect("raw handle");
+    let rows: Vec<i64> = db
+        .query_rows("SELECT COUNT(*) FROM workspaces", (), |row| {
+            Ok(row.get_value(0)?.as_integer().copied().unwrap_or(0))
+        })
+        .expect("count");
+    assert_eq!(
+        rows.first().copied(),
+        Some(1),
+        "the sighting a newer vaire recorded is untouched"
+    );
 }

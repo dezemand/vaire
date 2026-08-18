@@ -4,7 +4,8 @@ description: >-
   How to interpret and fix every `vaire check` finding. Use this when `vaire check` (or `vaire
   check --strict`) fails or warns and the finding needs its sanctioned fix — duplicate_id,
   dangling_ref, undeclared_import, missing_dependency, drift, orphan, frontmatter_wikilink,
-  unknown_type, unreferenceable_id, scoped_type_not_permitted, unused_dependency, or
+  unknown_type, unreferenceable_id, malformed_diagram_ref, scoped_type_not_permitted,
+  unused_dependency, or
   dependency_version_mismatch. Covers what each kind means, the fix that respects the corpus
   rules (tombstones not deletions, loose ends not guessed IDs), and which findings block
   publication.
@@ -45,6 +46,7 @@ nodes or inventing IDs to silence a finding.
 | `drift` | a resolved inline reference whose target is missing from the frontmatter edge list | add the frontmatter edge if the relation is structural; narrative-only mentions may legitimately stay inline |
 | `orphan` | a node with no inbound or outbound edges | usually under-linking — connect it from/to its neighbours; if nothing would ever reference it, it may fail the substance bar (fold it into its parent per the **vaire-entity-authoring** skill) |
 | `unreferenceable_id` | the node's declared `id`/scope falls outside the reference grammar (`id: Jane_Doe`) — it indexes, but nothing can address it | fix the slug (lowercase, digits, hyphens) *before* anything references it; already-published IDs get a correctly-slugged successor plus a tombstone |
+| `malformed_diagram_ref` | a `vaire/` marker in a diagram source whose target is not a reference target (`vaire/Not A Reference`, `vaire/Team:Alpha`) — it was ignored, so no edge exists | fix the target in the diagram source at the reported file and line (lowercase `type:id`); a diagram has **no loose-end form**, so if the entity does not exist yet, point the marker at a real address or leave the shape out until it does |
 | `scoped_type_not_permitted` | a scoped node's type violates the manifest's whitelist/blacklist lint policy | either the scope is wrong (drop it) or the policy is out of date (a maintainer widens `scoped_types_whitelist`) |
 | `unused_dependency` | declared in `[dependencies]`, never referenced | remove the entry — unless it is deliberate (e.g. declared ahead of imminent references); then keep it, commented |
 | `dependency_version_mismatch` | a linked dependency's MAJOR is outside your `^N` | do the re-confirmation work, then raise your constraint (**vaire-versioning** skill); or you linked the wrong checkout |

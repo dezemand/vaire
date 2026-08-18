@@ -71,7 +71,7 @@ pub fn run(ctx: &Ctx, options: Options<'_>) -> Result<ReleaseOutput> {
 
     let scratch = Scratch::new(root, "release-baseline")?;
     let classification = match &baseline {
-        None => classify::initial(),
+        None => classify::initial(&index, &ctx.config.release_type)?,
         Some((tag, _)) => {
             let baseline_config = baseline_config(ctx, tag);
             build::snapshot(root, &baseline_config, tag, &scratch.db)?;

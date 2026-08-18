@@ -55,15 +55,18 @@ use crate::db::{Db, col_i64, col_opt_i64, col_opt_text, col_text};
 use crate::error::{Result, VaireError};
 
 /// The catalog's schema version, stamped in its own `schema_version` table — the same
-/// discipline the package index uses. **Bump on any schema change**; a catalog written by
-/// a newer vaire is recreated rather than misread, which costs a rescan and nothing else.
+/// discipline the package index uses. **Bump on any schema change.**
 /// v2 adds `releases.requested` — see the table below.
 ///
-/// A version [`Catalog::migrate`] knows is brought forward in place; anything else is still
-/// recreated, which stays affordable because every row is an observation something can
-/// produce again (`vaire catalog scan`, and a walk of the store). What made a migration
-/// worth writing for this one bump is that `vaire clean` reads its roots from these rows, so
-/// forgetting them stopped costing a rescan and started costing deletions.
+/// A version [`Catalog::migrate`] knows is brought forward in place. A **newer** one is
+/// refused outright: this build cannot read it, and a binary that cannot read a file has no
+/// business replacing it. Only an older shape with no migration step is rebuilt, and even
+/// then the old file is kept beside the new one ([`displace_db_files`]).
+///
+/// That caution is bought by `vaire clean`, which reads its roots from these rows. Most
+/// rows are observations something can produce again (`vaire catalog scan`, a walk of the
+/// store), but a pin and a pulled-by-name record are not — nothing else on the machine
+/// records them, so forgetting them stopped costing a rescan and started costing deletions.
 pub const SCHEMA_VERSION: u32 = 2;
 
 /// All four tables ship in v1, even where this milestone has no writer for them yet
@@ -255,12 +258,29 @@ impl Catalog {
     /// * **Locked** — another vaire process has it open. Retried on a short poll up to
     ///   [`LOCK_WAIT`], because the holder is milliseconds from finishing and an OS lock
     ///   cannot outlive its process.
-    /// * **Unreadable** — corrupt, or written by a newer vaire. Then the file is
-    ///   **recreated rather than repaired**: every row is an observation a rescan can
-    ///   produce again, which is what lets this state be a cache.
+    /// * **Unreadable** — the bytes themselves are not a database. Then the file is
+    ///   **rebuilt rather than repaired**: most rows are observations a rescan can produce
+    ///   again, which is what lets this state be a cache.
     ///
     /// Conflating the two would be catastrophic in the ordinary case: deleting the catalog
     /// because a colleague's `vaire index` happened to be holding it.
+    ///
+    /// Two things narrow that second case, because "recreate" stopped being free once
+    /// `vaire clean` started reading its roots from these rows (§4.5). A forgotten pin or
+    /// pulled-by-name record is not re-observable by any rescan, and the next sweep deletes
+    /// what it can no longer see holding anything:
+    ///
+    /// * **Unreadable must be proven, never inferred.** A failure to connect says only that
+    ///   the engine did not get a database; it does not say the bytes are at fault. The file
+    ///   is re-opened directly first, and only a file this process can itself read and write
+    ///   is treated as garbage. A catalog that is merely unreachable — permissions, a
+    ///   half-mounted home — is an error, and an error deletes nothing.
+    /// * **A newer catalog is refused, not rebuilt.** That is the lockfile's rule
+    ///   ([`crate::lockfile`]) applied to the same problem: refusing to *read* a format you
+    ///   do not know is only coherent if you also refuse to *overwrite* it.
+    ///
+    /// What is displaced is kept beside the catalog rather than removed, so a wrong guess
+    /// here costs a file to look at rather than the record of what this machine holds.
     pub fn open(home: &Path) -> Result<Catalog> {
         std::fs::create_dir_all(home)?;
         let path = home.join("catalog.db");
@@ -280,6 +300,23 @@ impl Catalog {
                     if found == Some(SCHEMA_VERSION) {
                         return Ok(catalog);
                     }
+                    // Written by a newer vaire. Refused rather than rebuilt: the rows it
+                    // holds include pins and pulled-by-name records, which no rescan can
+                    // reproduce, and which `vaire clean` deletes releases for want of. A
+                    // binary that cannot read this file has no business replacing it.
+                    if let Some(found) = found
+                        && found > SCHEMA_VERSION
+                    {
+                        return Err(VaireError::Config(format!(
+                            "the catalog at {} was written by a newer vaire (schema v{found}; \
+                             this build reads v{SCHEMA_VERSION}) and has been left untouched. \
+                             Rebuilding it here would forget which workspaces and pins hold \
+                             the releases in your store, and that is exactly what `vaire \
+                             clean` reads to decide what to keep. Run `vaire upgrade`, or \
+                             remove that file yourself if losing those records is acceptable",
+                            path.display()
+                        )));
+                    }
                     // A version this build knows how to bring forward: do that instead of
                     // recreating. See [`Catalog::migrate`] for why one bump earns the
                     // machinery the rest of this file deliberately does without.
@@ -288,14 +325,14 @@ impl Catalog {
                     {
                         return Ok(catalog);
                     }
-                    // A catalog from a different vaire. Installing over it would be the
-                    // worst outcome available: the `CREATE TABLE IF NOT EXISTS` statements
-                    // no-op against the old tables, the version row is then stamped as
-                    // current, and every later query fails against columns that were never
-                    // migrated. Recreate instead — dropping the handle first, because the
-                    // file is still locked by it.
+                    // An older shape this build has no step for. Installing over it would be
+                    // the worst outcome available: the `CREATE TABLE IF NOT EXISTS`
+                    // statements no-op against the old tables, the version row is then
+                    // stamped as current, and every later query fails against columns that
+                    // were never migrated. Start again — dropping the handle first, because
+                    // the file is still locked by it.
                     drop(catalog);
-                    remove_db_files(&path)?;
+                    displace_db_files(&path, "its schema is one this vaire cannot read")?;
                     let catalog = Catalog::connect(&path)?;
                     catalog.install_schema()?;
                     return Ok(catalog);
@@ -313,9 +350,28 @@ impl Catalog {
                         LOCK_WAIT.as_secs()
                     )));
                 }
-                Err(_) => {
-                    // Unreadable rather than busy: throw it away and start again.
-                    remove_db_files(&path)?;
+                Err(e) => {
+                    // Not busy — but "the engine did not get a database" is not yet
+                    // evidence that the bytes are at fault. Ask the filesystem directly: a
+                    // file this process can itself open for reading and writing, which the
+                    // engine still cannot use, is genuinely garbage. One it cannot open is
+                    // unreachable — a fault of the machine — and unreachable deletes
+                    // nothing.
+                    if let Err(io) = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                    {
+                        return Err(VaireError::Config(format!(
+                            "the catalog at {} could not be opened ({io}), and has been left \
+                             exactly as it is. That is a fault of this machine rather than of \
+                             the file — rebuilding it here would forget the pins and \
+                             pulled-by-name records that `vaire clean` keeps releases for. \
+                             Underlying error: {e}",
+                            path.display()
+                        )));
+                    }
+                    displace_db_files(&path, "it is not a readable database")?;
                     let catalog = Catalog::connect(&path)?;
                     catalog.install_schema()?;
                     return Ok(catalog);
@@ -824,23 +880,52 @@ fn canonical(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(path).map_err(|e| VaireError::Config(format!("{}: {e}", path.display())))
 }
 
-/// Delete a catalog file and its WAL sidecars — Turso does not checkpoint on close, so
-/// the sidecars carry committed rows and a database file alone is not the database.
-fn remove_db_files(path: &Path) -> Result<()> {
+/// The name an unreadable catalog is kept under once it has been displaced.
+pub const DISPLACED_SUFFIX: &str = ".unreadable";
+
+/// Move a catalog file and its WAL sidecars aside, so a fresh one can be installed in
+/// their place. Turso does not checkpoint on close, so the sidecars carry committed rows
+/// and a database file alone is not the database — all three move together or the new
+/// catalog would pick the old committed rows straight back up.
+///
+/// Moved rather than deleted, and the difference is the point. Most of what a catalog
+/// holds is re-observable, but pins and pulled-by-name records are not: they are the only
+/// record that a store release is spoken for, and `vaire clean` deletes what nothing
+/// claims. Keeping the file costs a few kilobytes and leaves the mistake recoverable;
+/// removing it makes this function's judgement final.
+fn displace_db_files(path: &Path, why: &str) -> Result<()> {
     for suffix in ["", "-wal", "-shm"] {
         // Built from the OS string, not from `Display`: a path that is not valid UTF-8
         // would come back lossily converted, and the `-wal` name we constructed would then
-        // name a file that does not exist. The removal would report success while the real
-        // sidecar survived — and a recreated database would pick the old committed rows
-        // straight back up, which is precisely what this function exists to prevent.
-        let mut sidecar = path.as_os_str().to_os_string();
-        sidecar.push(suffix);
-        let sidecar = PathBuf::from(sidecar);
-        match std::fs::remove_file(&sidecar) {
+        // name a file that does not exist. The move would report success while the real
+        // sidecar survived.
+        let mut from = path.as_os_str().to_os_string();
+        from.push(suffix);
+        let from = PathBuf::from(from);
+        let mut to = path.as_os_str().to_os_string();
+        to.push(DISPLACED_SUFFIX);
+        to.push(suffix);
+        let to = PathBuf::from(to);
+        match std::fs::rename(&from, &to) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+            // The move is a courtesy; installing a working catalog is the job. If the
+            // file cannot be moved aside it still has to leave, and a removal that also
+            // fails is a real error — the fresh database would otherwise inherit it.
+            Err(_) => match std::fs::remove_file(&from) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            },
         }
     }
+    eprintln!(
+        "warning: the catalog at {} was rebuilt because {why}; the previous file is kept \
+         beside it as {}{DISPLACED_SUFFIX}. `vaire catalog scan <dir>` restores the \
+         packages this machine knows — pins and pulled-by-name records are not \
+         re-observable, so check `vaire pin` and `vaire clean --dry-run` before sweeping",
+        path.display(),
+        path.display()
+    );
     Ok(())
 }

@@ -206,6 +206,59 @@ the protocol. See [`spec/registry.md`](spec/registry.md) for the whole layer.
   connections are short-lived and lazily opened. Eight processes making 400 concurrent writes
   land every one. The cost is recorded rather than hidden — catalog access is serialized
   machine-wide, so nothing may hold a handle resident.
+- **The catalog is never destroyed on a guess.** Recreating it stopped being free once
+  `vaire clean` began reading its roots from those rows: most are observations a rescan
+  reproduces, but a pin and a pulled-by-name record are not, and losing them means the next
+  sweep deletes the releases they were holding. So **unreadable must now be proven, not
+  inferred** — a failure to connect only says the engine did not get a database, so the file
+  is re-opened directly and only one this process can itself read and write is treated as
+  garbage. A catalog that is merely unreachable (permissions, a half-mounted home) is an
+  error, and an error deletes nothing. A catalog from a **newer vaire is refused rather than
+  rebuilt**, which is the lockfile's rule applied to the same problem: declining to *read* a
+  format you do not know is only coherent if you also decline to *overwrite* it. What does
+  get displaced is kept beside the catalog as `catalog.db.unreadable`, so a wrong guess costs
+  a file to look at rather than the record of what this machine holds.
+- **A first release records what it publishes.** It has no baseline to diff, which is not the
+  same as having nothing to say: everything the corpus holds is what that release published,
+  and it is now recorded as `added`. The empty version was not neutral — a record's edges are
+  how "which release published this?" is answered, and no later release re-adds an entity that
+  was already there, so every founding entity was left permanently unattributed in the one
+  release where they are all of them.
+
+  Its consequence is fixed with it: a release record may cite an entity a later release
+  removed. Such an edge is a statement about the past, not a broken reference — it cannot be
+  corrected (records are immutable) and it had no author to have mistyped it (the classifier
+  wrote it), so treating it as dangling would fail `check` forever and, since `release` gates
+  on `check`, strand the package permanently. The exemption covers the classifier's own
+  entries and nothing else: an address a `--summary` *invented* still dangles and still
+  refuses the release.
+- **An artifact no longer records who built it.** The packed index stamped the packing
+  vaire's own version, so the same tag packed to different bytes after an upgrade — and since
+  that digest is what a lockfile pins and what `push` re-derives from a tag, a re-push then
+  reported the release as somebody else's, and `pull --locked` raised its
+  registry-tampering alarm on a false positive. What ships instead is `artifact_format`, the
+  artifact layout's own version, which changes only when the layout deliberately does.
+- **A publish interrupted before its index write can be finished.** Only the first of the
+  three writes is atomic, so the window between them is real, and refusing what it leaves
+  behind made that state *permanent*: the create-only `PUT` means the identity is immutably
+  taken, so no later push could ever claim it. A push that finds its own bytes already placed
+  and unrecorded now completes the job rather than reporting a dead end. Decided by the bytes,
+  never by the gap — a version occupied by somebody else's artifact is still refused.
+- **Package names in a registry's enumeration document are validated** before they become
+  path segments (§10.2). The document is written by whoever publishes to the registry, so a
+  name in it is input like any other; every other entry point already checked, and this one
+  did not.
+- **`vaire catalog add` refuses a release in the store, and `scan` walks past one** (§4.3).
+  A store entry is a package directory, so nothing about the path refuses it — which is
+  precisely why the command has to. A sighting claims "observed at a path, and may have
+  changed since"; a sealed release is the opposite claim, and recording one would make a
+  single directory arrive under two identities, the second outranking the store as a working
+  copy somebody edits.
+- **A diagram marker that does not parse is reported** (design.md §6, new
+  `malformed_diagram_ref` warning). It had nowhere to surface: not an edge, since there is no
+  address to point at, and not a loose end, since `[[?type: descriptor]]` needs a space and a
+  diagram is deliberately not where an open question is recorded. So a typo in a diagram
+  simply evaporated, against the promise made in as many words. Index schema v7.
 
 ## [0.2.1] — 2026-08-03
 

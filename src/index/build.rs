@@ -244,11 +244,10 @@ pub fn run(
         for prepared in &mut prepared {
             for path in diagram_link_paths(&prepared.node.path, &prepared.node.prose) {
                 if let Some(content) = diagram_contents.get(&path) {
-                    prepared.node.edges.extend(external_diagram_edges(
-                        &prepared.node.id,
-                        &path,
-                        content,
-                    ));
+                    let (edges, malformed) =
+                        external_diagram_edges(&prepared.node.id, &path, content);
+                    prepared.node.edges.extend(edges);
+                    prepared.node.malformed_diagram_refs.extend(malformed);
                 }
             }
         }
@@ -534,20 +533,34 @@ fn diagram_link_paths(rel: &str, prose: &str) -> Vec<String> {
 /// Scan an external diagram file's already-fetched content for `vaire/` markers and
 /// turn resolved ones into edges from `node_id`. Per the issue, `source_file`/`line`
 /// point at the diagram file itself — a reference lives where it is written.
-fn external_diagram_edges(node_id: &NodeId, diagram_path: &str, content: &str) -> Vec<Edge> {
-    crate::corpus::diagram::scan_source(content)
-        .into_iter()
-        .filter_map(|(marker, line)| match marker {
-            crate::corpus::diagram::DiagramMarker::Resolved(target) => Some(Edge {
+/// A target that does not parse is returned alongside the edges rather than dropped: it is
+/// the only trace a typo in a diagram leaves (design.md §6, [`crate::model::node::Node`]).
+fn external_diagram_edges(
+    node_id: &NodeId,
+    diagram_path: &str,
+    content: &str,
+) -> (Vec<Edge>, Vec<crate::model::node::MalformedDiagramRef>) {
+    let mut edges = Vec::new();
+    let mut malformed = Vec::new();
+    for (marker, line) in crate::corpus::diagram::scan_source(content) {
+        match marker {
+            crate::corpus::diagram::DiagramMarker::Resolved(target) => edges.push(Edge {
                 from: node_id.clone(),
                 to: target,
                 origin: crate::model::edge::RefOrigin::Diagram,
                 source_file: diagram_path.to_string(),
                 line,
             }),
-            crate::corpus::diagram::DiagramMarker::Malformed(_) => None,
-        })
-        .collect()
+            crate::corpus::diagram::DiagramMarker::Malformed(raw) => {
+                malformed.push(crate::model::node::MalformedDiagramRef {
+                    raw,
+                    source_file: diagram_path.to_string(),
+                    line,
+                });
+            }
+        }
+    }
+    (edges, malformed)
 }
 
 /// Build an index of the corpus **as it stood at `rev`**, into `db_path`.
@@ -608,11 +621,10 @@ pub fn snapshot(root: &Path, config: &Config, rev: &str, db_path: &Path) -> Resu
         for prepared in &mut prepared {
             for path in diagram_link_paths(&prepared.node.path, &prepared.node.prose) {
                 if let Some(content) = diagram_contents.get(&path) {
-                    prepared.node.edges.extend(external_diagram_edges(
-                        &prepared.node.id,
-                        &path,
-                        content,
-                    ));
+                    let (edges, malformed) =
+                        external_diagram_edges(&prepared.node.id, &path, content);
+                    prepared.node.edges.extend(edges);
+                    prepared.node.malformed_diagram_refs.extend(malformed);
                 }
             }
         }
@@ -866,6 +878,22 @@ fn index_node(
         )?;
     }
 
+    // Markers that looked like references and were not. Recorded against the node whose
+    // diagram carries them, keyed by the file they were actually written in — for an
+    // external diagram that is the diagram file, not this node's own path.
+    for malformed in &node.malformed_diagram_refs {
+        index.execute(
+            "INSERT INTO malformed_diagram_refs(from_id, raw, source_file, line)
+             VALUES(?1, ?2, ?3, ?4)",
+            turso::params![
+                id.as_str(),
+                malformed.raw.as_str(),
+                malformed.source_file.as_str(),
+                i64::from(malformed.line),
+            ],
+        )?;
+    }
+
     for (reference, line) in &node.unresolved {
         if let Reference::Unresolved {
             type_guess,
@@ -968,6 +996,13 @@ fn delete_file(index: &Index, rel: &str) -> Result<()> {
         )?;
         index.execute(
             "DELETE FROM diagram_links WHERE from_id = ?1",
+            [id.as_str()],
+        )?;
+        // Same reasoning: a malformed marker in an external diagram is recorded under that
+        // diagram's path, so clearing by `rel` alone would leave it behind after the node
+        // stopped linking the diagram.
+        index.execute(
+            "DELETE FROM malformed_diagram_refs WHERE from_id = ?1",
             [id.as_str()],
         )?;
     }
