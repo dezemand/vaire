@@ -3,7 +3,7 @@
 The format loosely follows [Keep a Changelog](https://keepachangelog.com); this project
 uses [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [0.3.0] — 2026-08-18
 
 **0.3 is the distribution release.** A package can now be released, published, and pulled
 by somebody who has never seen your checkout — with a static file host as a full citizen of
