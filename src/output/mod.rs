@@ -1050,7 +1050,7 @@ pub struct EmbeddingCounts {
 
 // ---- pack ------------------------------------------------------------------
 
-/// `vaire pack`: the artifact that was built (registry.md §5). `artifact` is
+/// `vaire pack`: the artifact that was built (registry.md §11). `artifact` is
 /// package-root-relative like every other returned path; `sha256` is the digest a
 /// lockfile or registry pins.
 #[derive(Debug, Serialize)]

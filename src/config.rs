@@ -21,7 +21,7 @@ pub struct Config {
     pub version: String,
     pub description: Option<String>,
 
-    /// Where this package is authored — its source repository URL (registry.md §6.1).
+    /// Where this package is authored — its source repository URL (manifest.md §3).
     /// Rides the manifest into the artifact and the registry record, so a consumer can
     /// choose `vaire pull` (read-only artifact) or clone-and-PR (authoring). Optional,
     /// free-form; older CLIs ignore it (unknown manifest keys are not errors).

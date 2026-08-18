@@ -242,7 +242,7 @@ pull it follows has already succeeded and the only cost of a stale sibling is di
 
 ### 6.1 Order
 
-```
+```text
 explicit link (.vaire/packages/<name>)   per-consumer override, authoring
 → run-root self-reference
 → the catalog          a working copy, selected by the ^MAJOR constraint
@@ -367,7 +367,7 @@ itself, and it is why `vaire pin` records the package it runs in.
 Everything a static host can serve, with **per-package index documents** rather than one
 global document:
 
-```
+```text
 /.well-known/vaire-registry.json          descriptor: schema version, name, capabilities
 /v1/packages.json                         [names] — every package writes it, so it merges
 /v1/index/<name>.json                     the package's release index
@@ -397,6 +397,14 @@ file host enforce its own semantics with no server code:
 2. `PUT` the changelog document.
 3. **Compare-and-swap** the index document. A CAS failure is the push race: refresh,
    recompute, retry.
+4. **Read-merge-CAS** `/v1/packages.json`, adding this name if absent.
+
+Step 4 is the only document *every* package writes, so it is the only one where two
+publishers of **different** packages can collide — hence merge rather than overwrite, and a
+compare-and-swap rather than a blind write. It is also the only step that is
+**best-effort**: a name missing from the enumeration costs discovery, not resolution, since
+an exact-name lookup reads `/v1/index/<name>.json` directly. A publish that succeeded in
+every way that matters must not be reported as failed because this one document was busy.
 
 A yank is an index edit; the artifact never moves. That is the whole difference between a
 yank and a deletion — a yanked version is skipped for a *new* resolution and stays fetchable
@@ -456,12 +464,45 @@ outbid the one you meant to use.
 
 ### 10.2 Names are checked at the boundary
 
-A package name becomes a path segment under the user's home and a path in a URL. Names are
-restricted to lowercase ASCII with `-`, `_` and `.`, and validated where a declared name
-first becomes either of those — in the registry client *and* in the store, since the store
-is consulted before any registry is asked.
+A package name becomes a path segment under the user's home and a path in a URL, so it is
+validated where a declared name first becomes either — in the registry client *and* in the
+store, since the store is consulted before any registry is asked. The boundary rule is:
+starts with a lowercase letter or a digit, thereafter lowercase ASCII with `-`, `_` and `.`,
+at most 128 characters.
 
-## 11. Artifacts and embeddings
+**That is deliberately wider than the manifest's own grammar** (`[a-z][a-z0-9-]*`,
+manifest.md §3), and the two are answering different questions. The manifest rule governs a
+name you are *creating*; this one governs a name that arrived from a lockfile, a command
+line, or a stranger's index document, where the only question is whether it is safe to make
+a path out of. A containment check that rejected unfamiliar-but-harmless names would refuse
+to fetch packages a future manifest grammar might well allow.
+
+The looser rule costs nothing, because the manifest grammar is enforced again where it
+matters. Materialization loads the unpacked `knowledge.toml`, and an invalid `name` fails
+that load — so an artifact declaring a name this tool would refuse to author is refused on
+the way into the store, alongside the check that its declared name matches the one it was
+served under. A name that passes the boundary and fails the manifest costs a wasted
+download; it never becomes a store entry.
+
+## 11. Artifacts
+
+The unit a registry stores and a consumer pulls: `<name>-<version>.tgz`, a gzipped tar with
+one top-level directory holding the manifest, every corpus file the include/exclude globs
+select, **every file those reference**, and an exported index.
+
+**Inclusion is by reference, not by location.** A relative Markdown link or image pulls its
+target into the artifact, transitively through referenced Markdown — so no directory is
+reserved and nothing unreferenced ships. An orphan is not excluded by a rule; it simply has
+no path into the archive. A link whose target is missing from the committed tree fails the
+pack, because an artifact that is not self-contained is worse than one that was not built.
+
+Everything is read **from the committed tree**: what you commit is what you publish. That is
+what makes the artifact reproducible — sorted entries, timestamps pinned to the commit,
+zeroed ownership, untimestamped compression — and reproducibility is what lets `push` rebuild
+a release from its tag and get byte-identical output, so the checksum a lockfile pins belongs
+to the release rather than to whoever uploaded it.
+
+### 11.1 Embeddings do not travel
 
 Artifacts ship **stripped**: no vectors. Embeddings are a consumer's choice of provider and
 model (manifest.md §6), so shipping them would mean adopting a stranger's embedding space.

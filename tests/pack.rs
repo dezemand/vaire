@@ -1,6 +1,6 @@
 #![cfg(feature = "pack")]
 
-//! `vaire pack` — the artifact contract (registry.md §5): committed-tree inputs, the
+//! `vaire pack` — the artifact contract (registry.md §11): committed-tree inputs, the
 //! publication gate, attachment integrity, the exported index, and reproducibility.
 
 mod common;

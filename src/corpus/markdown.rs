@@ -131,7 +131,7 @@ pub fn mask_code_spans(line: &str) -> String {
 
 /// Extract relative link/image targets with 1-based line numbers: inline
 /// `[text](target)` / `![alt](target)` plus reference-style definitions
-/// (`[label]: target` on its own line). Shared by `vaire pack` (registry.md §5.2 —
+/// (`[label]: target` on its own line). Shared by `vaire pack` (registry.md §11 —
 /// inclusion rides on extraction) and diagram-file discovery (a fenced-off `.puml` link
 /// is found the same way a packed asset link is). Code is skipped via the fence/code-span
 /// awareness above, HTML (`<img src>`) is out of scope, and anything URL-shaped

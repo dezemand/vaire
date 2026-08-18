@@ -1,4 +1,4 @@
-//! `vaire clean` — dropping store entries nothing needs (registry.md §5).
+//! `vaire clean` — dropping store entries nothing needs (registry.md §8).
 //!
 //! The store is disposable by design: the remote keeps every published version forever (a
 //! yank is a flag, never a deletion), so anything deleted here can be fetched again. That

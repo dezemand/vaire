@@ -184,9 +184,12 @@ drift, frontmatter-`[[ ]]`, and unknown-type references (warnings).
 ## Distribution
 
 Releasing is one command, and **the version is computed rather than typed**: the classifier
-diffs the last released artifact's entity index against your tree. Entities added is a
-MINOR, sections edited is a PATCH, and anything removed or renamed is a MAJOR — which is
-gated, because a truth reversal is a semantic act and only a maintainer can own it.
+diffs the last released artifact's entity index against your tree. Addresses added is a
+MINOR; reader-visible content changed — sections, edges, aliases — is a PATCH; an address
+removed or a `superseded_by:` appeared is a MAJOR, which is gated, because a truth reversal
+is a semantic act and only a maintainer can own it. A rename needs no special case: an
+address *is* the identity, so it shows up as a removal plus an addition. A moved file or a
+touched `updated:` is bookkeeping, and never a release.
 
 Each release also writes an **entity describing itself**, carrying edges to what it added,
 changed and retired. Because the changelog is corpus, "which releases touched this entity?"

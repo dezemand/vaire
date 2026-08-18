@@ -483,7 +483,7 @@ pub fn ignored_paths(
 
 /// The committer timestamp of HEAD as a Unix epoch, or `None` without commits. `vaire
 /// pack` pins artifact entry mtimes to this, so the same commit always produces the same
-/// bytes (registry.md §5) while extracted files still carry a meaningful date.
+/// bytes (registry.md §11) while extracted files still carry a meaningful date.
 pub fn commit_epoch(repo_root: &Path) -> Result<Option<i64>> {
     commit_epoch_at(repo_root, "HEAD")
 }
