@@ -32,6 +32,27 @@ pub struct Node {
     /// Unresolved references found inline — the work list for the §8 creation pass.
     /// Each is paired with the 1-based line it was found on.
     pub unresolved: Vec<(Reference, u32)>,
+
+    /// `vaire/` markers in diagram sources whose target does not parse (design.md §6).
+    ///
+    /// Kept rather than dropped because a diagram has **no loose-end form** — `[[?type:
+    /// descriptor]]` needs a space, and a diagram is not where an open question is
+    /// recorded. So a mistyped target has nowhere else to surface: it is not an edge, and
+    /// it cannot become an unresolved reference. Without this it would be indistinguishable
+    /// from a shape nobody meant as a reference at all.
+    pub malformed_diagram_refs: Vec<MalformedDiagramRef>,
+}
+
+/// A `vaire/` marker whose target failed the reference grammar — recorded with where it
+/// was written, so `vaire check` can name the file and line to fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedDiagramRef {
+    /// The target exactly as written, after the `vaire/` marker.
+    pub raw: String,
+    /// The file the marker lives in — the node's own file for a fenced block, the diagram
+    /// file itself for an external one. A reference lives where it is written.
+    pub source_file: String,
+    pub line: u32,
 }
 
 impl Node {

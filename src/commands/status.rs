@@ -109,9 +109,10 @@ fn pending_release(
     }
     let root = ctx.repo.root();
     let Some((tag, _)) = crate::release::latest_release(root, &ctx.config.name).ok()? else {
-        // Never released: the manifest's version is what a first release would publish.
+        // Never released: the manifest's version is what a first release would publish,
+        // and everything indexed is what it would carry.
         return Some(crate::output::PendingRelease::from(
-            crate::release::classify::initial(),
+            crate::release::classify::initial(index, &ctx.config.release_type).ok()?,
             None,
         ));
     };

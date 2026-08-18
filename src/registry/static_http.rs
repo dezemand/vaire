@@ -377,6 +377,14 @@ impl Registry for StaticHttp {
 
         let mut out = Vec::new();
         for name in names {
+            // The enumeration document is written by whoever publishes to this registry,
+            // so a name here is *input*, exactly like one a user types — and it is about
+            // to become a path segment. Every other entry point validates before that
+            // happens (§10.2); this one is the same boundary and gets the same check.
+            // Skipped rather than fatal, in keeping with the rest of this loop.
+            if checked_name(&name).is_err() {
+                continue;
+            }
             // A name in the enumeration whose index document has gone is skipped rather
             // than fatal: the list is a convenience document that can lag reality, and one
             // stale entry must not make `registry list` unusable.
@@ -424,11 +432,35 @@ impl Registry for StaticHttp {
         match self.transport.put_new(&artifact_path, &bytes) {
             Ok(()) => {}
             Err(TransportError::Exists) => {
-                return Err(RegistryError::VersionExists {
-                    registry: self.name.clone(),
-                    name: name.to_string(),
-                    version,
-                });
+                // Something occupies this (name, version). Whether that is a finished
+                // release or this push's own earlier attempt is decided by the bytes, and
+                // by whether the index ever came to record them.
+                //
+                // A publish is three writes and only the first is atomic, so the window
+                // between them is real: an interrupted push leaves the artifact placed and
+                // the index silent. Refusing here would make that state permanent — the
+                // identity is immutably taken, and no later push could ever claim it —
+                // which is the opposite of the retryable, "CI can publish a tag it did not
+                // cut" contract (§3.3). So when the artifact on the host is byte-identical
+                // to the one in hand and the index does not list it, this push finishes
+                // the job it finds half-done rather than reporting a dead end.
+                let ours = match self.transport.get(&artifact_path) {
+                    Ok(Some(fetched)) => digest(&fetched.bytes) == sha256,
+                    // Cannot read it back: fall through to the plain refusal below rather
+                    // than guess about bytes nobody has seen.
+                    _ => false,
+                };
+                let recorded = matches!(
+                    self.read_index(name),
+                    Ok((Some(index), _)) if index.get(version).is_some()
+                );
+                if !ours || recorded {
+                    return Err(RegistryError::VersionExists {
+                        registry: self.name.clone(),
+                        name: name.to_string(),
+                        version,
+                    });
+                }
             }
             Err(e) => return Err(self.io(e)),
         }

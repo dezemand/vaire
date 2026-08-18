@@ -296,7 +296,7 @@ fn read_provenance(shipped: &Path) -> BTreeMap<String, String> {
         "last_indexed_commit",
         "index_source",
         "deps_snapshot",
-        "packed_by",
+        "artifact_format",
     ] {
         if let Ok(Some(value)) = index.meta(key) {
             carried.insert(key.to_string(), value);

@@ -113,12 +113,7 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
         std::path::PathBuf::from(format!("{}-shm", staging_db.display())),
         tmp.clone(),
     ]);
-    let stats = export::export_artifact_index(
-        &ctx.repo.index_db(),
-        &staging_db,
-        !no_embeddings,
-        concat!("vaire ", env!("CARGO_PKG_VERSION")),
-    )?;
+    let stats = export::export_artifact_index(&ctx.repo.index_db(), &staging_db, !no_embeddings)?;
 
     // ---- the deterministic archive -----------------------------------------------------
     // Entry order is the BTreeMap's (sorted); timestamps are the commit's; ownership is
@@ -242,12 +237,7 @@ pub fn at_rev(root: &Path, rev: &str, dest_dir: &Path) -> Result<RevArtifact> {
     }
     // Always stripped. A released artifact's checksum has to be reproducible for the
     // lockfile to mean anything, and vectors are consumer configuration (§11).
-    export::export_artifact_index(
-        &snapshot_db,
-        &staging_db,
-        false,
-        concat!("vaire ", env!("CARGO_PKG_VERSION")),
-    )?;
+    export::export_artifact_index(&snapshot_db, &staging_db, false)?;
 
     let git_paths: Vec<String> = selected.iter().cloned().collect();
     let blobs = git::show_many_at_bytes(root, rev, &git_paths)?;

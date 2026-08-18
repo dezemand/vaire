@@ -49,7 +49,11 @@ use crate::error::{Result, VaireError};
 /// recorded regardless of whether that file currently carries a `vaire/` marker (or
 /// even exists), so an edit to an external diagram file can invalidate the nodes that
 /// link to it (issue #23) without relying on there already being a `diagram` edge.
-pub const SCHEMA_VERSION: u32 = 6;
+/// v7: `malformed_diagram_refs` — `vaire/` markers whose target fails the reference
+/// grammar. A diagram has no loose-end form, so a mistyped target has nowhere else to
+/// live; recorded here it becomes a `vaire check` warning instead of evaporating
+/// (design.md §6).
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// The schema as individual statements, run in order on a fresh database. Kept inline
 /// (rather than a `.sql` asset) so the binary is self-contained. No `PRAGMA`s: WAL is
@@ -99,6 +103,18 @@ const SCHEMA_STMTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS diagram_links_from ON diagram_links(from_id)",
     "CREATE INDEX IF NOT EXISTS diagram_links_path ON diagram_links(path)",
+    // `vaire/` markers whose target does not parse as a reference. Not an edge (there is
+    // no address to point at) and not an unresolved reference (a diagram has no loose-end
+    // form), so without a table of its own a typo in a diagram would simply not exist.
+    "CREATE TABLE IF NOT EXISTS malformed_diagram_refs (
+        from_id     TEXT NOT NULL,
+        raw         TEXT NOT NULL,
+        source_file TEXT NOT NULL,
+        line        INTEGER NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS malformed_diagram_refs_from ON malformed_diagram_refs(from_id)",
+    "CREATE INDEX IF NOT EXISTS malformed_diagram_refs_source_file
+        ON malformed_diagram_refs(source_file)",
     "CREATE TABLE IF NOT EXISTS unresolved (
         record_id   TEXT NOT NULL,
         type_guess  TEXT,                   -- nullable: [[?: ...]] has no type

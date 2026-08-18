@@ -191,17 +191,26 @@ pub fn to_node(rel_path: &str, doc: Document) -> Option<Node> {
 
     // 3. `vaire/`-prefixed markers inside fenced diagram blocks (```plantuml / ```mermaid
     //    / etc.) in this node's own prose — issue #23. The marker is written where the
-    //    fence is, so the source is this node's own file. Malformed markers are dropped
-    //    here (nothing to attach them to yet); see `corpus::diagram` for the scan itself.
+    //    fence is, so the source is this node's own file. A target that does not parse is
+    //    **kept, not dropped**: a diagram has no loose-end form, so this is the only place
+    //    a typo in one can surface (design.md §6). See `corpus::diagram` for the scan.
+    let mut malformed_diagram_refs = Vec::new();
     for (marker, line) in super::diagram::scan_prose(&doc.prose, doc.prose_start_line) {
-        if let super::diagram::DiagramMarker::Resolved(target) = marker {
-            edges.push(Edge {
+        match marker {
+            super::diagram::DiagramMarker::Resolved(target) => edges.push(Edge {
                 from: id.clone(),
                 to: target,
                 origin: RefOrigin::Diagram,
                 source_file: rel_path.to_string(),
                 line,
-            });
+            }),
+            super::diagram::DiagramMarker::Malformed(raw) => {
+                malformed_diagram_refs.push(crate::model::node::MalformedDiagramRef {
+                    raw,
+                    source_file: rel_path.to_string(),
+                    line,
+                });
+            }
         }
     }
 
@@ -212,6 +221,7 @@ pub fn to_node(rel_path: &str, doc: Document) -> Option<Node> {
         prose: doc.prose,
         edges,
         unresolved,
+        malformed_diagram_refs,
     })
 }
 

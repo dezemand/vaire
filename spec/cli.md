@@ -750,7 +750,9 @@ exported `.vaire/index.db`. This is the unit a registry stores and a consumer pu
 - **The shipped index is exported, not copied**: a fresh database written in a fixed
   order. The machine-local `embed_cache` never ships; `deps_snapshot` is rewritten to
   `{name, version, constraint}` (an artifact records choices, never locations);
-  `packed_by` records the packing vaire. The FTS structure does **not** ship (its
+  `artifact_format` records the artifact layout's version — deliberately not the packing
+  vaire's, which would make the same tag pack to different bytes after an upgrade and put
+  the digest at the mercy of who built it. The FTS structure does **not** ship (its
   segments embed random identity) — it is derived state over the shipped sections,
   recreated when the artifact is materialized into a store. Section vectors ship by
   default with their `embed_provider` identity; `--no-embeddings` strips them.

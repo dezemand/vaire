@@ -70,6 +70,54 @@ fn a_first_release_publishes_the_declared_version_verbatim() {
     );
 }
 
+/// A first release records what it publishes — everything the corpus holds.
+///
+/// There is nothing to diff, but that is not the same as nothing to say. The record's
+/// edges are how "which release published this?" is answered, and no later release
+/// re-adds an entity that was already there — so an empty first record would leave every
+/// founding entity permanently unattributed, in the one release where they are all of
+/// them. Release records are still excluded, on the same grounds the diff excludes them.
+#[test]
+fn a_first_release_records_everything_it_publishes() {
+    let c = corpus();
+    let out = released_once(&c);
+
+    assert_eq!(
+        out.classification.added,
+        vec![
+            "department:platform".to_string(),
+            "person:jane-doe".to_string()
+        ],
+        "the founding entities are what 1.0.0 added"
+    );
+    assert!(
+        out.classification.changed.is_empty()
+            && out.classification.retired.is_empty()
+            && out.classification.removed.is_empty()
+    );
+
+    let record = std::fs::read_to_string(c.root().join("releases/1-0-0.md")).unwrap();
+    assert!(
+        record.contains("[[department:platform]]") && record.contains("[[person:jane-doe]]"),
+        "the record links what it published:\n{record}"
+    );
+
+    // And the point of the edges: the query the design sells actually answers.
+    let ctx = c.ctx();
+    let index = ctx.open_index().expect("index");
+    let releases: Vec<String> = index
+        .query_rows(
+            "SELECT from_id FROM edges WHERE to_id = ?1 AND to_package IS NULL",
+            ["department:platform"],
+            |r| Ok(r.get_value(0)?.as_text().cloned().unwrap_or_default()),
+        )
+        .expect("backlinks");
+    assert!(
+        releases.iter().any(|id| id == "release:1-0-0"),
+        "the founding entity is attributed to the release that published it: {releases:?}"
+    );
+}
+
 #[test]
 fn adding_an_entity_is_a_minor() {
     let c = corpus();
@@ -1002,4 +1050,63 @@ fn a_summary_outside_the_corpus_is_read_the_same_way() {
     assert_eq!(out.version, "1.1.0", "{out:?}");
     let record = std::fs::read_to_string(c.root().join("releases/1-1-0.md")).unwrap();
     assert!(record.contains("Ingestion moved in-house"), "{record}");
+}
+
+/// Deleting a released entity must not brick the package.
+///
+/// A release record links what that release published, so a later hard deletion leaves an
+/// edge pointing at an address that no longer resolves. Treated as an ordinary dangling
+/// reference it would be unfixable — records are immutable — and permanent, and because
+/// `release` gates on `check`, the package could never be released again. The record is a
+/// statement about the past, and the past is allowed to mention what is gone.
+#[test]
+fn a_record_may_cite_an_entity_a_later_release_removed() {
+    let c = corpus();
+    released_once(&c);
+    std::fs::remove_file(c.root().join("knowledge/jane.md")).unwrap();
+    c.commit();
+
+    let notes = c.root().join("notes.md");
+    std::fs::write(&notes, "`person:jane-doe` is gone.\n").unwrap();
+    let out = release(
+        &c,
+        Options {
+            major: true,
+            notes: Some(&notes),
+            yes: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(out.status, ReleaseStatus::Released, "{out:?}");
+    assert_eq!(out.version, "2.0.0");
+
+    // 1.0.0's record still links person:jane-doe, which no longer exists — and check is
+    // clean, because that edge is the classifier's own record of history.
+    let record = std::fs::read_to_string(c.root().join("releases/1-0-0.md")).unwrap();
+    assert!(record.contains("[[person:jane-doe]]"), "{record}");
+    let (report, failed) = vaire::commands::check::run(&c.ctx(), false, false, false).unwrap();
+    assert!(
+        !failed,
+        "a removed entity a record cites is history, not a broken reference: {:?}",
+        report.violations
+    );
+
+    // And the exemption is narrow: an address nothing published is still dangling, so a
+    // hand-written reference in a record is checked like any other.
+    std::fs::write(
+        c.root().join("releases/1-0-0.md"),
+        format!("{record}\nSee also [[person:nobody]].\n"),
+    )
+    .unwrap();
+    c.commit().build();
+    let (report, failed) = vaire::commands::check::run(&c.ctx(), false, false, false).unwrap();
+    assert!(
+        failed
+            && report.violations.iter().any(|v| matches!(
+                v,
+                vaire::index::check::Violation::DanglingRef { to, .. } if to == "person:nobody"
+            )),
+        "an invented address in a record is still a violation: {:?}",
+        report.violations
+    );
 }

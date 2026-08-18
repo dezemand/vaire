@@ -279,7 +279,7 @@ fn a_broken_catalog_never_fails_the_command_that_touched_it() {
 }
 
 #[test]
-fn a_catalog_from_a_different_schema_version_is_recreated_not_relabelled() {
+fn a_catalog_from_an_older_unmigratable_schema_is_recreated_not_relabelled() {
     let home = tmp();
     let work = tmp();
     let pkg = loose_package(work.path(), "acme-core");
@@ -288,15 +288,15 @@ fn a_catalog_from_a_different_schema_version_is_recreated_not_relabelled() {
         catalog
             .record(&pkg, "acme-core", "1.0.0", Origin::Registered)
             .expect("record");
-        // Simulate a catalog written by a vaire whose schema differs from ours.
+        // An older shape with no migration step to bring it forward.
         catalog
-            .set_schema_version(vaire::catalog::SCHEMA_VERSION + 1)
-            .expect("stamp a foreign version");
+            .set_schema_version(0)
+            .expect("stamp an older version");
     }
 
     // The tables are created `IF NOT EXISTS`, so installing over an older shape would
     // no-op and then stamp it as current — leaving a database whose columns no query
-    // matches, now labelled as though it did. Recreating is the only honest answer.
+    // matches, now labelled as though it did. Starting again is the only honest answer.
     let catalog = Catalog::open(home.path()).expect("open");
     assert_eq!(
         catalog.schema_version().unwrap(),
@@ -305,6 +305,12 @@ fn a_catalog_from_a_different_schema_version_is_recreated_not_relabelled() {
     assert!(
         catalog.sightings().expect("readable").is_empty(),
         "a recreated catalog starts empty; a rescan refills it"
+    );
+    // Even here nothing is destroyed: what could not be read is kept beside the new file,
+    // because a pin and a pulled-by-name record are not observations a rescan reproduces.
+    assert!(
+        home.path().join("catalog.db.unreadable").is_file(),
+        "the displaced catalog is kept"
     );
 }
 
@@ -426,4 +432,56 @@ fn a_standing_request_carries_onto_a_replacement_version() {
         .find(|entry| entry.name == "acme-other")
         .expect("recorded");
     assert!(!other.requested);
+}
+
+/// A store entry is a package directory, so nothing about the *path* refuses it — which
+/// is exactly why the command has to (registry.md §4.3).
+///
+/// A sighting claims "observed at a path, and may have changed since". A sealed release is
+/// the opposite claim, and recording one would make a single directory arrive under two
+/// identities — the second of them outranking the store in resolution, as a working copy
+/// somebody edits.
+#[test]
+fn catalog_add_refuses_a_release_in_the_store() {
+    let home = tmp();
+    let entry = home.path().join("store/acme-core/1.4.2");
+    std::fs::create_dir_all(&entry).expect("entry");
+    std::fs::write(
+        entry.join("knowledge.toml"),
+        "name = \"acme-core\"\nversion = \"1.4.2\"\n",
+    )
+    .expect("manifest");
+
+    let refused =
+        cmd::add(home.path(), Some(&entry)).expect_err("a store entry is not a workspace");
+    let message = refused.to_string();
+    assert!(
+        message.contains("release in the store"),
+        "the refusal says what it found: {message}"
+    );
+    assert!(names(home.path()).is_empty(), "and nothing was recorded");
+}
+
+/// A scan is skipped rather than refused, because pointing one at a directory that happens
+/// to contain the vaire home is an ordinary thing to do — `vaire catalog scan ~`. Failing
+/// the whole import over a store entry would be useless; importing it would be wrong.
+#[test]
+fn catalog_scan_walks_past_the_store_and_still_imports_the_rest() {
+    let home = tmp();
+    let entry = home.path().join("store/acme-core/1.4.2");
+    std::fs::create_dir_all(&entry).expect("entry");
+    std::fs::write(
+        entry.join("knowledge.toml"),
+        "name = \"acme-core\"\nversion = \"1.4.2\"\n",
+    )
+    .expect("manifest");
+    // A real working copy in the same tree, so the test proves the scan still works.
+    loose_package(home.path(), "acme-glossary");
+
+    cmd::scan_dir(home.path(), home.path()).expect("scan");
+    assert_eq!(
+        names(home.path()),
+        vec!["acme-glossary".to_string()],
+        "the working copy is imported and the sealed release is not"
+    );
 }
