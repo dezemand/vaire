@@ -1,4 +1,4 @@
-//! The adopted-changes digest (registry.v2.md amendment 20).
+//! The adopted-changes digest (registry.md §3.2).
 //!
 //! Advancing a dependency raises one question — *what changed under me?* — and the honest
 //! answer is almost never the publisher's changelog, which describes everything that

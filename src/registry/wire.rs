@@ -1,4 +1,4 @@
-//! The registry wire documents (registry.v2.md §8.1–§8.3).
+//! The registry wire documents (registry.md §9–§9.1).
 //!
 //! Four JSON shapes, each one file a dumb host can serve. They are defined here as serde
 //! types rather than assembled ad hoc, for the reason every wire format eventually learns:

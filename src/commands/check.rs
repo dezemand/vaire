@@ -51,7 +51,7 @@ pub fn run(
     Ok((report, failed))
 }
 
-/// The lints that need actual cross-package resolution (packages.md §8), composed over
+/// The lints that need actual cross-package resolution (manifest.md §5), composed over
 /// the per-index checks. Iterates only this package's edge table plus point lookups in
 /// dependency indexes — no graph traversal, so the acme-core↔acme-web dependency cycle
 /// terminates structurally.

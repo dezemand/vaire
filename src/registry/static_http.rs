@@ -1,5 +1,5 @@
 //! [`StaticHttp`] — the registry protocol over anything that stores blobs at paths
-//! (registry.v2.md §8).
+//! (registry.md §9).
 //!
 //! This is the *whole* registry implementation for 0.3: a bucket, a web root, or a plain
 //! directory, with no server code anywhere. The two behaviors a registry actually has to

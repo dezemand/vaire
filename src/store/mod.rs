@@ -1,4 +1,4 @@
-//! The store — pulled releases, unpacked and read-only (registry.v2.md §5).
+//! The store — pulled releases, unpacked and read-only (registry.md §5).
 //!
 //! `~/.vaire/store/<name>/<version>/` holds what `vaire pull` fetched: the package's own
 //! files exactly as its release shipped them, plus a `.vaire/index.db` **this machine

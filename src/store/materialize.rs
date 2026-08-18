@@ -1,4 +1,4 @@
-//! Turning a verified artifact into a sealed store entry (store.md §5, amendment 2).
+//! Turning a verified artifact into a sealed store entry (registry.md §5.2).
 //!
 //! One function, and the order of its steps is the contract:
 //!

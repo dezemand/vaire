@@ -1,4 +1,4 @@
-//! `knowledge.lock` — what a package actually resolved to (registry.v2.md §7).
+//! `knowledge.lock` — what a package actually resolved to (registry.md §7).
 //!
 //! The manifest says what this package depends on; the lockfile says what answered. It is
 //! written by `pull` and by the ensure pass, **never by hand**, and it exists for two jobs:

@@ -1,4 +1,4 @@
-//! Moving bytes to and from a registry's base URL (registry.v2.md §8.4).
+//! Moving bytes to and from a registry's base URL (registry.md §9.2).
 //!
 //! [`StaticHttp`](super::StaticHttp) knows the *protocol* — which documents exist, what
 //! they mean, what order to write them in. This module knows only how to get and put a

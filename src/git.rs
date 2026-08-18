@@ -152,7 +152,7 @@ pub fn create_tag(repo_root: &Path, name: &str, message: &str) -> Result<()> {
 }
 
 /// Delete a tag. Only ever used to unwind a release whose *own* commit could not be
-/// completed — never to retract a published one (that is yank, registry.v2.md §13).
+/// completed — never to retract a published one (that is yank, registry.md §9.2).
 pub fn delete_tag(repo_root: &Path, name: &str) -> Result<()> {
     require_safe_rev(name)?;
     let _ = run(repo_root, &["tag", "-d", "--end-of-options", name])?;
@@ -483,7 +483,7 @@ pub fn ignored_paths(
 
 /// The committer timestamp of HEAD as a Unix epoch, or `None` without commits. `vaire
 /// pack` pins artifact entry mtimes to this, so the same commit always produces the same
-/// bytes (registry.md §5) while extracted files still carry a meaningful date.
+/// bytes (registry.md §11) while extracted files still carry a meaningful date.
 pub fn commit_epoch(repo_root: &Path) -> Result<Option<i64>> {
     commit_epoch_at(repo_root, "HEAD")
 }

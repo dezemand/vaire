@@ -138,7 +138,7 @@ pub(crate) fn ensure_deps(ctx: &Ctx, embedder: &dyn Embedder) -> Result<Vec<DepI
                 in_closure.push(id.to_string());
                 // No digest, deliberately: a working copy has no artifact to checksum and
                 // can change between two runs, so recording one would be a reproducibility
-                // claim the tool cannot keep (registry.v2.md §7).
+                // claim the tool cannot keep (registry.md §7).
                 locked.push(crate::lockfile::Locked {
                     name: id.to_string(),
                     version: handle

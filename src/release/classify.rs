@@ -1,5 +1,5 @@
 //! The release classifier — deriving the version bump from what changed
-//! (registry.v2.md §3.1).
+//! (registry.md §3.1).
 //!
 //! The version stops being something a maintainer types. Because the index is a
 //! *semantic* model of the package rather than a pile of text, the diff between the last

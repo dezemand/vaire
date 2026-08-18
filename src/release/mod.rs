@@ -1,4 +1,4 @@
-//! Releasing a package — classify, record, tag (registry.v2.md §3).
+//! Releasing a package — classify, record, tag (registry.md §3).
 //!
 //! A release is a **publication event**: between releases there is no version to manage,
 //! and the number is computed from what changed rather than typed. This module holds the

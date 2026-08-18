@@ -1,4 +1,4 @@
-//! Remote registries — the client seam (registry.v2.md §8–§9).
+//! Remote registries — the client seam (registry.md §9–§10).
 //!
 //! A registry is *somewhere packages are published*. The [`Registry`] trait is the whole
 //! point of this module: it keeps the catalog, `push`, and everything above them

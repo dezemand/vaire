@@ -26,7 +26,7 @@ pub struct UserConfig {
     pub packages: PackagesConfig,
 }
 
-/// The retired `[packages]` section (registry.v2.md §14).
+/// The retired `[packages]` section (cli.md §6.7).
 ///
 /// Kept **readable only**, so the one-shot migration can find an old root, import it into
 /// the catalog, and drop the key. Nothing writes it any more: where a package lives is an

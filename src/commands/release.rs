@@ -329,7 +329,7 @@ fn rollback(ctx: &Ctx, root: &Path, written: &record::Record) {
 /// for a lot of readers", and the maintainer, not the threshold, makes the call.
 const HEAVILY_CITED: usize = 10;
 
-/// Changed entities that a lot of other entities point at (registry.v2.md §3.1).
+/// Changed entities that a lot of other entities point at (registry.md §3.1).
 ///
 /// The index knows its own backlinks, so a PATCH touching heavily-cited material can say
 /// so. **Advisory only**: an edit to an uncited entity sails through, and the human answer

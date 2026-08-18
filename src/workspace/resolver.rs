@@ -1,4 +1,4 @@
-//! Cross-package reference resolution (design.md §9, packages.md §5).
+//! Cross-package reference resolution (design.md §9, manifest.md §5).
 //!
 //! Resolution is keyed **(source package, dependency name)**: an `@pkg/type:id` in one
 //! of acme-core's files resolves through *acme-core's* `[dependencies]` and links —
@@ -29,7 +29,7 @@ pub struct Resolved {
     pub node: ResolvedNode,
 }
 
-/// Resolve `id` as a reference written by `source` (packages.md §5).
+/// Resolve `id` as a reference written by `source` (manifest.md §5).
 ///
 /// - Bare id → `source`'s own index (bare references are always local — §2 invariant).
 /// - `@alias/…` → the alias must be in **`source`'s** manifest `[dependencies]`

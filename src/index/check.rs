@@ -22,7 +22,7 @@ pub enum Violation {
         line: u32,
     },
     /// An `@pkg/…` reference whose package is not in the manifest `[dependencies]`
-    /// (packages.md §8: undeclared import). A pure table check — no cross-package
+    /// (manifest.md §5: undeclared import). A pure table check — no cross-package
     /// *resolution* is needed to know the dependency was never declared.
     UndeclaredImport {
         package: String,
@@ -146,7 +146,7 @@ pub enum Warning {
         path: String,
         reason: String,
     },
-    /// A declared dependency no reference ever uses (packages.md §8: unused). Pure
+    /// A declared dependency no reference ever uses (manifest.md §5: unused). Pure
     /// manifest + edge-table check.
     UnusedDependency { package: String },
     /// A linked dependency whose declared MAJOR falls outside this package's `^N`
@@ -279,7 +279,7 @@ impl Index {
         }
 
         // Undeclared import (violation): an `@pkg/…` edge whose package is not declared in
-        // the manifest `[dependencies]` (packages.md §8). Pure table check — the package is
+        // the manifest `[dependencies]` (manifest.md §5). Pure table check — the package is
         // recorded on the edge (M4), so this needs no cross-package resolution.
         let imports: Vec<(String, String, String, String, u32)> = self.query_rows(
             "SELECT to_package, from_id, to_id, source_file, line FROM edges

@@ -1,4 +1,4 @@
-//! Reading without a package to stand in (registry.v2.md §9).
+//! Reading without a package to stand in (cli.md §6.8).
 //!
 //! The author's model — scope is my manifest's dependency closure — serves the person
 //! writing a package. It has nothing to offer the larger audience who authors nothing and

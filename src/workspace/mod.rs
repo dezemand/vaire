@@ -132,7 +132,7 @@ pub struct Workspace {
     /// than guessing at write time. Resolution refuses the guess too — see
     /// [`Workspace::locate`].
     catalog: Option<BTreeMap<String, Vec<PathBuf>>>,
-    /// Set by `--frozen`: resolution may only answer from the store (registry.v2.md §6).
+    /// Set by `--frozen`: resolution may only answer from the store (registry.md §6).
     ///
     /// `None` is the ordinary mode, where a live link is exactly what you want — authoring
     /// wants the working copy. `Some` is the mode where "answered against acme-core 1.4.2"
@@ -186,7 +186,7 @@ impl Workspace {
     }
 
     /// The view for a **rootless** session: no package to stand in, scope taken from the
-    /// catalog instead of from a manifest (registry.v2.md §9).
+    /// catalog instead of from a manifest (cli.md §6.8).
     ///
     /// Modelled as a synthetic run-root that declares every catalogued package as a
     /// dependency, with the catalog supplying where each one lives. That is not a trick to

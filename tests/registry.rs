@@ -1,6 +1,6 @@
 //! The registry conformance suite, run against a `file://` registry.
 //!
-//! This is what the `file://` backend is *for* (registry.v2.md build order, step 3). The
+//! This is what the `file://` backend is *for* (registry.md §9). The
 //! transport is split from the protocol precisely so that a directory exercises the same
 //! `StaticHttp` a bucket will, which makes these tests the conformance suite rather than a
 //! mock's self-portrait — and it means the whole wire contract is testable with no

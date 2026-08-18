@@ -1,5 +1,5 @@
 //! The catalog — what packages this machine knows, where they live, and whether they may
-//! be edited (registry.v2.md §4).
+//! be edited (registry.md §4).
 //!
 //! One object answers those questions; scans, registrations, and received artifacts all
 //! *feed* it, and resolution consults only it. It is an **inventory and a mediator, never
@@ -176,7 +176,7 @@ impl Origin {
     }
 }
 
-/// A configured remote registry (registry.v2.md §8, §12).
+/// A configured remote registry (registry.md §9).
 ///
 /// The one row in this catalog that is **not** an observation: nobody stumbles across a
 /// registry, someone configures it. That is why there is no state machine here and no
@@ -201,7 +201,7 @@ pub struct RegistryRow {
 /// The registry kinds this client can construct.
 pub const KIND_STATIC: &str = "static";
 
-/// A materialized release in the store (registry.v2.md §5).
+/// A materialized release in the store (registry.md §5).
 ///
 /// Unlike a sighting, this is not an observation of something that might drift: a store
 /// entry is written once and sealed. The row is an index over the entry's own
@@ -430,7 +430,7 @@ impl Catalog {
     }
 
     /// Every live package as `(declared name, root)` — the scope of a rootless session
-    /// (registry.v2.md §9).
+    /// (cli.md §6.8).
     ///
     /// Paths are checked as they are read, so a checkout that has gone away is neither
     /// returned nor left claiming to be live. A name sighted at two live paths yields two
@@ -459,7 +459,7 @@ impl Catalog {
         Ok(out)
     }
 
-    // ---- registries (registry.v2.md §8) -----------------------------------------------
+    // ---- registries (registry.md §9) -----------------------------------------------
 
     /// Configure a registry, or update one already configured under this name.
     ///
@@ -516,7 +516,7 @@ impl Catalog {
             > 0)
     }
 
-    // ---- store entries (registry.v2.md §5) ---------------------------------------------
+    // ---- store entries (registry.md §5) ---------------------------------------------
 
     /// Record a materialized store entry.
     ///
@@ -575,7 +575,7 @@ impl Catalog {
     /// to be able to finish the job rather than fail on it.
     fn migrate(&self, found: u32) -> Result<bool> {
         let mut version = found;
-        // v1 → v2: `releases.requested` (registry.v2.md amendment 61). Defaulted, so every
+        // v1 → v2: `releases.requested` (registry.md §8). Defaulted, so every
         // existing row reads as "not asked for by name", which is what those pulls were.
         if version == 1 {
             if !self.has_column("releases", "requested")? {

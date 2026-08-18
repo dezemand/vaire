@@ -21,7 +21,7 @@ pub struct Config {
     pub version: String,
     pub description: Option<String>,
 
-    /// Where this package is authored — its source repository URL (registry.md §6.1).
+    /// Where this package is authored — its source repository URL (manifest.md §3).
     /// Rides the manifest into the artifact and the registry record, so a consumer can
     /// choose `vaire pull` (read-only artifact) or clone-and-PR (authoring). Optional,
     /// free-form; older CLIs ignore it (unknown manifest keys are not errors).
@@ -59,7 +59,7 @@ pub struct Config {
     pub scope_field: String,
 
     /// The type carried by release records, and the directory they are written to
-    /// (registry.v2.md §3.3). Defaults `"release"` / `"releases"`.
+    /// (registry.md §3.2). Defaults `"release"` / `"releases"`.
     ///
     /// Conventions, not reserved words: a type name is package vocabulary, and a
     /// knowledge base whose own subject matter means something by "release" renames these
@@ -225,7 +225,7 @@ fn is_semver(s: &str) -> bool {
 
 /// The only legal dependency constraint form: `^MAJOR` (a caret then a non-empty run of
 /// digits). Tighter pins or ranges are rejected — minor/patch never break references, so a
-/// pin could only create churn (packages.md §6).
+/// pin could only create churn (manifest.md §5).
 pub fn is_caret_major(s: &str) -> bool {
     matches!(s.strip_prefix('^'), Some(rest) if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
 }

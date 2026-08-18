@@ -42,8 +42,8 @@ impl fmt::Display for NodeType {
 /// the container's ID (one level today: a project, e.g.
 /// `project:atlas-2026-q2/record:standup`). A **cross-package** reference additionally
 /// carries a leading `@<package>/` qualifier (`@acme-core/department:platform`) — always
-/// explicit, so resolution never depends on the consumer's dependency set (packages.md
-/// §2). `node_type`/`slug` always describe the node itself; `scope` is the within-package
+/// explicit, so resolution never depends on the consumer's dependency set (design.md
+/// §6). `node_type`/`slug` always describe the node itself; `scope` is the within-package
 /// prefix; `package` is the owning package for a cross-package target (`None` = local).
 /// See cli.md §6.1, design.md §6.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -182,7 +182,7 @@ impl fmt::Display for NodeId {
 /// The charset is strict **on purpose**: identification is by shape alone, so a URL, an
 /// email, a time, or a date is structurally not an ID and a colon in ordinary prose is
 /// never mistaken for a reference (§6, identification vs classification). A leading
-/// `@package/` marks a cross-package target; it is *recorded* now (packages.md §3),
+/// `@package/` marks a cross-package target; it is *recorded* now (design.md §6),
 /// *resolved* across a local workspace in M5.
 impl FromStr for NodeId {
     type Err = IdParseError;
@@ -356,7 +356,7 @@ mod tests {
 
     #[test]
     fn cross_package_targets_parse_and_round_trip() {
-        // packages.md §3: `@package/` marks a cross-package target — recorded here.
+        // design.md §6: `@package/` marks a cross-package target — recorded here.
         let x: NodeId = "@acme-core/department:platform".parse().unwrap();
         assert_eq!(x.package(), Some("acme-core"));
         assert_eq!(x.scope(), None);

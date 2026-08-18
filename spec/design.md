@@ -7,6 +7,11 @@ scope: Addressable knowledge corpus and its derived index, for human and autonom
 
 # Vairë — Knowledge Corpus & Index Design Spec
 
+This is the root of the spec family: the corpus model and its derived index.
+[manifest.md](manifest.md) defines the package manifest, [cli.md](cli.md) the command
+surface, and [registry.md](registry.md) release and distribution — how a package is
+versioned, published, and located on a machine that did not author it.
+
 ## 1. Purpose
 
 A knowledge corpus authored as flat Markdown works well until it needs to refer to

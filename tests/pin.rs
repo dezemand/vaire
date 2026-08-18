@@ -1,4 +1,4 @@
-//! `pin` / `unpin`, `clean`, and the adopted-changes digest (registry.v2.md §5).
+//! `pin` / `unpin`, `clean`, and the adopted-changes digest (registry.md §6.3, §8).
 //!
 //! The store's default behavior is to move: retention replaces a version within its major
 //! line, resolution takes the highest satisfying one, and a sweep removes what nothing

@@ -1,4 +1,4 @@
-//! `vaire pull` (cli.md §4.12) — fetching a release into the store (registry.v2.md §5–§6).
+//! `vaire pull` (cli.md §4.12) — fetching a release into the store (registry.md §5–§6).
 //!
 //! The counterpart to `push`, and the only command in the tool that reaches the network to
 //! *acquire* knowledge. That it is a command at all is the point: resolution **never

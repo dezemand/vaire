@@ -1,5 +1,5 @@
 //! `vaire yank <name>@<version> [--undo]` (cli.md §4.11) — marking a published release as
-//! one nobody should newly adopt (registry.v2.md §8.4).
+//! one nobody should newly adopt (registry.md §9.2).
 //!
 //! A yank is **an edit to the index document, and nothing else**. The artifact stays exactly
 //! where it was, byte for byte, which is the entire difference between this and a deletion:

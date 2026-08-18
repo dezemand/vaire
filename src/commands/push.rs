@@ -1,5 +1,5 @@
 //! `vaire push` (cli.md §4.10) — uploading released versions to a registry
-//! (registry.v2.md §3.4).
+//! (registry.md §3.3).
 //!
 //! **Split from `release` on purpose**, and the split is the interesting part. Cutting a
 //! version is a git act: it computes a bump, writes a record, commits, and tags. Uploading

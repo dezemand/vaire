@@ -1,17 +1,17 @@
 //! `vaire pack [--no-embeddings]` — build this package's distributable artifact
-//! (registry.md §5). Maintain command — not on the MCP surface.
+//! (registry.md §11). Maintain command — not on the MCP surface.
 //!
 //! The artifact is `<name>-<version>.tgz` in `.vaire/dist/`: a gzipped tar with a single
 //! top-level directory holding the manifest, every corpus file the manifest's
 //! include/exclude selects, **every file those reference** by relative link or image
-//! (transitively through referenced Markdown — registry.md §5.2), and a freshly
+//! (transitively through referenced Markdown — registry.md §11), and a freshly
 //! exported `.vaire/index.db` (the machine-readable manifest — registry.md §5.1).
 //! Everything is read **from the committed tree**: what you commit is what you publish,
 //! and the artifact is reproducible because its inputs are a commit, not a mood.
 //!
 //! Pack is also a publication gate: it refuses to build when `vaire check` reports
 //! violations, and it fails on a relative Markdown link whose target is missing from
-//! the committed tree (registry.md §5.2). Links to targets the author chose to keep out
+//! the committed tree (registry.md §11). Links to targets the author chose to keep out
 //! — exclude-glob-vetoed or gitignored — and a dirty working tree are warnings, not
 //! stops. Orphans cannot exist: an unreferenced file simply does not ship.
 

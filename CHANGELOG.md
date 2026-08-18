@@ -5,368 +5,207 @@ uses [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+**0.3 is the distribution release.** A package can now be released, published, and pulled
+by somebody who has never seen your checkout — with a static file host as a full citizen of
+the protocol. See [`spec/registry.md`](spec/registry.md) for the whole layer.
+
 ### Added
-- **`vaire release --summary <file>`** (cli.md §4.7) — narration in the release record,
-  written by somebody other than the classifier. The record has always been the changelog,
-  and it has always been *computed*: the version, the bump, and edges to what was added,
-  changed and retired. What a diff cannot write is what any of it meant. `--summary` takes
-  a Markdown file and lands it as a `## Summary` section, so the prose ships inside the
-  release it describes.
+- **`vaire release`** (cli.md §4.7) — cut a release in one command: classify, compute the
+  version, write the manifest and a release record, commit, tag. **The version is computed,
+  not typed.** The classifier diffs the last release's entity index — rebuilt from its tag,
+  so no old artifact is retained — against the tree: addresses added → MINOR, content
+  changed → PATCH, addresses removed or `superseded_by:` appeared → MAJOR. "Content" is what
+  a reader notices; a moved file or a touched `updated:` is never a release.
 
-  **Vairë does not call a model, and gains no way to.** The seam is a file — no prompt, no
-  API client, no provider setting — so the producer is somebody else's business and a
-  package stays releasable by a maintainer who has no model at all. Opt-in in the only
-  sense that matters: pass nothing, and nothing changed.
+  MAJOR is never automatic: it exits `7` (its own code, so a pipeline reports *pending a
+  maintainer* rather than *broken*) and requires `--major` with `--notes <file>`. A PATCH
+  touching an entity with ten or more inbound references asks before proceeding; `--yes`
+  and the absence of a terminal both skip the question. Gated on a clean tree, the mainline
+  (`--allow-branch` escapes), and `vaire check` free of violations. It never runs
+  `git push`.
+- **Release records** — the changelog, written as corpus. Each release writes
+  `releases/<version>.md`: an entity carrying the date, the bump, and **edges** to what was
+  added, changed and retired. So "which releases touched this entity?" is `vaire backlinks
+  <id> --type release`, and a consumer's adopted-changes digest is an intersection rather
+  than a diff. Removed addresses are recorded as text — a deleted entity has no address left
+  to point at. `release_type`/`release_dir` rename them for a package whose vocabulary
+  already means something by the word.
+- **`vaire status` reports the pending release** — `release: would be minor — 3 new, 12
+  changed` — so a release is never a surprise. Silent while the index is behind HEAD, where
+  the answer would describe neither tree.
+- **`vaire pack` ships in the binary** (cli.md §4.6), on by default rather than behind a
+  feature: the rest of the line is built against the artifact contract. Builds
+  `.vaire/dist/<name>-<version>.tgz` from the committed tree — manifest, the files the globs
+  select, **every file those reference** (transitively, so nothing unreferenced ships), and a
+  freshly exported index. Reproducible: sorted entries, commit-pinned timestamps, zeroed
+  ownership, untimestamped gzip. The feature name survives so a dependent that only reads a
+  corpus can compile the artifact layer out.
+- **The catalog** (cli.md §4.8) — machine-local state recording what packages this machine
+  knows and where they live, in the new **vaire home** (`~/.vaire`, `VAIRE_HOME` overrides).
+  `vaire catalog list | add [path] | scan <dir> | rm <path|name> | rm --missing`.
 
-  What makes outside prose safe to admit is that **the record's claims about itself stay
-  computed**. A summary may retitle the record (`name`), extend `aliases` (union — the
-  version spellings can never be displaced), and add keys of its own; naming `id`, `type`,
-  `date`, `bump`, `added`, `changed`, `retired` or `generated_summary` is refused *by
-  name*, because an author who set `added:` believes they described the release. And
-  `check` runs again with the record on disk before the commit: the tree is clean by gate,
-  so any violation is the summary's doing, an address it imagined refuses the release, and
-  the record is rolled back to a tree byte-identical to where it started. `generated_summary:
-  true` marks the result, so a reader can tell narration that came from outside the
-  classifier from prose the tool derived.
+  A row is a **sighting** — "a package declaring *N* at *V* was seen at *P*" — keyed by
+  canonicalized path, so two live paths declaring one name are two observations rather than a
+  write-time conflict. **Two states, no clocks**: `live` or `missing`, re-checked on read,
+  never expired on a timer and never removed behind your back. **Registration is ambient** —
+  `index`, `check` and `add` record the package they ran in plus every working copy in its
+  closure — so ordinary use fills it and no workflow gains a ceremony step. `--no-register`
+  skips, and skipping never forgets.
+- **Remote registries** (cli.md §4.9–§4.11) — `vaire registry add | list | show | rm`,
+  `vaire push`, `vaire yank`. The first implementation needs **no server**: a registry is a
+  few JSON documents and some tarballs under one base URL, so a bucket, a web root, or a
+  plain directory over `file://` are all first-class. `vaire registry add lab ./registry` is
+  the entire setup.
 
-  `--dry-run --summary` rehearses all of it, write-and-check included, and leaves nothing
-  behind. Paired with `--dry-run --json` that is the whole CI shape: one job emits the
-  plan, a second turns it into prose in an image carrying whatever wrote it, a third cuts
-  the release — so an agent harness never has to live in the image that ships `vaire`. The
-  **vaire-release-summary** skill is the writing half of that contract.
-- **`vaire pin` / `vaire unpin`, and `vaire clean`** (cli.md §4.14–§4.15). The store's
-  default behavior is to move: retention replaces 1.4.1 with 1.4.2, resolution takes the
-  highest satisfying version, and neither asks — all of which is safe because within-major
-  substitutability is the protocol's own promise. These are the commands for when that
-  promise turns out not to hold, and for taking back the disk when it does.
+  The two guarantees a registry must make are **properties of a write, not policy checks**: a
+  create-only `PUT` makes a published `(name, version)` immutable because storage itself
+  refuses the second one, and a compare-and-swap on the index document turns two simultaneous
+  publishers into a retry instead of a lost release. Anything beyond those is a declared
+  capability, so a static host says `search: none` and the client degrades rather than fails.
 
-  ```bash
-  vaire pin acme-glossary@1.4.1     # hold this exact version
-  vaire unpin acme-glossary         # let it move again
-  vaire clean --dry-run             # what would go
-  vaire clean                       # take it
-  ```
+  **`push` publishes tags, not the working tree.** It rebuilds each artifact from that tag's
+  own tree, so `.vaire/dist/` is a cache and a container that cloned thirty seconds ago can
+  publish; because `pack` is deterministic, the checksum a lockfile pins belongs to the
+  release rather than to whoever uploaded it. **`yank` is an index edit** — the artifact never
+  moves, so anything already pinned to it keeps resolving; only a *new* resolution changes.
+  Access (`--access open | restricted | unlisted`) is per (package, registry) and, on a static
+  host, **advisory** — it says so at the moment you set one.
+- **The store, and `vaire pull`** (cli.md §4.12) — a pulled release is verified, unpacked,
+  re-indexed *here*, and sealed read-only under `~/.vaire/store/`, where it becomes a package
+  directory like any other.
 
-  A pin does three things: resolution takes it over anything newer, retention keeps it, and
-  `clean` treats it as a root. It is recorded in `knowledge.lock`, so it travels with the
-  package — a colleague cloning the repo reproduces the hold — and flagged in the catalog,
-  where retention and `clean` can see it without a consumer in hand.
+  **The shipped index is a claim, never truth**: materialization throws it away and rebuilds
+  from the shipped Markdown, because adopting it would make your answers depend on a
+  stranger's build. Provenance is carried — which commit these files are — since that is a
+  fact about the release rather than a claim about the graph. **Nothing is fetched silently**:
+  resolution reports the `vaire pull` that would satisfy a missing dependency and stops.
+  Resolution order is explicit link → run root → catalog → store, so a working copy outranks a
+  pulled release of the same name. Retention is one slot per major line.
+- **`knowledge.lock`, `pull --locked`, and `--frozen`** (cli.md §4.13) — reproducibility. The
+  lockfile is written by `pull` and by indexing, never by hand, and records the whole closure.
+  **Only one kind of entry carries a checksum**: a store entry can be fetched again anywhere;
+  a working copy records its version and nothing else, because a checkout has no artifact to
+  checksum and can change between two runs.
 
-  Three rules are worth knowing because each one is a decision. **A pin selects a release;
-  it does not change which world answers** — an explicit link and a working copy still
-  outrank the store, because a committed pin that displaced checkouts would reach every
-  colleague's authoring setup. **A refresh never moves a pin**: carrying the flag onto a
-  newly resolved version would keep the hold in name while releasing what it held, so a
-  pull that fetched something newer says the pin is why nothing changed. **You can only pin
-  what you have**, since the entry carries the artifact's digest.
+  `pull --locked` verifies against the digest the lockfile **recorded**, not the one the
+  registry currently publishes — the only way to notice a registry serving different bytes
+  under a version it already published. `--frozen` answers only from the store and refuses a
+  working copy, naming the `vaire pull` that would fix it; it never consults the catalog,
+  which is the index of working copies and precisely what the mode refuses. The expected
+  posture for agents and CI.
+- **`vaire pin` / `vaire unpin`, and `vaire clean`** (cli.md §4.14–§4.15). A pin holds one
+  exact version: resolution takes it over anything newer, retention keeps it, and `clean`
+  roots it. It lives in `knowledge.lock`, so it travels with the package.
+
+  **A pin selects a release, not a world** — an explicit link and a working copy still outrank
+  the store, because a committed pin that displaced checkouts would reach every colleague's
+  setup. **A refresh never moves a pin**, and a pull that fetched something newer says the pin
+  is why nothing changed. **You can only pin what you have**, since the entry carries the
+  artifact's digest.
 
   `clean` keeps what a registered workspace's lockfile names, what any workspace pins, and
-  what was pulled by name from outside a package — that last one because a rootless
-  reader's corpus is recorded by no lockfile anywhere, and a sweep that missed it would
-  delete their whole library. `vaire clean <name>` is how to say you are done with one.
-  Everything removed is still published, and one `vaire pull` brings it back.
-- **The adopted-changes digest.** Advancing a dependency now reports what changed *that
+  what was pulled by name from outside a package — that last one because a reader with no
+  package of their own is recorded by no lockfile anywhere. `vaire clean <name>` says you are
+  done with one. Everything removed is still published.
+- **The adopted-changes digest.** A pull that replaces a version reports what changed *that
   this package cites*, rather than the publisher's changelog:
 
   ```text
-  ✓ pulled 1 package
-    acme-glossary  1.1.0      from 'lab'
-        replaced 1.0.0
-        1 of the 4 entities touched by 1.0.0→1.1.0 cited here:
-          changed  term:torque-vectoring
+  acme-glossary  1.1.0      from 'lab'
+      replaced 1.0.0
+      1 of the 4 entities touched by 1.0.0→1.1.0 cited here:
+        changed  term:torque-vectoring
   ```
 
-  Both halves were already in the graph — a release record carries edges to the entities it
-  touched, and your index carries edges to what you reference — so this is their
-  intersection, which is short by construction and specific to you. Nothing about it can
-  fail a pull; a digest that cannot be computed is a missing courtesy, not a failed
-  acquisition.
-
-- **Reading without a package to stand in** (cli.md §6.8). Every read command has assumed
-  an author: scope is the package you are in, plus what its manifest declares. That serves
-  the person writing a package and offers nothing to the larger audience who authors
-  nothing and just wants to ask questions across everything they have. Run a read command
-  where there is no `knowledge.toml` above you and the scope becomes the **catalog** —
-  every live package this machine knows:
+  Both halves were already in the graph, so this is their intersection — short by
+  construction and specific to you. Nothing about it can fail a pull.
+- **Reading without a package to stand in** (cli.md §6.8). Run a read command where there is
+  no `knowledge.toml` above you and the scope becomes the **catalog** — every live package
+  this machine knows:
 
   ```bash
-  cd ~
-  vaire search "incident review"            # every catalogued package
-  vaire resolve @acme-core/team:platform    # by name, declared by nobody
-  vaire mcp                                 # the same scope, served to an agent
+  vaire catalog scan ~/Documents/Knowledge
+  vaire mcp                                 # every package, served to an agent
   ```
 
-  `vaire mcp` outside a package is the point of the whole thing: an agent gets pointed at
-  the machine rather than at one checkout, with no manifest and no install. From *inside* a
-  package, `search --all` / `suggest --all` reach past the closure the same way — useful
-  when the answer lives somewhere you never declared a dependency on.
+  `vaire mcp` outside a package is the point: an agent gets pointed at the machine rather than
+  at one checkout, with no manifest and no install. From inside a package, `search --all` /
+  `suggest --all` reach past the closure the same way.
 
-  Everything is package-qualified, because with no package you are standing in, nothing is
-  local. A **bare id is refused rather than reported missing**: `type:id` means "in this
-  package", and there is no this package, so the error says that and shows the qualified
-  form instead of implying the node does not exist.
+  **Author mode never reaches the catalog.** A declared-but-unlinked dependency, or a
+  reference to an undeclared package, fails exactly as before even when the catalog could
+  answer — a manifest that silently resolved from ambient machine state would stop meaning
+  anything to the next person who clones it. Reading is rescued only where there is no
+  manifest to betray. A bare id is refused rather than reported missing, since `type:id` means
+  "in this package" and there is no this package.
+- **Diagram references become graph edges** (design.md §6, cli.md §3.2, issue #23). A link
+  target inside a diagram source is a reference like any other, with `ref_type: diagram`.
+  Vairë does not parse PlantUML, Mermaid or draw.io: the target carries a `vaire/` marker, so
+  one scan works identically across every diagram language that can hold a link.
 
-  **A package's own references still mean what its author meant.** Following a reference
-  out of a catalogued package uses *that* package's `[dependencies]` and its own links
-  first; the catalog is consulted only where an ordinary session would have run out of
-  places to look. And the fallback runs one way only: **author mode never reaches the
-  catalog.** A declared-but-unlinked dependency, or a reference to an undeclared package,
-  fails exactly as before even when the catalog could answer — a manifest that silently
-  resolved from ambient machine state would stop meaning anything to the next person who
-  clones it, and `vaire check` would be a different question on every machine. Reading is
-  rescued only where there is no manifest to betray.
+  Both shapes are covered — a fenced ```` ```plantuml ````/```` ```mermaid ```` block in a
+  node's own file, and an external `.puml`/`.mmd`/`.drawio` **that the node's prose points
+  at**, which is what makes a diagram belong to a node. A diagram edge reports the line
+  *inside the diagram source*, and `check`'s drift rule ignores it: a diagram edge is not
+  fixable the way a prose one is.
+- **`vaire release --summary <file>`** (cli.md §4.7) — narration in the release record,
+  written by somebody other than the classifier. **Vairë does not call a model, and gains no
+  way to**: the seam is a file, so the producer is somebody else's business and a package
+  stays releasable by a maintainer who has no model at all.
 
-  A catalogued package whose index cannot be read is skipped and named, never fatal.
-  Maintain commands are untouched: without a package they still report *no corpus found*,
-  because there is nothing there for them to maintain.
+  What makes outside prose safe to admit is that the record's claims about itself stay
+  computed. A summary may retitle the record and extend aliases, but naming `id`, `type`,
+  `date`, `bump`, `added`, `changed` or `retired` is refused *by name*. `check` runs again
+  with the record on disk: any violation is the summary's doing, and the record is rolled back
+  to a byte-identical tree. `generated_summary: true` marks the result.
+- **`vaire release --push`** stops being reserved: it runs the upload once the tag exists.
+- **`repository` manifest field** (manifest.md §3) — where the package is authored, for the
+  registry's pull-to-read vs clone-to-author choice.
 
 ### Changed
-- **`vaire release --dry-run` reports the notes a MAJOR owes rather than refusing over
-  them** (`notes_required` in JSON). A dry run writes nothing, so "would cut 2.0.0, and it
-  will need notes" is a faithful prediction rather than a loosened gate — and it was
-  previously impossible to obtain the plan for a major in order to *write* those notes,
-  since the rehearsal demanded them first. The real run still refuses.
-- **Dependency resolution goes through the catalog, and the `^MAJOR` constraint now
-  *selects*** (cli.md §6.6). A declared dependency with no `.vaire/packages/<name>` entry
-  is satisfied by asking the catalog for a package declaring that name **in the
-  constrained major line** — where v0.2.0 walked a configured root and matched on the name
-  alone. Two clones of one package at 1.4 and 2.0 therefore stop being an ambiguity: a
-  consumer declaring `^1` has already said which it wants, and the `^2` consumer beside it
-  gets the other. Versions compare as parsed triples (`1.10.0` above `1.9.0`, and `^0` is
-  a major line like any other) — the string-prefix comparisons in `deps` and `check` are
-  gone with it.
+- **Dependency resolution goes through the catalog, and `^MAJOR` now *selects***
+  (cli.md §6.6). A declared dependency with no link is satisfied by asking the catalog for a
+  package declaring that name **in the constrained major line**, where v0.2.0 walked a
+  configured root and matched on the name alone. Two clones at 1.4 and 2.0 therefore stop
+  being an ambiguity. Versions compare as parsed triples, so `1.10.0` is above `1.9.0`.
 
-  **The catalog is an index, never truth**, so a candidate's `knowledge.toml` is re-read
-  before anything is linked and what it says is written back: a version bumped by a release
-  is adopted on the spot, a renamed package stops matching its old name (its row follows it
-  rather than being deleted), and a path that no longer answers is marked `missing`.
-  Nothing needs a rescan to heal.
+  **The catalog is an index, never truth**: a candidate's manifest is re-read before anything
+  is linked, and what it says is written back — a version bumped by a release is adopted, a
+  renamed package's row follows it, a vanished path is marked missing. Nothing needs a rescan
+  to heal.
 
-  **What survives the constraint is refused, not tiebroken.** Two live paths that both
-  satisfy are a fork beside its original, or two worktrees — and a fork routinely outruns
-  what it forked from, so picking the higher version would be a guess dressed as
-  arithmetic. Both paths are named. One tier applies first: a path explicitly
-  `vaire catalog add`-ed outranks one a scan or a passing command noticed, which settles an
-  ambiguity without editing any consumer's links.
-
-  **Constraints across a closure are intersected.** One directory is linked per name, so
-  when several members constrain one dependency they must agree on the major. Disjoint
-  majors are reported naming both declarers — and any link the pass had already made for
-  that name is withdrawn, since leaving an answer wired up that one declarer cannot use
-  would be worse than the version-blind lint this replaces. Conflicts are judged after the
-  links settle, over the whole closure: judged mid-walk, one would be invisible whenever
-  the first constraint seen happened to resolve, making the outcome depend on link order.
-  An explicit `--link` is the escape hatch and is never withdrawn.
-
-  Everything downstream is untouched: `.vaire/packages/<name>` still points at a directory,
-  the resolver and every read command neither know nor care who put it there, and reads
-  still never materialize a link (nor take the catalog's lock).
+  **What survives the constraint is refused, not tiebroken** — two satisfying paths are a fork
+  beside its original, and a fork routinely outruns what it forked from. Both are named. An
+  explicitly `catalog add`-ed path outranks one something noticed in passing. **Constraints
+  across a closure are intersected**, since one directory is linked per name; disjoint majors
+  are reported naming both declarers, and any link the pass made for that name is withdrawn.
+- **`vaire release --dry-run` reports the notes a MAJOR owes rather than refusing over them**
+  (`notes_required` in JSON). A dry run writes nothing, so this is a faithful prediction
+  rather than a loosened gate — and obtaining the plan in order to *write* those notes was
+  previously impossible. The real run still refuses.
+- **The storage facade moved to `vaire::db`**, shared by the package index and the catalog, so
+  there is one async→sync bridge rather than two copies of its traps.
 
 ### Removed
-- **`local-packages` is retired** — the `vaire configure local-packages` command, the
-  setting, and the discovery walk on the resolution path (cli.md §6.7). The walk survives
-  only inside `vaire catalog scan`, demoted from resolution machinery to an import tool.
-  The first maintain command after upgrading **migrates itself**: whatever the old root
-  held is imported into the catalog once, the `[packages] local` key is dropped, and the
-  run says so. Dependencies keep resolving across the upgrade, and nothing walks anything
-  again. The walk conflated "on my disk somewhere" with "I author this"; ambient
-  registration and the catalog do not.
-
-### Added
-- **`knowledge.lock`, `pull --locked`, and `--frozen`** (cli.md §4.13, registry.v2.md
-  §6–§7) — reproducibility. The store made an answer obtainable; these make it checkable.
-
-  The lockfile is written by `pull` and by indexing, never by hand, and records the whole
-  closure. Each entry says how it resolved, and **only one kind carries a checksum**: a
-  store entry records its digest and can be fetched again anywhere; a working copy records
-  its version and nothing else, because a checkout has no artifact to checksum and can
-  change between two runs. That split is the two-worlds gap written down rather than papered
-  over — read a lockfile and you can see, per dependency, whether the answer can be obtained
-  again.
-
-  `pull --locked` verifies against the digest the lockfile **recorded**, not the one the
-  registry currently publishes. `fetch` already checks the latter, so the lockfile is the
-  only thing that can notice a registry serving different bytes under a version it already
-  published. An entry with no checksum is refused rather than skipped: passing over one
-  would let a pipeline report a reproduction it did not perform.
-
-  `--frozen` answers only from the store and refuses a working copy, naming the `vaire pull`
-  that would fix it. It does not consult the catalog at all — that is the index of working
-  copies, which is precisely what this mode refuses. The expected posture for agents and CI;
-  ordinary authoring wants the opposite, because a checkout is what you are editing.
-- **The store, and `vaire pull`** (cli.md §4.12, registry.v2.md §5–§6) — the consuming half
-  of the registry line. A pulled release is verified, unpacked, re-indexed *here*, and
-  sealed read-only at `~/.vaire/store/<name>/<version>/`, where it becomes a package
-  directory like any other: the resolver links to one exactly as it links to a checkout, and
-  nothing above resolution knows the difference.
-
-  **The shipped index is a claim, never truth.** An artifact carries a prebuilt index and
-  materialization throws it away, rebuilding from the shipped Markdown. Adopting it would
-  make every consumer's answers depend on a stranger's build, and a corpus whose index
-  disagrees with its own text would have no way to be caught. Provenance *is* carried —
-  which commit these files are — because that is a fact about the release rather than a
-  claim about the graph.
-
-  **Nothing is fetched silently.** Resolution reports the `vaire pull` that would satisfy a
-  missing dependency and then stops; acquiring a package stays a decision somebody makes.
-  Resolution order is explicit link → run root → catalog → store, so a working copy outranks
-  a pulled release of the same name: a checkout is what you are authoring, and answering
-  from a published copy of it would quietly answer against yesterday.
-
-  Unpacking is the one place this tool treats input as hostile — entries that are absolute,
-  climb out with `..`, or are links of any kind are refused, only `index.db` may appear under
-  `.vaire/`, and an artifact whose manifest declares a different name than it was served
-  under is refused outright. Retention is one slot per major line: pulling 1.4.2 removes
-  1.4.1 and says so, which is safe because within-major substitutability is the protocol's
-  own promise and free because the registry keeps every version forever.
-- **Remote registries** (cli.md §4.9–§4.11, registry.v2.md §8–§9) — `vaire registry add |
-  list | show | rm`, `vaire push`, `vaire yank`, and the `Registry` seam behind them. The
-  first implementation needs **no server**: a registry is a handful of JSON documents and
-  some tarballs under one base URL, so a bucket, a web root, or a plain directory over
-  `file://` are all first-class. `vaire registry add lab ./registry` is the entire setup.
-
-  **The two guarantees a registry has to make are properties of a write, not of a policy
-  check.** A create-only `PUT` makes a published `(name, version)` immutable because storage
-  itself refuses the second one; a compare-and-swap on the index document turns two
-  simultaneous publishers into a retry instead of a lost release. Over `file://` the first is
-  exact (`O_CREAT|O_EXCL`) and the second is compare-then-rename with a documented window —
-  a lock file would need stale-lock detection, and that heuristic breaks locks it should not.
-  Server *behaviors* beyond those are capabilities the registry declares, never assumptions,
-  so a static host says `search: none` and the client degrades rather than failing.
-
-  **`push` publishes tags, not the working tree.** It enumerates this package's release tags
-  and rebuilds each artifact from that tag's own tree, which makes `.vaire/dist/` a cache and
-  never a requirement — a container that cloned the repository thirty seconds ago can
-  publish. That works because `pack` is deterministic: the artifact rebuilt from `v1.4.2` is
-  byte-for-byte the one that tag produced, so the checksum a lockfile will pin belongs to the
-  release rather than to whoever uploaded it. It needs no embedder and re-runs no `check`
-  (the tag was already gated when it was cut), so CI publishes with no embedding
-  configuration at all. Re-running it is a clean no-op, and one bad tag is reported and
-  stepped over rather than stopping the rest. A version storage refuses is checked rather
-  than assumed: identical bytes are idempotence, different bytes are a failure naming both
-  digests, since a published version is immutable and pushing again cannot fix it.
-
-  **`yank` is an index edit and nothing else.** The artifact never moves, so a lockfile
-  pinning that version keeps resolving; what changes is only what a *new* resolution would
-  choose. `--undo` exists because the reason for a yank is usually a mistake about a release
-  rather than a fact about it.
-
-  Access (`--access open | restricted | unlisted`) is per (package, registry) and sticky.
-  On a static host it is **advisory** and says so at the moment it is set: restricted-listed
-  is a routing workflow — its `hint` is carried verbatim into the refusal — not a wall.
-- **`vaire release --push`** stops being reserved: it runs the upload once the tag exists.
-  A convenience over the release/push split, not a merge of it — the tag is already cut, so
-  a failed upload is one `vaire push` away.
-- **The catalog** (cli.md §4.8) — machine-local state recording what packages this machine
-  knows and where they live, in the new **vaire home** (`~/.vaire/catalog.db`,
-  `VAIRE_HOME` overrides). `vaire catalog list | add [path] | scan <dir> | rm <path|name>
-  | rm --missing`. Package-level metadata only: every per-package index still lives beside
-  its package, and nothing here holds entity content.
-
-  A row is a **sighting** — "a package declaring *N* at *V* was seen at *P*" — keyed by
-  canonicalized path, with the name as an attribute, so two live paths declaring one name
-  are two observations rather than a conflict to resolve at write time. Rows are
-  observations throughout: a corrupt catalog is recreated rather than repaired, because
-  losing it costs a rescan and nothing else.
-
-  **Two states, no clocks**: `live` or `missing`. Nothing expires on a timer and nothing is
-  removed behind your back; `list` re-checks each path as it goes, so a vanished checkout
-  shows `missing` and a returning one flips back to `live`. Sweeping is explicit
-  (`rm --missing`).
-
-  **Registration is ambient** — `index`, `check`, and `add` record the package they ran in
-  plus every working copy in its dependency closure, so ordinary use fills the catalog and
-  no workflow gains a ceremony step. `--no-register` skips on all three; skipping never
-  forgets, and an ambient touch never demotes a hand-registered row. A catalog that cannot
-  be written warns and is otherwise ignored.
-
-  Dependency resolution consults it (see *Changed*), and it is the enumerable scope the
-  rootless reader will fan out over.
-- **`vaire catalog scan <dir>`** — bulk import, and the one place the old discovery walk
-  now lives (same depth and skip rules), demoted from resolution machinery to a one-shot
-  import tool.
-- **`vaire release`** (cli.md §4.7) — cut a release in one command: classify what changed
-  since the last one, compute the version, write the manifest and a release record,
-  commit, tag. **The version is computed, not typed.** The classifier diffs the entity
-  index of the last release — rebuilt from that release's tag, so no old artifact needs
-  retaining — against the current tree: addresses added → MINOR, content changed →
-  PATCH, addresses removed or a `superseded_by:` appeared → MAJOR. "Content" is what a
-  reader notices (sections, edges, aliases); a moved file or a touched `updated:` is
-  bookkeeping and never a release. A rename needs no special case — an address *is* the
-  identity, so it presents as a removal plus an addition. A package with no prior tag
-  publishes the version its manifest already declares.
-
-  **MAJOR is never automatic**: it exits `7` — its own code, so an automated pipeline
-  reports *pending a maintainer* rather than *broken* — and requires `--major` together
-  with `--notes <file>`, the invalidated assumptions dependents read to decide about
-  re-confirmation. `--major` also escalates a small edit that reverses a truth, because
-  the maintainer owns meaning while the tool owns structure.
-
-  **Backlink weighting** is the one advisory: a PATCH touching an entity with ten or more
-  inbound references reports it (`department:platform has 14 inbound references — patch,
-  really?`) and asks before proceeding, because structure is only a proxy for meaning.
-  `--yes` skips the question (the CI posture) and so does the absence of a terminal — a
-  prompt that blocked an automated release would be a bug — while the advisory still
-  rides along in the output.
-
-  Gated on a clean tree, HEAD on the mainline (`--allow-branch` escapes), the package
-  being its own Git repository, and `vaire check` free of violations. Nothing to release
-  is a clean no-op, exit `0`. It never runs `git push`, and uploads only when asked: git
-  transport stays the maintainer's, and publishing is `vaire push`, so a flaky upload
-  re-runs an upload rather than a ritual and CI can publish a tag it did not cut. `--push`
-  runs that upload once the tag is cut; `--onto` stays reserved grammar, rejected as not
-  yet implemented.
-- **Release records** — the changelog, written as corpus. Each release writes
-  `releases/<version>.md`: an entity carrying the date, the bump, and **edges** to what
-  was added, changed, and retired, so "which releases touched this entity?" is
-  `vaire backlinks <id> --type release` and a consumer's adopted-changes digest becomes
-  an intersection rather than a diff. Removed addresses are recorded as text — a deleted
-  entity has no address left to point at. The classifier **excludes** release records
-  from its own diff, or no release after the first could ever be a PATCH. New manifest
-  keys `release_type`/`release_dir` (defaults `release`/`releases`) rename them for a
-  package whose own vocabulary already means something by the word.
-- **`vaire status` reports the pending release** — `release: would be minor — 3 new, 12
-  changed` — so a release is never a surprise. Best-effort and cheap: the common "nothing
-  new since the last release" case is a commit count, and it stays silent while the index
-  is behind HEAD, where the answer would describe neither tree.
-- **`vaire pack` ships in the binary** (cli.md §4.6). It landed in 0.2.1 behind a
-  non-default feature, because the artifact format was still settling and nothing
-  consumed it. Both reasons are spent: the rest of the registry line is built against
-  this contract — `release` tags what `pack` builds, and publishing re-packs from a tag
-  — so it is on by default and compiled into every released binary. The feature name
-  survives, so a dependent that only reads a corpus can still compile the artifact layer
-  out. Build the package's distributable artifact
-  (`.vaire/dist/<name>-<version>.tgz`) from the committed tree: the manifest, the
-  corpus files the include/exclude globs select, **every file those reference** by
-  relative link or image (inline and reference-style, transitively through referenced
-  Markdown — no reserved directory, and an unreferenced file never ships), and a
-  freshly exported `.vaire/index.db`. Gated on `vaire check`. A link target missing at
-  HEAD fails the pack; targets the author chose to keep out — exclude-glob-vetoed or
-  gitignored — warn, as does a dirty working tree. Reproducible: sorted entries,
-  commit-pinned timestamps, zeroed ownership, untimestamped gzip, pinned compression
-  backend — and the exported index ships no `embed_cache`, no machine paths in
-  `deps_snapshot`, and no FTS structure (recreated at materialization).
-  `--no-embeddings` strips section vectors.
-- **`repository` manifest field** (manifest.md §3) — where the package is authored, for
-  the registry's pull-to-read vs clone-to-author choice (registry design v0.2).
-
-### Changed
-- **The Turso facade moved to `vaire::db`**, shared by the package index and the catalog,
-  so there is one async→sync bridge rather than two copies of its traps. `Index` keeps its
-  public surface.
+- **`local-packages` is retired** — the `vaire configure local-packages` command, the setting,
+  and the discovery walk on the resolution path (cli.md §6.7). The walk survives only inside
+  `vaire catalog scan`, demoted from resolution machinery to an import tool. The first
+  maintain command after upgrading **migrates itself**, and says so; dependencies keep
+  resolving across the upgrade. The walk conflated "on my disk somewhere" with "I author
+  this"; the catalog does not.
 
 ### Fixed
-- **Cross-process safety for shared state, measured rather than assumed.** The catalog
-  design assumed short WAL transactions made concurrent CLI invocations safe. They do not:
-  **Turso takes an exclusive lock when a database is opened**, so a second process cannot
-  open it at all — reads included. A multi-process test (`tests/catalog_concurrency.rs`)
-  proved it before anything relied on it, and caught a bug it would otherwise have shipped
-  — an `open` that treated every connect failure as corruption would have *deleted the
-  catalog* whenever another process held it. Turso stays: that lock is the cross-process
-  mutex, and an OS file lock cannot outlive its process, so contention is now retried with
-  bounded backoff and connections are short-lived. Eight processes making 400 concurrent
-  writes now land every one of them. The cost is recorded rather than hidden — catalog
-  access is serialized machine-wide, so nothing may hold a handle resident.
+- **Cross-process safety for shared state, measured rather than assumed.** The catalog design
+  assumed short WAL transactions made concurrent invocations safe. They do not: **the storage
+  engine takes an exclusive lock when a database is opened**, so a second process cannot open
+  it at all, reads included. A multi-process test proved it before anything relied on it, and
+  caught a bug it would otherwise have shipped — an `open` that treated every connect failure
+  as corruption would have *deleted the catalog* whenever another process held it.
+
+  That lock is now the cross-process mutex: contention is retried with bounded backoff,
+  connections are short-lived and lazily opened. Eight processes making 400 concurrent writes
+  land every one. The cost is recorded rather than hidden — catalog access is serialized
+  machine-wide, so nothing may hold a handle resident.
 
 ## [0.2.1] — 2026-08-03
 

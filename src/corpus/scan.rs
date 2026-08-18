@@ -60,7 +60,7 @@ impl Scanner {
 
     /// True iff `rel` is matched by an exclude glob. The excludes are the author's
     /// veto, and `vaire pack` honors it beyond corpus scope: a file referenced from
-    /// packed Markdown ships as payload — unless excluded here (registry.md §5.2).
+    /// packed Markdown ships as payload — unless excluded here (registry.md §11).
     pub fn is_excluded(&self, rel: &std::path::Path) -> bool {
         self.exclude.is_match(rel)
     }
