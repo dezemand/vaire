@@ -21,7 +21,7 @@ pub struct Config {
     pub version: String,
     pub description: Option<String>,
 
-    /// Where this package is authored — its source repository URL (registry.md §6.1).
+    /// Where this package is authored — its source repository URL (manifest.md §3).
     /// Rides the manifest into the artifact and the registry record, so a consumer can
     /// choose `vaire pull` (read-only artifact) or clone-and-PR (authoring). Optional,
     /// free-form; older CLIs ignore it (unknown manifest keys are not errors).
@@ -57,6 +57,16 @@ pub struct Config {
     /// (`scope: project:atlas`, `scope: org:some-firm`). Set to e.g. `"project"` to tie
     /// scoping to a specific relationship field.
     pub scope_field: String,
+
+    /// The type carried by release records, and the directory they are written to
+    /// (registry.md §3.2). Defaults `"release"` / `"releases"`.
+    ///
+    /// Conventions, not reserved words: a type name is package vocabulary, and a
+    /// knowledge base whose own subject matter means something by "release" renames these
+    /// rather than losing the word. The classifier excludes `release_type` from its diff,
+    /// so whatever it names is invisible to version computation.
+    pub release_type: String,
+    pub release_dir: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -90,7 +100,13 @@ impl Default for Config {
             description: None,
             repository: None,
             dependencies: BTreeMap::new(),
-            include: vec!["knowledge/**/*.md".into(), "projects/**/*.md".into()],
+            // `releases/**` is here so a package that never touched its globs can cut a
+            // release and have the record it writes actually be part of the corpus.
+            include: vec![
+                "knowledge/**/*.md".into(),
+                "projects/**/*.md".into(),
+                "releases/**/*.md".into(),
+            ],
             exclude: vec![
                 "**/node_modules/**".into(),
                 "**/drafts/**".into(),
@@ -109,6 +125,8 @@ impl Default for Config {
             .map(|s| s.to_string())
             .collect(),
             vocabulary_strict: false,
+            release_type: crate::model::version::DEFAULT_RELEASE_TYPE.to_string(),
+            release_dir: crate::model::version::DEFAULT_RELEASE_DIR.to_string(),
             // Permit any type to be scoped; no lint policy by default.
             scoped_types_whitelist: vec!["*".to_string()],
             scoped_types_blacklist: Vec::new(),
@@ -207,7 +225,7 @@ fn is_semver(s: &str) -> bool {
 
 /// The only legal dependency constraint form: `^MAJOR` (a caret then a non-empty run of
 /// digits). Tighter pins or ranges are rejected — minor/patch never break references, so a
-/// pin could only create churn (packages.md §6).
+/// pin could only create churn (manifest.md §5).
 pub fn is_caret_major(s: &str) -> bool {
     matches!(s.strip_prefix('^'), Some(rest) if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
 }

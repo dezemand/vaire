@@ -115,7 +115,7 @@ impl Output for BacklinksOutput {
             return format!(
                 "{}{}",
                 dim(&format!("no nodes reference {}", self.id)),
-                skipped_note(&self.skipped)
+                skipped_note(&self.skipped, self.rootless)
             );
         }
         let mut out = format!(
@@ -133,7 +133,7 @@ impl Output for BacklinksOutput {
             ));
         }
         let mut out = out.trim_end().to_string();
-        out.push_str(&skipped_note(&self.skipped));
+        out.push_str(&skipped_note(&self.skipped, self.rootless));
         out
     }
 }
@@ -144,7 +144,7 @@ impl Output for RefsOutput {
             return format!(
                 "{}{}",
                 dim(&format!("{} references nothing", self.id)),
-                skipped_note(&self.skipped)
+                skipped_note(&self.skipped, self.rootless)
             );
         }
         let mut out = format!(
@@ -170,7 +170,7 @@ impl Output for RefsOutput {
             ));
         }
         let mut out = out.trim_end().to_string();
-        out.push_str(&skipped_note(&self.skipped));
+        out.push_str(&skipped_note(&self.skipped, self.rootless));
         out
     }
 }
@@ -181,7 +181,7 @@ impl Output for SearchOutput {
             return format!(
                 "{}{}",
                 dim(&format!("no results for \"{}\"", self.query)),
-                skipped_note(&self.skipped)
+                skipped_note(&self.skipped, self.rootless)
             );
         }
         let mut out = format!(
@@ -205,7 +205,7 @@ impl Output for SearchOutput {
             }
         }
         let mut out = out.trim_end().to_string();
-        out.push_str(&skipped_note(&self.skipped));
+        out.push_str(&skipped_note(&self.skipped, self.rootless));
         out
     }
 }
@@ -216,7 +216,7 @@ impl Output for UnresolvedOutput {
             return format!(
                 "{}{}",
                 dim("no unresolved references"),
-                skipped_note(&self.skipped)
+                skipped_note(&self.skipped, false)
             );
         }
         let mut out = format!("{}\n", pluralize(self.count, "unresolved reference"));
@@ -244,7 +244,7 @@ impl Output for UnresolvedOutput {
             ));
         }
         let mut out = out.trim_end().to_string();
-        out.push_str(&skipped_note(&self.skipped));
+        out.push_str(&skipped_note(&self.skipped, false));
         out
     }
 }
@@ -351,6 +351,9 @@ impl Output for StatusOutput {
                 out.push('\n');
             }
         }
+        if let Some(pending) = &self.pending_release {
+            kv(&mut out, "release", 13, &pending.render());
+        }
         out.trim_end().to_string()
     }
 }
@@ -387,8 +390,7 @@ pub struct DepIndexed {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// The package directory this run linked the dependency to, when the ensure pass
-    /// satisfied it from the local-packages root (cli.md §6.6); absent when the link
-    /// already existed.
+    /// satisfied it from the catalog (cli.md §6.6); absent when the link already existed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linked: Option<String>,
 }
@@ -420,7 +422,7 @@ impl Output for IndexRunOutput {
                             "  dep {}: linked → {}  {}\n",
                             dep.name,
                             target,
-                            dim("(local-packages)")
+                            dim("(catalog)")
                         ));
                     }
                     out.push_str(&format!(
@@ -515,15 +517,15 @@ pub struct AddOutput {
     /// True when the dependency already existed and its constraint was updated in place.
     pub updated: bool,
     /// The `.vaire/packages/<name>` link target: the path stored by `--link`, or the
-    /// package directory discovery found under the local-packages root.
+    /// package directory the catalog selected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linked: Option<String>,
-    /// The link was materialized by discovery (cli.md §6.6) rather than by `--link`.
+    /// The link was materialized from the catalog (cli.md §6.6) rather than by `--link`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub discovered: bool,
-    /// Why the dependency is declared but not linked — nothing found under the
-    /// local-packages root, an ambiguous name, or no root configured. Never an error:
-    /// declaring succeeded, and the link can arrive later.
+    /// Why the dependency is declared but not linked — the catalog knows nothing
+    /// declaring that name, nothing in the constrained major line, or two candidates that
+    /// both satisfy. Never an error: declaring succeeded, and the link can arrive later.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -544,7 +546,7 @@ impl Output for AddOutput {
                 self.name, target
             ));
             if self.discovered {
-                s.push_str(&format!("  {}", dim("(local-packages)")));
+                s.push_str(&format!("  {}", dim("(catalog)")));
             }
         }
         if let Some(note) = &self.note {
@@ -558,7 +560,8 @@ impl Output for AddOutput {
 #[derive(Debug, Serialize)]
 pub struct ConfigureOutput {
     pub config_path: String,
-    /// Which section this run reports on: `"embeddings"` or `"local-packages"`.
+    /// Which section this run reports on. Only `"embeddings"` remains — where packages
+    /// live stopped being a setting when the catalog replaced the local-packages root.
     pub section: String,
     pub provider: String,
     pub dimensions: usize,
@@ -567,29 +570,12 @@ pub struct ConfigureOutput {
     /// The interactive flow was cancelled (Esc/Ctrl-C); nothing was written.
     #[serde(default)]
     pub cancelled: bool,
-    /// The local-packages root in effect after this run; absent when unset.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub local_packages: Option<String>,
 }
 
 impl Output for ConfigureOutput {
     fn render_human(&self) -> String {
         if self.cancelled {
             return "Cancelled — no changes written.".to_string();
-        }
-        if self.section == "local-packages" {
-            return match &self.local_packages {
-                Some(root) => format!(
-                    "{} local packages\n  root:   {root}\n  config: {}",
-                    green("✓"),
-                    self.config_path,
-                ),
-                None => format!(
-                    "local packages: not set — declared dependencies are not discovered \
-                     automatically\n  config: {}",
-                    self.config_path,
-                ),
-            };
         }
         let mut s = format!(
             "{} configured embeddings\n  provider:   {}\n  dimensions: {}\n  config:     {}",
@@ -716,6 +702,10 @@ pub struct BacklinksOutput {
     /// surfaced, never silently dropped.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Display only: whether this ran without a package to stand in, which decides
+    /// whether the skip note calls these dependencies or catalogued packages.
+    #[serde(skip)]
+    pub rootless: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -746,18 +736,25 @@ impl EdgeRef {
 }
 
 /// The shared "skipped dependencies" trailer for fan-out reads.
-fn skipped_note(skipped: &[String]) -> String {
+fn skipped_note(skipped: &[String], rootless: bool) -> String {
     if skipped.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n{}",
-            yellow(&format!(
-                "  note: skipped unavailable dependencies: {} (run `vaire index`)",
-                skipped.join(", ")
-            ))
-        )
+        return String::new();
     }
+    // Outside a package these are not anyone's dependencies — they are packages this
+    // machine knows whose index could not be read, and the fix is in each of them rather
+    // than here.
+    let note = match rootless {
+        true => format!(
+            "  note: skipped catalogued packages with no readable index: {} \
+             (run `vaire index` in each)",
+            skipped.join(", ")
+        ),
+        false => format!(
+            "  note: skipped unavailable dependencies: {} (run `vaire index`)",
+            skipped.join(", ")
+        ),
+    };
+    format!("\n{}", yellow(&note))
 }
 
 // ---- refs (cli.md §3.3) ----------------------------------------------------
@@ -771,6 +768,10 @@ pub struct RefsOutput {
     /// Dependencies that could not be consulted — surfaced, never silently dropped.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Display only: whether this ran without a package to stand in, which decides
+    /// whether the skip note calls these dependencies or catalogued packages.
+    #[serde(skip)]
+    pub rootless: bool,
 }
 
 // ---- search (cli.md §3.4) --------------------------------------------------
@@ -783,6 +784,10 @@ pub struct SearchOutput {
     /// Dependencies that could not be consulted — surfaced, never silently dropped.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Display only: whether this ran without a package to stand in, which decides
+    /// whether the skip note calls these dependencies or catalogued packages.
+    #[serde(skip)]
+    pub rootless: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -820,6 +825,10 @@ pub struct SuggestOutput {
     /// Dependencies that could not be consulted — surfaced, never silently dropped.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Display only: whether this ran without a package to stand in, which decides
+    /// whether the skip note calls these dependencies or catalogued packages.
+    #[serde(skip)]
+    pub rootless: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -845,7 +854,7 @@ impl Output for SuggestOutput {
             return format!(
                 "{}{}",
                 dim(&format!("no suggestions for \"{}\"", self.descriptor)),
-                skipped_note(&self.skipped)
+                skipped_note(&self.skipped, self.rootless)
             );
         }
         let mut out = format!(
@@ -864,7 +873,7 @@ impl Output for SuggestOutput {
             ));
         }
         let mut out = out.trim_end().to_string();
-        out.push_str(&skipped_note(&self.skipped));
+        out.push_str(&skipped_note(&self.skipped, self.rootless));
         out
     }
 }
@@ -999,6 +1008,10 @@ pub struct StatusOutput {
     /// One row per linked dependency (transitive closure); empty for a standalone package.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<DepStatus>,
+    /// What `vaire release` would do — absent when it could not be determined cheaply
+    /// (no git, or an index behind HEAD, where the answer would describe neither tree).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_release: Option<PendingRelease>,
 }
 
 /// One linked dependency's state as reported by `vaire status` (cli.md §4.3).
@@ -1037,7 +1050,7 @@ pub struct EmbeddingCounts {
 
 // ---- pack ------------------------------------------------------------------
 
-/// `vaire pack`: the artifact that was built (registry.md §5). `artifact` is
+/// `vaire pack`: the artifact that was built (registry.md §11). `artifact` is
 /// package-root-relative like every other returned path; `sha256` is the digest a
 /// lockfile or registry pins.
 #[derive(Debug, Serialize)]
@@ -1106,5 +1119,1099 @@ fn human_size(bytes: u64) -> String {
             "{:.1} MiB ({bytes} bytes)",
             bytes as f64 / (1024.0 * 1024.0)
         )
+    }
+}
+
+// ---- vaire release ---------------------------------------------------------
+
+/// What a `vaire release` run did, or would do (cli.md §4.7).
+#[derive(Debug, Serialize)]
+pub struct ReleaseOutput {
+    pub package: String,
+    pub status: ReleaseStatus,
+    /// The version released or planned; for `nothing`/`blocked`, the one already out.
+    pub version: String,
+    /// Absent for a first release (nothing to increment) and when nothing changed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bump: Option<crate::model::Bump>,
+    #[serde(flatten)]
+    pub classification: crate::release::classify::Classification,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Integrity warnings the release carried past — reported, never fatal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<usize>,
+    /// Whether the record carries prose from `--summary`. Absent when it does not, so the
+    /// ordinary release's JSON is unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub summary: bool,
+    /// A planned MAJOR with no `--notes` yet: what the real run will refuse over, reported
+    /// rather than raised so a dry run can hand an agent the plan for the notes it is being
+    /// asked to draft.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub notes_required: bool,
+    /// Changed entities a lot of others point at — the classifier saying "structure says
+    /// patch, but this is load-bearing". Advisory; the maintainer's answer stands.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub advisories: Vec<CitedEntity>,
+}
+
+/// A changed entity with an inbound-reference count worth mentioning.
+#[derive(Debug, Serialize)]
+pub struct CitedEntity {
+    pub id: String,
+    pub inbound: usize,
+}
+
+/// The four ways a release run ends. `blocked` is the one that is neither success nor
+/// failure: the classifier saw a MAJOR, which only a maintainer may declare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseStatus {
+    Released,
+    Planned,
+    Nothing,
+    Blocked,
+}
+
+impl ReleaseOutput {
+    fn base(
+        package: String,
+        status: ReleaseStatus,
+        version: crate::model::Version,
+        classification: crate::release::classify::Classification,
+    ) -> ReleaseOutput {
+        ReleaseOutput {
+            package,
+            status,
+            version: version.to_string(),
+            bump: None,
+            classification,
+            tag: None,
+            record: None,
+            commit: None,
+            warnings: None,
+            summary: false,
+            notes_required: false,
+            advisories: Vec::new(),
+        }
+    }
+
+    /// Attach the heavily-cited advisories (chainable — every constructor may carry them).
+    pub fn with_advisories(mut self, advisories: Vec<CitedEntity>) -> ReleaseOutput {
+        self.advisories = advisories;
+        self
+    }
+
+    /// Record that the release record carries `--summary` prose.
+    pub fn with_summary(mut self, summary: bool) -> ReleaseOutput {
+        self.summary = summary;
+        self
+    }
+
+    /// Record that a planned MAJOR still owes its invalidated-assumptions notes.
+    pub fn with_notes_required(mut self, required: bool) -> ReleaseOutput {
+        self.notes_required = required;
+        self
+    }
+
+    pub fn nothing(
+        package: String,
+        version: crate::model::Version,
+        classification: crate::release::classify::Classification,
+    ) -> ReleaseOutput {
+        ReleaseOutput::base(package, ReleaseStatus::Nothing, version, classification)
+    }
+
+    pub fn blocked(
+        package: String,
+        version: crate::model::Version,
+        classification: crate::release::classify::Classification,
+    ) -> ReleaseOutput {
+        ReleaseOutput::base(package, ReleaseStatus::Blocked, version, classification)
+    }
+
+    pub fn planned(
+        package: String,
+        version: crate::model::Version,
+        bump: Option<crate::model::Bump>,
+        classification: crate::release::classify::Classification,
+        tag: String,
+        record: String,
+    ) -> ReleaseOutput {
+        ReleaseOutput {
+            bump,
+            tag: Some(tag),
+            record: Some(record),
+            ..ReleaseOutput::base(package, ReleaseStatus::Planned, version, classification)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn released(
+        package: String,
+        version: crate::model::Version,
+        bump: Option<crate::model::Bump>,
+        classification: crate::release::classify::Classification,
+        tag: String,
+        record: crate::release::record::Record,
+        commit: String,
+        warnings: usize,
+    ) -> ReleaseOutput {
+        ReleaseOutput {
+            bump,
+            tag: Some(tag),
+            record: Some(record.path),
+            commit: Some(commit),
+            warnings: Some(warnings),
+            ..ReleaseOutput::base(package, ReleaseStatus::Released, version, classification)
+        }
+    }
+}
+
+impl Output for ReleaseOutput {
+    fn render_human(&self) -> String {
+        let mut out = String::new();
+        match self.status {
+            ReleaseStatus::Nothing => {
+                return format!(
+                    "{} {}",
+                    dim("nothing to release —"),
+                    plain(&format!(
+                        "{} {} is current, and no entity has changed since",
+                        self.package, self.version
+                    ))
+                );
+            }
+            ReleaseStatus::Blocked => {
+                out.push_str(&yellow(&format!(
+                    "✗ this would be a MAJOR release of {} ({})\n",
+                    self.package,
+                    self.classification.evidence()
+                )));
+                out.push_str(&plain(
+                    "  a major says existing references may no longer hold, which is a \
+                     claim only you can make\n",
+                ));
+                for (label, ids) in [
+                    ("removed", &self.classification.removed),
+                    ("retired", &self.classification.retired),
+                ] {
+                    for id in ids {
+                        out.push_str(&format!("  {} {}\n", dim(label), plain(id)));
+                    }
+                }
+                out.push_str(&dim(
+                    "  re-run with `--major --notes <file>` once you have written what it \
+                     invalidates\n",
+                ));
+                return out.trim_end().to_string();
+            }
+            ReleaseStatus::Planned => {
+                out.push_str(&bold(&format!(
+                    "would release {} {}\n",
+                    self.package, self.version
+                )));
+            }
+            ReleaseStatus::Released => {
+                out.push_str(&green(&format!(
+                    "✓ released {} {}\n",
+                    self.package, self.version
+                )));
+            }
+        }
+        let bump = match self.bump {
+            Some(bump) => format!("{bump} — {}", self.classification.evidence()),
+            None => format!("first release — {}", self.classification.evidence()),
+        };
+        kv(&mut out, "bump", 9, &bump);
+        if let Some(tag) = &self.tag {
+            kv(&mut out, "tag", 9, tag);
+        }
+        if let Some(record) = &self.record {
+            let record = match self.summary {
+                true => format!("{record} (with summary)"),
+                false => record.clone(),
+            };
+            kv(&mut out, "record", 9, &record);
+        }
+        if let Some(commit) = &self.commit {
+            kv(&mut out, "commit", 9, &commit[..commit.len().min(12)]);
+        }
+        for (label, ids) in [
+            ("added", &self.classification.added),
+            ("changed", &self.classification.changed),
+            ("retired", &self.classification.retired),
+            ("removed", &self.classification.removed),
+        ] as [(&str, &Vec<String>); 4]
+        {
+            for id in ids.iter().take(10) {
+                out.push_str(&format!("  {} {}\n", dim(label), plain(id)));
+            }
+            if ids.len() > 10 {
+                out.push_str(&dim(&format!("  {label} … and {} more\n", ids.len() - 10)));
+            }
+        }
+        for cited in &self.advisories {
+            out.push_str(&yellow(&format!(
+                "  {} has {} inbound references — patch, really?\n",
+                cited.id, cited.inbound
+            )));
+        }
+        if let Some(warnings) = self.warnings
+            && warnings > 0
+        {
+            out.push_str(&yellow(&format!(
+                "  {} — `vaire check` for the detail\n",
+                pluralize(warnings, "warning")
+            )));
+        }
+        if self.notes_required {
+            out.push_str(&yellow(
+                "  a major needs its invalidated-assumptions notes — the real run refuses \
+                 without `--notes <file>`\n",
+            ));
+        }
+        if self.status == ReleaseStatus::Released {
+            out.push_str(&dim("  push the commit and tag when you are ready\n"));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+/// The release `vaire status` says is pending — the ambient half of the classifier, so a
+/// release is never a surprise (registry.md §3.1).
+#[derive(Debug, Serialize)]
+pub struct PendingRelease {
+    /// The last released version's tag, absent when the package has never been released.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// What a release would be: `initial`, `none`, or a bump.
+    pub would_be: String,
+    pub added: usize,
+    pub changed: usize,
+    pub retired: usize,
+    pub removed: usize,
+}
+
+impl PendingRelease {
+    pub fn from(
+        classification: crate::release::classify::Classification,
+        since: Option<String>,
+    ) -> PendingRelease {
+        use crate::release::classify::Outcome;
+        PendingRelease {
+            since,
+            would_be: match classification.outcome {
+                Outcome::Initial => "initial".to_string(),
+                Outcome::Nothing => "none".to_string(),
+                Outcome::Bump(bump) => bump.to_string(),
+            },
+            added: classification.added.len(),
+            changed: classification.changed.len(),
+            retired: classification.retired.len(),
+            removed: classification.removed.len(),
+        }
+    }
+
+    fn render(&self) -> String {
+        match self.would_be.as_str() {
+            "none" => "up to date".to_string(),
+            "initial" => {
+                "never released — `vaire release` publishes the declared version".to_string()
+            }
+            bump => {
+                let mut parts = Vec::new();
+                for (n, label) in [
+                    (self.added, "new"),
+                    (self.changed, "changed"),
+                    (self.retired, "retired"),
+                    (self.removed, "removed"),
+                ] {
+                    if n > 0 {
+                        parts.push(format!("{n} {label}"));
+                    }
+                }
+                format!("would be {bump} — {}", parts.join(", "))
+            }
+        }
+    }
+}
+
+// ---- vaire catalog ---------------------------------------------------------
+
+/// `vaire catalog list` (cli.md §4.8).
+#[derive(Debug, Serialize)]
+pub struct CatalogListOutput {
+    pub catalog: String,
+    pub sightings: Vec<crate::catalog::Sighting>,
+}
+
+/// `vaire catalog add` / `scan` — what got recorded.
+#[derive(Debug, Serialize)]
+pub struct CatalogRecordOutput {
+    pub catalog: String,
+    pub recorded: Vec<crate::catalog::Sighting>,
+    /// The directory a `scan` walked; absent for a single `add`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scanned: Option<String>,
+    /// Directories holding an unreadable manifest — surfaced so a malformed one does not
+    /// look like an absent package.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<String>,
+    /// The walk stopped early, so "not found" may be wrong.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// `vaire catalog rm`.
+#[derive(Debug, Serialize)]
+pub struct CatalogRemoveOutput {
+    pub catalog: String,
+    pub removed: usize,
+    pub target: String,
+    /// This was the `--missing` sweep rather than a named removal — which reads
+    /// differently when it matches nothing, since a clean catalog hits that every time.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub swept: bool,
+}
+
+impl Output for CatalogListOutput {
+    fn render_human(&self) -> String {
+        if self.sightings.is_empty() {
+            return format!(
+                "{}\n{}",
+                dim("the catalog is empty"),
+                dim(
+                    "  `vaire catalog scan <dir>` imports a tree of packages; `index` and `check` record what they touch"
+                ),
+            );
+        }
+        let mut out = format!("{}\n", pluralize(self.sightings.len(), "package"));
+        let w = col_width(self.sightings.iter().map(|s| s.name.as_str()));
+        for s in &self.sightings {
+            let state = match s.state {
+                crate::catalog::State::Live => dim("live").to_string(),
+                crate::catalog::State::Missing => yellow("missing").to_string(),
+            };
+            out.push_str(&format!(
+                "  {}  {}  {}  {}  {}\n",
+                cyan(&format!("{:<w$}", s.name)),
+                plain(&format!("{:<9}", s.version)),
+                state,
+                dim(&format!("{:<10}", s.origin.as_str())),
+                dim(&s.path.display().to_string()),
+            ));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+impl Output for CatalogRecordOutput {
+    fn render_human(&self) -> String {
+        let mut out = match &self.scanned {
+            Some(dir) => format!(
+                "{}\n",
+                green(&format!(
+                    "✓ recorded {} from {dir}",
+                    pluralize(self.recorded.len(), "package")
+                ))
+            ),
+            None => match self.recorded.first() {
+                Some(s) => format!(
+                    "{}\n",
+                    green(&format!("✓ recorded {} {}", s.name, s.version))
+                ),
+                None => format!("{}\n", yellow("nothing recorded")),
+            },
+        };
+        if self.scanned.is_some() {
+            for s in &self.recorded {
+                out.push_str(&format!(
+                    "  {}  {}\n",
+                    cyan(&s.name),
+                    dim(&s.path.display().to_string())
+                ));
+            }
+        } else if let Some(s) = self.recorded.first() {
+            out.push_str(&format!("  {}\n", dim(&s.path.display().to_string())));
+        }
+        for note in &self.unreadable {
+            out.push_str(&yellow(&format!("  skipped: {note}\n")));
+        }
+        if self.truncated {
+            out.push_str(&yellow(
+                "  the walk stopped early — narrow the directory you scanned\n",
+            ));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+impl Output for CatalogRemoveOutput {
+    fn render_human(&self) -> String {
+        match (self.removed, self.swept) {
+            (0, true) => dim("every sighting still answers — nothing to sweep").to_string(),
+            (0, false) => {
+                dim(&format!("nothing in the catalog matched {}", self.target)).to_string()
+            }
+            (n, _) => green(&format!("✓ forgot {}", pluralize(n, "sighting"))).to_string(),
+        }
+    }
+}
+
+// ---- registries (registry.md §9) ------------------------------------------------
+
+/// `vaire registry add`.
+#[derive(Debug, Serialize)]
+pub struct RegistryAddOutput {
+    pub name: String,
+    pub url: String,
+    /// Whether the probe got an answer. Recorded either way — configuring a remote you
+    /// cannot reach right now is ordinary.
+    pub reachable: bool,
+    /// How many packages it serves, when it is enumerable and said so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packages: Option<usize>,
+    /// Whether anything has ever been published here. A writable location that is not
+    /// initialized is not a mistake — the first `vaire push` writes its descriptor.
+    pub initialized: bool,
+    /// Why enumeration failed, when the registry declares it can enumerate and then did
+    /// not. Distinct from `packages: None`, which says it cannot — a broken
+    /// `packages.json` is a fault, not a capability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enumeration: Option<String>,
+    /// Whether this client could publish to it. `false` for an `https://` registry, which
+    /// is a fine place to pull from and needs the object store's own credentials to write.
+    pub writable: bool,
+    /// Why the probe failed, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// `vaire registry list`.
+#[derive(Debug, Serialize)]
+pub struct RegistryListOutput {
+    pub catalog: String,
+    pub registries: Vec<crate::catalog::RegistryRow>,
+}
+
+/// `vaire registry rm`.
+#[derive(Debug, Serialize)]
+pub struct RegistryRemoveOutput {
+    pub name: String,
+    pub removed: bool,
+}
+
+/// `vaire registry show`.
+#[derive(Debug, Serialize)]
+pub struct RegistryShowOutput {
+    pub name: String,
+    pub url: String,
+    pub priority: i64,
+    pub search_by_default: bool,
+    pub schema_version: u32,
+    /// What the registry calls itself, which need not be what this machine calls it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_name: Option<String>,
+    pub capabilities: crate::registry::Capabilities,
+    /// `None` when the registry cannot enumerate — which is not the same as serving
+    /// nothing, and is rendered differently for exactly that reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packages: Option<Vec<crate::registry::PackageSummary>>,
+}
+
+impl Output for RegistryAddOutput {
+    fn render_human(&self) -> String {
+        let mut out = format!(
+            "{}\n  {}\n",
+            green(&format!("✓ registry '{}' configured", self.name)),
+            dim(&self.url)
+        );
+        match (&self.note, self.initialized, self.packages) {
+            (Some(note), _, _) => {
+                out.push_str(&yellow(&format!("  not reachable right now: {note}\n")));
+                out.push_str(&dim(
+                    "  the registry is recorded; nothing else was changed\n",
+                ));
+            }
+            (None, false, _) if self.writable => out.push_str(&dim(
+                "  nothing published here yet — the first `vaire push` initializes it\n",
+            )),
+            (None, false, _) => out.push_str(&yellow(
+                "  answered, but there is no registry there (no descriptor document)\n",
+            )),
+            (None, true, Some(n)) => {
+                out.push_str(&dim(&format!("  serves {}\n", pluralize(n, "package"))));
+            }
+            // Said as the fault it is. Reporting a broken `packages.json` as "cannot
+            // enumerate" would describe a registry as lacking the capability it declares.
+            (None, true, None) => out.push_str(&match &self.enumeration {
+                Some(why) => yellow(&format!("  answered, but could not be listed: {why}\n")),
+                None => dim("  answered; it cannot enumerate\n"),
+            }),
+        }
+        if self.reachable && self.initialized && !self.writable {
+            out.push_str(&dim(
+                "  read-only from here — publishing needs the store's own credentials\n",
+            ));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+impl Output for RegistryListOutput {
+    fn render_human(&self) -> String {
+        if self.registries.is_empty() {
+            return format!(
+                "{}\n{}",
+                dim("no registry is configured"),
+                dim(
+                    "  `vaire registry add <name> <url>` — a directory works: `vaire registry add lab ./registry`"
+                ),
+            );
+        }
+        let mut out = match self.registries.len() {
+            1 => "1 registry\n".to_string(),
+            n => format!("{n} registries\n"), // `pluralize` would say "registrys"
+        };
+        let w = col_width(self.registries.iter().map(|r| r.name.as_str()));
+        for r in &self.registries {
+            out.push_str(&format!(
+                "  {}  {}{}\n",
+                cyan(&format!("{:<w$}", r.name)),
+                dim(&r.url),
+                match r.priority {
+                    0 => String::new(),
+                    p => dim(&format!("  (priority {p})")),
+                },
+            ));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+impl Output for RegistryRemoveOutput {
+    fn render_human(&self) -> String {
+        match self.removed {
+            true => green(&format!("✓ forgot registry '{}'", self.name)).to_string(),
+            false => dim(&format!("no registry called '{}'", self.name)).to_string(),
+        }
+    }
+}
+
+impl Output for RegistryShowOutput {
+    fn render_human(&self) -> String {
+        let mut out = format!("{}\n", bold(&self.name));
+        let w = 12;
+        kv(&mut out, "url", w, &self.url);
+        // Only when they differ: a registry knowing itself by the same name this machine
+        // uses is the ordinary case and says nothing.
+        if let Some(declared) = &self.declared_name
+            && declared != &self.name
+        {
+            kv(&mut out, "calls itself", w, declared);
+        }
+        kv(&mut out, "schema", w, &self.schema_version.to_string());
+        let c = &self.capabilities;
+        kv(&mut out, "can", w, &{
+            let mut can: Vec<String> = Vec::new();
+            if c.enumerable {
+                can.push("list".into());
+            }
+            if let Some(publish) = c.publish {
+                can.push(format!("publish ({publish:?})").to_lowercase());
+            }
+            if c.yank {
+                can.push("yank".into());
+            }
+            if c.search != crate::registry::SearchCapability::None {
+                can.push(format!("search ({:?})", c.search).to_lowercase());
+            }
+            if c.validate_bump {
+                can.push("validate bumps".into());
+            }
+            match can.is_empty() {
+                true => "nothing — this location has no registry descriptor".into(),
+                false => can.join(", "),
+            }
+        });
+        // Named, because "advisory" is the difference between a flag and a control, and
+        // nobody should have to remember which kind of registry they are looking at.
+        kv(
+            &mut out,
+            "access",
+            w,
+            match c.access_enforcement {
+                crate::registry::wire::AccessEnforcement::Enforced => "enforced",
+                crate::registry::wire::AccessEnforcement::Advisory => {
+                    "advisory — flags signal intent; the host serves what it serves"
+                }
+            },
+        );
+        match &self.packages {
+            None => out.push_str(&dim("\n  this registry cannot enumerate its packages\n")),
+            Some(packages) if packages.is_empty() => {
+                out.push_str(&dim("\n  nothing published yet\n"))
+            }
+            Some(packages) => {
+                out.push_str(&format!("\n{}\n", pluralize(packages.len(), "package")));
+                let pw = col_width(packages.iter().map(|p| p.name.as_str()));
+                for p in packages {
+                    out.push_str(&format!(
+                        "  {}  {}  {}{}\n",
+                        cyan(&format!("{:<pw$}", p.name)),
+                        plain(&format!(
+                            "{:<9}",
+                            p.latest.map_or_else(|| "—".to_string(), |v| v.to_string())
+                        )),
+                        dim(&pluralize(p.releases, "release")),
+                        match p.access.pullable {
+                            true => String::new(),
+                            false => yellow("  restricted"),
+                        },
+                    ));
+                }
+            }
+        }
+        out.trim_end().to_string()
+    }
+}
+
+/// `vaire push`.
+#[derive(Debug, Serialize)]
+pub struct PushOutput {
+    pub package: String,
+    pub registry: String,
+    pub url: String,
+    pub published: Vec<PushedRelease>,
+    /// Versions the registry already held. Not a problem — this is what makes `push`
+    /// safe to run again.
+    pub already: Vec<String>,
+    pub failed: Vec<PushFailure>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PushedRelease {
+    pub version: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PushFailure {
+    pub version: String,
+    pub reason: String,
+}
+
+/// `vaire yank`.
+#[derive(Debug, Serialize)]
+pub struct YankOutput {
+    pub package: String,
+    pub version: String,
+    pub registry: String,
+    /// `false` when this was `--undo`.
+    pub yanked: bool,
+}
+
+impl Output for PushOutput {
+    fn render_human(&self) -> String {
+        let mut out = String::new();
+        if self.published.is_empty() && self.failed.is_empty() {
+            out.push_str(&match self.already.is_empty() {
+                true => dim("nothing to publish").to_string(),
+                // The steady state of a re-run, and it should read as success.
+                false => green(&format!(
+                    "✓ '{}' is up to date — {} already published",
+                    self.registry,
+                    pluralize(self.already.len(), "version")
+                ))
+                .to_string(),
+            });
+            out.push('\n');
+        } else if self.dry_run {
+            out.push_str(&format!(
+                "{}\n",
+                bold(&format!(
+                    "would publish {} of {} to '{}'",
+                    pluralize(self.published.len(), "version"),
+                    self.package,
+                    self.registry
+                ))
+            ));
+            for release in &self.published {
+                out.push_str(&format!("  {}\n", cyan(&release.version)));
+            }
+        } else {
+            if !self.published.is_empty() {
+                out.push_str(&format!(
+                    "{}\n",
+                    green(&format!(
+                        "✓ published {} of {} to '{}'",
+                        pluralize(self.published.len(), "version"),
+                        self.package,
+                        self.registry
+                    ))
+                ));
+                let w = col_width(self.published.iter().map(|r| r.version.as_str()));
+                for release in &self.published {
+                    out.push_str(&format!(
+                        "  {}  {}  {}\n",
+                        cyan(&format!("{:<w$}", release.version)),
+                        dim(&human_size(release.size_bytes)),
+                        dim(&release.sha256[..release.sha256.len().min(12)]),
+                    ));
+                }
+            }
+            for failure in &self.failed {
+                out.push_str(&red(&format!(
+                    "  ✗ {}: {}\n",
+                    failure.version, failure.reason
+                )));
+            }
+        }
+        // Only when something else was printed above. The one branch that suppresses this
+        // is "up to date", which states the count in its own wording — and it is precisely
+        // the branch that runs when nothing was published and nothing failed. A run where
+        // every attempt failed is where the rest of the picture matters most, so it prints.
+        let reported_something = !self.published.is_empty() || !self.failed.is_empty();
+        if reported_something && !self.already.is_empty() {
+            out.push_str(&dim(&format!(
+                "  {} already published\n",
+                pluralize(self.already.len(), "version")
+            )));
+        }
+        for warning in &self.warnings {
+            out.push_str(&yellow(&format!("  {warning}\n")));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+impl Output for YankOutput {
+    fn render_human(&self) -> String {
+        match self.yanked {
+            true => format!(
+                "{}\n{}",
+                green(&format!(
+                    "✓ yanked {} {} in '{}'",
+                    self.package, self.version, self.registry
+                )),
+                // Said every time, because "yank" reads like "delete" and is not.
+                dim("  the artifact is untouched; anything already pinned to it keeps resolving"),
+            ),
+            false => green(&format!(
+                "✓ un-yanked {} {} in '{}'",
+                self.package, self.version, self.registry
+            ))
+            .to_string(),
+        }
+    }
+}
+
+/// `vaire pull`.
+#[derive(Debug, Serialize)]
+pub struct PullOutput {
+    pub store: String,
+    pub pulled: Vec<PulledRelease>,
+    /// Packages the store already satisfied. What makes `vaire pull` safe in a setup script.
+    pub already: Vec<String>,
+    pub failed: Vec<PullFailure>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PulledRelease {
+    pub package: String,
+    pub version: String,
+    pub registry: String,
+    pub path: String,
+    /// Versions retention removed from the same major line.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub replaced: Vec<String>,
+    /// What the versions this advanced over changed that the consuming package cites.
+    /// `None` outside a package, and for a first pull — there is no adoption in arriving
+    /// somewhere for the first time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adopted: Option<Adopted>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PullFailure {
+    pub package: String,
+    pub reason: String,
+}
+
+impl Output for PullOutput {
+    fn render_human(&self) -> String {
+        let mut out = String::new();
+        if self.pulled.is_empty() && self.failed.is_empty() {
+            out.push_str(&match self.already.is_empty() {
+                true => dim("nothing to pull").to_string(),
+                false => green(&format!(
+                    "✓ the store already satisfies {}",
+                    pluralize(self.already.len(), "package")
+                ))
+                .to_string(),
+            });
+            out.push('\n');
+        } else {
+            let verb = match self.dry_run {
+                true => "would pull",
+                false => "✓ pulled",
+            };
+            if !self.pulled.is_empty() {
+                out.push_str(&format!(
+                    "{}\n",
+                    match self.dry_run {
+                        true => bold(&format!(
+                            "{verb} {}",
+                            pluralize(self.pulled.len(), "package")
+                        )),
+                        false => green(&format!(
+                            "{verb} {}",
+                            pluralize(self.pulled.len(), "package")
+                        )),
+                    }
+                ));
+                let w = col_width(self.pulled.iter().map(|r| r.package.as_str()));
+                for release in &self.pulled {
+                    out.push_str(&format!(
+                        "  {}  {}  {}\n",
+                        cyan(&format!("{:<w$}", release.package)),
+                        plain(&format!("{:<9}", release.version)),
+                        dim(&format!("from '{}'", release.registry)),
+                    ));
+                    // Named, not silent: a version leaving the store is the one thing here
+                    // that removes something the user had.
+                    for gone in &release.replaced {
+                        out.push_str(&dim(&format!("      replaced {gone}\n")));
+                    }
+                    if let Some(adopted) = &release.adopted {
+                        out.push_str(&adopted.render());
+                    }
+                }
+            }
+            for failure in &self.failed {
+                out.push_str(&red(&format!(
+                    "  ✗ {}: {}\n",
+                    failure.package, failure.reason
+                )));
+            }
+        }
+        // Only after the "already satisfies" branch, which states the count in its own
+        // wording — a run where every pull failed is where the rest of the picture matters
+        // most. Same rule as `PushOutput`.
+        let reported_something = !self.pulled.is_empty() || !self.failed.is_empty();
+        if reported_something && !self.already.is_empty() {
+            out.push_str(&dim(&format!(
+                "  {} already in the store\n",
+                pluralize(self.already.len(), "package")
+            )));
+        }
+        for warning in &self.warnings {
+            out.push_str(&yellow(&format!("  {warning}\n")));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+/// What a newly-adopted release changed that this package actually cites
+/// (registry.md §3.2).
+///
+/// A release record carries edges to the entities it touched, and this package's index
+/// carries edges to the entities it references. The interesting set is the intersection:
+/// not "what changed", which is the publisher's changelog and is usually long, but "what
+/// changed **under me**", which is short and is the thing worth reading.
+#[derive(Debug, Serialize)]
+pub struct Adopted {
+    /// The version this replaced, and the one now in the store.
+    pub from: String,
+    pub to: String,
+    /// Every entity the intervening releases touched, that this package references.
+    pub cited: Vec<AdoptedChange>,
+    /// How many entities those releases touched in total — the denominator that makes the
+    /// intersection legible rather than merely small.
+    pub touched: usize,
+    /// Versions whose release record could not be read. Named, because a digest computed
+    /// over part of a range would otherwise look like a complete one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unread: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdoptedChange {
+    pub id: String,
+    /// `added`, `changed` or `retired` — the release record's own edge type.
+    pub change: String,
+}
+
+impl Adopted {
+    /// Rendered inline under the release that was pulled, indented to belong to it.
+    fn render(&self) -> String {
+        let mut out = String::new();
+        if self.cited.is_empty() {
+            // Worth saying rather than omitting: "nothing you cite moved" is the answer
+            // somebody advancing a dependency wanted, and silence would read as "not
+            // checked".
+            out.push_str(&dim(&format!(
+                "      {} touched by {}→{}, none of it cited here\n",
+                pluralize(self.touched, "entity"),
+                self.from,
+                self.to
+            )));
+        } else {
+            out.push_str(&yellow(&format!(
+                "      {} of the {} touched by {}→{} cited here:\n",
+                self.cited.len(),
+                pluralize(self.touched, "entity"),
+                self.from,
+                self.to
+            )));
+            let w = col_width(self.cited.iter().map(|change| change.change.as_str()));
+            for change in &self.cited {
+                out.push_str(&format!(
+                    "        {}  {}\n",
+                    dim(&format!("{:<w$}", change.change)),
+                    cyan(&change.id)
+                ));
+            }
+        }
+        for version in &self.unread {
+            out.push_str(&dim(&format!(
+                "      the release record for {version} could not be read\n"
+            )));
+        }
+        out
+    }
+}
+
+/// `vaire pin` and `vaire unpin`.
+#[derive(Debug, Serialize)]
+pub struct PinOutput {
+    pub package: String,
+    /// The version held, or — for `unpin` — the one released.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub pinned: bool,
+    pub lockfile: String,
+    pub warnings: Vec<String>,
+}
+
+impl Output for PinOutput {
+    fn render_human(&self) -> String {
+        let mut out = String::new();
+        let version = self.version.as_deref().unwrap_or("");
+        out.push_str(&match self.pinned {
+            true => green(&format!("✓ pinned {} {version}", self.package)).to_string(),
+            false => green(&format!("✓ unpinned {}", self.package)).to_string(),
+        });
+        out.push('\n');
+        out.push_str(&dim(&format!("  recorded in {}\n", self.lockfile)));
+        if self.pinned {
+            out.push_str(&dim(
+                "  it survives retention and `vaire clean`, and resolution takes it over \
+                 anything newer\n",
+            ));
+        }
+        for warning in &self.warnings {
+            out.push_str(&yellow(&format!("  {warning}\n")));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+/// `vaire clean`.
+#[derive(Debug, Serialize)]
+pub struct CleanOutput {
+    pub store: String,
+    pub removed: Vec<CleanedEntry>,
+    /// Entries a root held on to.
+    pub kept: usize,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CleanedEntry {
+    pub package: String,
+    pub version: String,
+    pub bytes: u64,
+}
+
+impl Output for CleanOutput {
+    fn render_human(&self) -> String {
+        let mut out = String::new();
+        if self.removed.is_empty() {
+            out.push_str(&green(&format!(
+                "✓ nothing to clean — {} in the store, all of it held",
+                pluralize(self.kept, "entry")
+            )));
+            out.push('\n');
+        } else {
+            let freed: u64 = self.removed.iter().map(|entry| entry.bytes).sum();
+            let headline = format!(
+                "{} {}, freeing {}",
+                match self.dry_run {
+                    true => "would remove",
+                    false => "✓ removed",
+                },
+                pluralize(self.removed.len(), "entry"),
+                bytes(freed),
+            );
+            out.push_str(&format!(
+                "{}\n",
+                match self.dry_run {
+                    true => bold(&headline),
+                    false => green(&headline),
+                }
+            ));
+            let w = col_width(self.removed.iter().map(|entry| entry.package.as_str()));
+            for entry in &self.removed {
+                out.push_str(&format!(
+                    "  {}  {}  {}\n",
+                    cyan(&format!("{:<w$}", entry.package)),
+                    plain(&format!("{:<9}", entry.version)),
+                    dim(&bytes(entry.bytes)),
+                ));
+            }
+            if self.kept > 0 {
+                out.push_str(&dim(&format!(
+                    "  {} held by a lockfile, a pin, or a standing request\n",
+                    pluralize(self.kept, "entry")
+                )));
+            }
+            // Deletion is the one thing here the user cannot undo locally, so the sentence
+            // that makes it undoable is worth the line every time.
+            out.push_str(&dim(
+                "  every removed version is still published, and `vaire pull` brings it back\n",
+            ));
+        }
+        for warning in &self.warnings {
+            out.push_str(&yellow(&format!("  {warning}\n")));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+/// A byte count at human scale. Binary units, because this is disk.
+fn bytes(count: u64) -> String {
+    const KIB: u64 = 1024;
+    match count {
+        n if n < KIB => format!("{n} B"),
+        n if n < KIB * KIB => format!("{:.0} KiB", n as f64 / KIB as f64),
+        n if n < KIB * KIB * KIB => format!("{:.1} MiB", n as f64 / (KIB * KIB) as f64),
+        n => format!("{:.1} GiB", n as f64 / (KIB * KIB * KIB) as f64),
     }
 }

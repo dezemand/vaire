@@ -10,8 +10,10 @@ pub mod edge;
 pub mod id;
 pub mod node;
 pub mod reference;
+pub mod version;
 
 pub use edge::{Edge, RefOrigin};
 pub use id::{NodeId, NodeType};
 pub use node::Node;
 pub use reference::Reference;
+pub use version::{Bump, Version};

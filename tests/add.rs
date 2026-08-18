@@ -1,5 +1,5 @@
 //! Spec tests for `vaire add <pkg>[@^N]` — declare a dependency in knowledge.toml,
-//! preserving the user's formatting and comments (packages.md §5).
+//! preserving the user's formatting and comments (manifest.md §5).
 
 mod common;
 

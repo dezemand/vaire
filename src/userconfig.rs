@@ -26,15 +26,16 @@ pub struct UserConfig {
     pub packages: PackagesConfig,
 }
 
-/// Where packages live on **this machine** (cli.md §6.6) — a consumer setting, never part
-/// of a package manifest: the same dependency is one clone here and another there.
+/// The retired `[packages]` section (cli.md §6.7).
+///
+/// Kept **readable only**, so the one-shot migration can find an old root, import it into
+/// the catalog, and drop the key. Nothing writes it any more: where a package lives is an
+/// observation the catalog records, not a setting to maintain, and a configured root that
+/// had to be re-walked on every maintain command is exactly what the catalog replaced.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PackagesConfig {
-    /// The local-packages root: a directory holding packages you have locally. Maintain
-    /// commands satisfy a declared dependency by finding the package **declaring** that
-    /// name underneath it (at any depth — a knowledge base inside a bigger repo counts)
-    /// and materializing the `.vaire/packages/<name>` link. `None` disables discovery.
+    /// The former local-packages root. `Some` only until the migration has run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local: Option<PathBuf>,
 }
@@ -83,6 +84,26 @@ pub fn config_home() -> PathBuf {
     directories::ProjectDirs::from("", "", "vaire")
         .map(|d| d.config_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(".vaire-config"))
+}
+
+/// The **vaire home**: `VAIRE_HOME` if set and non-empty, else `~/.vaire`.
+///
+/// Distinct from the config home on purpose. `config.toml`/`credentials.toml` are things
+/// a person writes and might sync between machines; the home holds state the tool
+/// maintains about *this* machine — starting with the catalog, and later the store. A
+/// plain `~/.vaire` rather than a platform-specific location because it is a working
+/// directory a user is expected to be able to find, delete, and watch grow.
+///
+/// Falls back to `.vaire-home` in the cwd only when there is no home directory at all.
+pub fn vaire_home() -> PathBuf {
+    if let Ok(dir) = std::env::var("VAIRE_HOME")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
+    }
+    directories::UserDirs::new()
+        .map(|d| d.home_dir().join(".vaire"))
+        .unwrap_or_else(|| PathBuf::from(".vaire-home"))
 }
 
 /// Resolve a secret (e.g. `OPENAI_API_KEY`): an existing **environment variable wins**,

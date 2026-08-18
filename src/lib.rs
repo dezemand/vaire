@@ -8,10 +8,16 @@
 //!
 //! - [`model`]   — the type-agnostic node/edge domain: IDs, references, nodes, edges.
 //! - [`corpus`]  — reading the files: repo discovery, scanning, frontmatter, wikilinks.
+//! - [`catalog`] — what packages this machine knows and where they live.
+//! - [`db`]      — the Turso facade: one async→sync bridge, shared by index and catalog.
 //! - [`index`]   — the derived SQLite cache: build, query, integrity checks.
 //! - [`search`]  — hybrid FTS + vector retrieval.
 //! - [`embed`]   — pluggable, local-by-default embedding with a content-hash cache.
 //! - [`git`]     — the provenance layer: repo root, HEAD, diffs, last-indexed commit.
+//! - [`release`] — computing a version bump from what changed, and recording it.
+//! - [`registry`]— the client seam for remote registries, and the static-file wire contract.
+//! - [`store`]   — pulled releases, unpacked, rebuilt, and sealed read-only.
+//! - [`lockfile`]— `knowledge.lock`: what resolved, and whether it can resolve so again.
 //! - [`commands`]— one module per CLI command, each returning a typed [`output::Output`].
 //! - [`output`]  — the returned unit: paths + IDs, rendered as human text or JSON.
 //! - [`mcp`]     — the STDIO MCP server that re-exposes the read commands as tools.
@@ -19,11 +25,17 @@
 //! - [`error`]   — [`error::VaireError`] and its mapping to documented exit codes.
 
 #[cfg(feature = "index")]
+pub mod catalog;
+#[cfg(feature = "index")]
 pub mod cli;
+#[cfg(feature = "index")]
+pub mod clock;
 #[cfg(feature = "index")]
 pub mod commands;
 pub mod config;
 pub mod corpus;
+#[cfg(feature = "index")]
+pub mod db;
 #[cfg(feature = "index")]
 pub mod embed;
 pub mod error;
@@ -34,12 +46,20 @@ mod hash;
 #[cfg(feature = "index")]
 pub mod index;
 #[cfg(feature = "index")]
+pub mod lockfile;
+#[cfg(feature = "index")]
 pub mod mcp;
 pub mod model;
 #[cfg(feature = "index")]
 pub mod output;
 #[cfg(feature = "index")]
+pub mod registry;
+#[cfg(feature = "index")]
+pub mod release;
+#[cfg(feature = "index")]
 pub mod search;
+#[cfg(feature = "index")]
+pub mod store;
 #[cfg(feature = "index")]
 pub mod userconfig;
 #[cfg(feature = "index")]

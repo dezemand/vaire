@@ -1,6 +1,6 @@
 [package]
 name = "vaire"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Derived reference-graph index over a Markdown knowledge corpus, with a CLI and an MCP server"
@@ -22,7 +22,7 @@ name = "vaire"
 path = "src/lib.rs"
 
 [features]
-default = ["index"]
+default = ["index", "pack"]
 
 # `index` is everything above the parsing core: the Turso-backed index, search,
 # embeddings, git provenance, the CLI and the MCP server. It is on by default, so the
@@ -43,10 +43,11 @@ index = [
     "dep:inquire",
 ]
 
-# `vaire pack` (registry.md §5) — the artifact format is still settling and the
-# registry that consumes it does not exist yet, so the command is compiled out by
-# default rather than shipped as a promise. Build with `--features pack` to work on
-# it. Enable when the registry line is ready.
+# `vaire pack` — the package artifact. Gated and off by default while the format was
+# settling and nothing consumed it; **on by default since the registry line started
+# shipping**, because the rest of that line is built against this contract: `release`
+# tags what `pack` builds, and `push` re-packs from a tag. Kept as a named feature so
+# the artifact layer can still be compiled out by a dependent that only reads a corpus.
 pack = ["index", "dep:tar", "dep:flate2"]
 
 [dependencies]
@@ -82,7 +83,7 @@ walkdir = "2"
 thiserror = "2"
 
 # Blocking HTTP for the OpenAI embedding provider (rustls TLS, no async runtime)
-ureq = { version = "2", optional = true }
+ureq = { version = "2", optional = true, features = ["native-certs"] }
 url = { version = "2", optional = true }
 directories = { version = "6.0.0", optional = true }
 

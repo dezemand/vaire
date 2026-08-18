@@ -3,7 +3,8 @@
 The committed manifest at a package root. It declares the package's identity, the file scope
 that *is* the package, the entity types it defines, and the other packages it depends on. It
 is the one authored, version-controlled config file; everything under `.vaire/` is derived and
-gitignored (design.md §9).
+gitignored (design.md §9). Release, distribution, and how a declared dependency is actually
+located on a machine are [registry.md](registry.md).
 
 `knowledge.toml` replaces the older `.vaire/config.toml` — see §8 for how `vaire init`
 migrates an existing corpus.
@@ -15,14 +16,23 @@ package. Discovery walks up from the working directory to the nearest ancestor c
 `knowledge.toml` (precedence: `--repo` > `VAIRE_REPO` > walk-up). An explicit `--repo`/
 `VAIRE_REPO` path that lacks one is an error, not a silent guess.
 
-`.vaire/` sits beside the manifest and holds only the derived index (`.vaire/index.db`) plus a
-self-contained `.vaire/.gitignore`. It is no longer a corpus marker.
+`.vaire/` sits beside the manifest and holds only derived state — the index, the links to
+where dependencies live, and packed artifacts — behind a self-contained `.vaire/.gitignore`.
+It is no longer a corpus marker.
+
+`knowledge.lock` also sits at the package root, but it is *written* rather than authored: it
+records what resolution actually chose, and whether that choice can be obtained again
+(registry.md §7). Commit it in leaf packages, where the citability claim lives.
 
 ```text
 my-package/
 ├── knowledge.toml      # committed manifest — the package marker
+├── knowledge.lock      # written by pull and by indexing; never by hand
 ├── knowledge/…         # entity files
-└── .vaire/             # derived, gitignored (index)
+└── .vaire/             # derived, gitignored
+    ├── index.db        #   the index
+    ├── packages/…      #   where each dependency was found
+    └── dist/…          #   packed artifacts
 ```
 
 ## 2. The manifest
@@ -74,13 +84,15 @@ version = "1.0.0"
 | `version` | **yes** | semver | — | `MAJOR.MINOR.PATCH` |
 | `description` | no | string | *(none)* | one line |
 | `repository` | no | string (URL) | *(none)* | where this package is **authored** (its source repo); rides the manifest into artifacts and registry records so a consumer can choose pull-to-read or clone-to-author |
-| `include` | no | glob[] | `["knowledge/**/*.md", "projects/**/*.md"]` | corpus scope (what can be a node); files referenced from packed Markdown ship in artifacts as payload regardless — `exclude` still vetoes |
+| `include` | no | glob[] | `["knowledge/**/*.md", "projects/**/*.md", "releases/**/*.md"]` | corpus scope (what can be a node); files referenced from packed Markdown ship in artifacts as payload regardless — `exclude` still vetoes |
 | `exclude` | no | glob[] | `["**/node_modules/**", "**/drafts/**", "**/archive/**"]` | |
 | `types` | no | slug[] | *(empty)* | the entity types this package **defines** |
 | `vocabulary_strict` | no | bool | `false` | when set, `vaire check` warns on a type not in `types` |
 | `scoped_types_whitelist` | no | slug[] | `["*"]` | lint: types permitted to be scoped (`"*"` = any) |
 | `scoped_types_blacklist` | no | slug[] | *(empty)* | lint: types **not** permitted to be scoped (`"*"` = none) |
 | `scope_field` | no | string | `"scope"` | frontmatter field carrying the container id |
+| `release_type` | no | slug | `"release"` | the type `vaire release` gives release records; excluded from its own classifier |
+| `release_dir` | no | path | `"releases"` | where release records are written; must be selected by `include` |
 | `[dependencies]` | no | table `name → "^MAJOR"` | *(empty)* | see §5 |
 
 All keys except `name`/`version` are optional; their defaults make a single-package corpus
@@ -89,6 +101,17 @@ work from a two-line manifest.
 > **`types` default.** A manifest that omits `types` defines **none** — the field defaults to
 > empty, so declaring nothing means the package exports no vocabulary. (This differs from the
 > internal `Config::default()`, which carries a starter vocabulary for unconfigured use.)
+
+> **`version` is tool-managed output.** Once a package releases through `vaire release`
+> (cli.md §4.7), the version is written by the tool at release time rather than edited by
+> hand, and the release **tag** — not this field — is what the next release counts from.
+> Editing it by hand is not an error; it is simply overwritten by the next release.
+
+<!-- markdownlint MD028: separates two adjacent blockquotes -->
+
+> **`release_type`/`release_dir` are conventions, not reserved words.** A type name is
+> package vocabulary, so a knowledge base whose own subject matter means something by
+> "release" renames these rather than losing the word.
 
 ## 4. Validation
 
@@ -113,7 +136,7 @@ concern layered on top of this file; the manifest only declares the constraints.
 A reference to another package is written `@<name>/<type>:<id>` (design.md §6) and must name
 a declared dependency, resolvable through the linked-package lookup — the referencing
 package's own `.vaire/packages/<name>`, the run-root itself, or the run-root's links
-(cli.md §6.5). `vaire check` enforces the full set (packages.md §8):
+(cli.md §6.5). `vaire check` enforces the full set:
 
 | finding | severity | when |
 |---|---|---|
@@ -122,7 +145,13 @@ package's own `.vaire/packages/<name>`, the run-root itself, or the run-root's l
 | **missing dependency** | error | a declared dependency that is unavailable (not linked / broken link / name mismatch); once per name, with the fix |
 | undeclared type | warning | a value matching the reference grammar whose `type` is not in `types` (quote it, or declare the type) |
 | unused dependency | warning | declared in `[dependencies]` but never referenced |
-| version mismatch | warning | a linked dependency whose MAJOR falls outside the `^N` constraint — surfaced only; *enforcement* is v0.3 |
+| version mismatch | warning | an **explicitly linked** dependency whose version falls outside the `^N` constraint. Still a warning, because an explicit link is a deliberate override; a dependency the catalog resolved cannot land here, since the constraint is what selected it (cli.md §6.6) |
+
+Since v0.3 the constraint is a **selector**, not only a lint: the catalog picks the package
+whose declared version satisfies `^N`, comparing parsed `MAJOR.MINOR.PATCH` triples rather
+than text. Where several members of one closure constrain the same dependency, their
+demands are intersected — one major line resolves, disjoint majors are a reported conflict,
+because a closure links one directory per package name.
 
 `vaire deps` (cli.md §3.8) prints the resolved tree these constraints declare.
 

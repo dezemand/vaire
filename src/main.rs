@@ -68,9 +68,6 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 };
                 commands::configure::run(&home, opts)?
             }
-            Some(ConfigureSection::LocalPackages { path, unset }) => {
-                commands::configure::run_local_packages(&home, path.as_deref(), *unset)?
-            }
             None => commands::configure::run_interactive(&home)?,
         };
         emit(&out, json);
@@ -86,20 +83,110 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     // `add` edits the manifest's [dependencies] (and with --link, the package links);
     // it needs the package root but not the index, so it runs before `Ctx` is built
     // (like `init`/`configure`).
-    if let Command::Add { spec, link } = &cli.command {
+    if let Command::Add {
+        spec,
+        link,
+        no_register,
+    } = &cli.command
+    {
         let out = commands::add::run(
             cli.repo.as_deref(),
             cli.config.as_deref(),
             spec,
             link.as_deref(),
         )?;
+        // Declaring a dependency is a statement that this package exists and is being
+        // worked on, so it is worth recording — the manifest's directory is the package.
+        if let Some(root) = std::path::Path::new(&out.config_path).parent() {
+            for warning in commands::catalog::register_path(
+                &vaire::userconfig::vaire_home(),
+                root,
+                *no_register,
+            ) {
+                eprintln!("warning: {warning}");
+            }
+        }
         emit(&out, json);
         return Ok(ExitCode::Success);
     }
 
-    // `mcp` builds its own long-lived context and never returns output.
+    // The catalog is machine-level state *about* packages, so it has to work from
+    // anywhere — notably from outside any package, which is exactly where
+    // `catalog add <path>` and `catalog scan <dir>` are used. It never builds a `Ctx`.
+    if let Command::Catalog { action } = cli.command {
+        let home = vaire::userconfig::vaire_home();
+        use vaire::cli::CatalogAction;
+        match action {
+            CatalogAction::Add { path } => {
+                emit(&commands::catalog::add(&home, path.as_deref())?, json)
+            }
+            CatalogAction::Scan { dir } => emit(&commands::catalog::scan_dir(&home, &dir)?, json),
+            CatalogAction::Rm { target, missing } => emit(
+                &commands::catalog::remove(&home, target.as_deref(), missing)?,
+                json,
+            ),
+            CatalogAction::List => emit(&commands::catalog::list(&home)?, json),
+        }
+        return Ok(ExitCode::Success);
+    }
+
+    // Registries are machine-level configuration, like the catalog: usable from anywhere,
+    // and never needing a package to stand in.
+    if let Command::Registry { action } = cli.command {
+        let home = vaire::userconfig::vaire_home();
+        use vaire::cli::RegistryAction;
+        match action {
+            RegistryAction::Add {
+                name,
+                url,
+                priority,
+                no_search,
+            } => emit(
+                &commands::registry::add(&home, &name, &url, priority, !no_search)?,
+                json,
+            ),
+            RegistryAction::List => emit(&commands::registry::list(&home)?, json),
+            RegistryAction::Rm { name } => emit(&commands::registry::remove(&home, &name)?, json),
+            RegistryAction::Show { name } => emit(&commands::registry::show(&home, &name)?, json),
+        }
+        return Ok(ExitCode::Success);
+    }
+
+    // `clean` sweeps the store, which is machine-level state like the catalog: somebody
+    // clearing space is most likely standing outside every package, and requiring one
+    // would make the command unavailable exactly where it is wanted.
+    if let Command::Clean { package, dry_run } = &cli.command {
+        let home = vaire::userconfig::vaire_home();
+        let out = commands::clean::run(
+            &home,
+            commands::clean::Options {
+                package: package.as_deref(),
+                dry_run: *dry_run,
+            },
+        )?;
+        emit(&out, json);
+        return Ok(ExitCode::Success);
+    }
+
+    // `yank` acts on a registry, not on a corpus: after a bad publish, the package whose
+    // release is being withdrawn is often not the directory you are standing in.
+    if let Command::Yank {
+        spec,
+        registry,
+        undo,
+    } = &cli.command
+    {
+        let home = vaire::userconfig::vaire_home();
+        let out = commands::yank::run(&home, spec, registry.as_deref(), *undo)?;
+        emit(&out, json);
+        return Ok(ExitCode::Success);
+    }
+
+    // `mcp` builds its own long-lived context and never returns output. Outside any
+    // package it serves the rootless session, which is the point of exposing it that way:
+    // an agent can be pointed at the machine rather than at one checkout.
     if let Command::Mcp = cli.command {
-        let ctx = Ctx::new(cli.repo, cli.config)?;
+        let ctx = read_ctx(cli.repo, cli.config, false, cli.frozen)?.with_frozen(cli.frozen);
         mcp::serve(ctx)?;
         return Ok(ExitCode::Success);
     }
@@ -115,7 +202,47 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         ));
     }
 
-    let ctx = Ctx::new(cli.repo, cli.config)?;
+    // `pull <name>` is a store operation, not a corpus one: "put this package on this
+    // machine" means the same thing from anywhere, and requiring a package to stand in
+    // would make the obvious first command fail on a fresh machine. Bare `vaire pull`
+    // stays package-scoped, because it works from the manifest's dependencies.
+    #[cfg(feature = "pack")]
+    if let Command::Pull {
+        spec: Some(spec),
+        registry,
+        // `--locked` is refused for a named pull anyway (it reproduces a whole recorded
+        // resolution), so it rides along only to be reported by the command's own check
+        // rather than swallowed by this pattern.
+        locked,
+        dry_run,
+    } = &cli.command
+        && Ctx::new(cli.repo.clone(), cli.config.clone()).is_err()
+    {
+        let ctx = Ctx::rootless(vaire::userconfig::vaire_home())?;
+        let out = commands::pull::run(
+            &ctx,
+            commands::pull::Options {
+                spec: Some(spec),
+                registry: registry.as_deref(),
+                locked: *locked,
+                dry_run: *dry_run,
+            },
+        )?;
+        let failed = !out.failed.is_empty();
+        emit(&out, json);
+        return Ok(match failed {
+            true => ExitCode::Generic,
+            false => ExitCode::Success,
+        });
+    }
+
+    // Read commands fall back to the catalog when there is no package to stand in;
+    // maintain commands keep erroring, because there is nothing for them to maintain.
+    let ctx = match cli.command.is_read() {
+        true => read_ctx(cli.repo, cli.config, cli.command.wants_all(), cli.frozen)?,
+        false => Ctx::new(cli.repo, cli.config)?,
+    }
+    .with_frozen(cli.frozen);
 
     match cli.command {
         Command::Resolve { id } => {
@@ -146,6 +273,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             scope,
             limit,
             local,
+            all: _,
         } => {
             let out = commands::search::run(
                 &ctx,
@@ -162,6 +290,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             type_filter,
             limit,
             local,
+            all: _,
         } => {
             let out = commands::suggest::run(
                 &ctx,
@@ -190,18 +319,24 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             working_tree,
             re_embed,
             no_deps,
+            no_register,
         } => {
-            emit(
-                &commands::index::run(&ctx, full, working_tree, re_embed, no_deps)?,
-                json,
-            );
+            let out = commands::index::run(&ctx, full, working_tree, re_embed, no_deps)?;
+            for warning in commands::catalog::register_ambient(&ctx, no_register) {
+                eprintln!("warning: {warning}");
+            }
+            emit(&out, json);
         }
         Command::Check {
             strict,
             working_tree,
             no_deps,
+            no_register,
         } => {
             let (report, failed) = commands::check::run(&ctx, strict, working_tree, no_deps)?;
+            for warning in commands::catalog::register_ambient(&ctx, no_register) {
+                eprintln!("warning: {warning}");
+            }
             emit(&report, json);
             if failed {
                 return Ok(ExitCode::CheckViolations);
@@ -210,14 +345,144 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Status => {
             emit(&commands::status::run(&ctx)?, json);
         }
+        Command::Release {
+            major,
+            dry_run,
+            yes,
+            notes,
+            summary,
+            allow_branch,
+            push,
+            onto,
+        } => {
+            // Reserved grammar: the flag exists so the split it belongs to has somewhere
+            // to grow, and is rejected rather than silently ignored.
+            if onto.is_some() {
+                return Err(VaireError::Usage(
+                    "`--onto` (back-patching an older major line) is reserved, not yet \
+                     implemented"
+                        .into(),
+                ));
+            }
+            let out = commands::release::run(
+                &ctx,
+                commands::release::Options {
+                    major,
+                    dry_run,
+                    yes,
+                    notes: notes.as_deref(),
+                    summary: summary.as_deref(),
+                    allow_branch,
+                },
+            )?;
+            let blocked = out.status == vaire::output::ReleaseStatus::Blocked;
+            let released = out.status == vaire::output::ReleaseStatus::Released;
+            emit(&out, json);
+            if blocked {
+                // Not a failure: a decision waiting on a maintainer. Its own code so a
+                // pipeline can report it as pending rather than broken.
+                return Ok(ExitCode::ReleaseBlocked);
+            }
+            // `--push` is a convenience over the split, never a merge of it: the release
+            // has already been committed and tagged by the time this runs, so a failed
+            // upload leaves a perfectly good tag that `vaire push` will publish on its own.
+            // Nothing to publish (a dry run, or a no-op release) means nothing to do.
+            #[cfg(feature = "pack")]
+            if push && released {
+                let out = commands::push::run(
+                    &ctx,
+                    commands::push::Options {
+                        version: None,
+                        registry: None,
+                        access: None,
+                        access_hint: None,
+                        dry_run: false,
+                    },
+                )?;
+                let failed = !out.failed.is_empty();
+                emit(&out, json);
+                if failed {
+                    return Ok(ExitCode::Generic);
+                }
+            }
+            #[cfg(not(feature = "pack"))]
+            // Not gated on `released`, unlike the `pack` build above: there the guard means
+            // "nothing was cut, so there is nothing to upload", and here the flag can never
+            // do anything at all. Accepting it silently on a dry run would teach nothing.
+            if push {
+                return Err(VaireError::Usage(
+                    "`--push` needs the `pack` feature: an artifact has to exist before it \
+                     can be uploaded"
+                        .into(),
+                ));
+            }
+        }
         #[cfg(feature = "pack")]
         Command::Pack { no_embeddings } => {
             emit(&commands::pack::run(&ctx, no_embeddings)?, json);
+        }
+        #[cfg(feature = "pack")]
+        Command::Pull {
+            spec,
+            registry,
+            locked,
+            dry_run,
+        } => {
+            let out = commands::pull::run(
+                &ctx,
+                commands::pull::Options {
+                    spec: spec.as_deref(),
+                    registry: registry.as_deref(),
+                    locked,
+                    dry_run,
+                },
+            )?;
+            let failed = !out.failed.is_empty();
+            emit(&out, json);
+            if failed {
+                return Ok(ExitCode::Generic);
+            }
+        }
+        #[cfg(feature = "pack")]
+        Command::Push {
+            version,
+            registry,
+            access,
+            access_hint,
+            dry_run,
+        } => {
+            let out = commands::push::run(
+                &ctx,
+                commands::push::Options {
+                    version: version.as_deref(),
+                    registry: registry.as_deref(),
+                    access: access.as_deref(),
+                    access_hint: access_hint.as_deref(),
+                    dry_run,
+                },
+            )?;
+            let failed = !out.failed.is_empty();
+            emit(&out, json);
+            if failed {
+                // Some versions did not publish. Reported per version above; the exit code
+                // is what a pipeline branches on.
+                return Ok(ExitCode::Generic);
+            }
+        }
+        Command::Pin { spec } => {
+            emit(&commands::pin::pin(&ctx, &spec)?, json);
+        }
+        Command::Unpin { name } => {
+            emit(&commands::pin::unpin(&ctx, &name)?, json);
         }
         Command::Deps => {
             emit(&commands::deps::run(&ctx)?, json);
         }
         Command::Init { .. }
+        | Command::Catalog { .. }
+        | Command::Registry { .. }
+        | Command::Yank { .. }
+        | Command::Clean { .. }
         | Command::Mcp
         | Command::Configure { .. }
         | Command::Add { .. }
@@ -268,5 +533,43 @@ fn emit_error(err: &VaireError, json: bool) {
         println!("{}", err.to_json());
     } else {
         eprintln!("error: {err}");
+    }
+}
+
+/// The context a **read** command runs in.
+///
+/// Ordinarily the package you are standing in. Outside one — or with `--all` — the
+/// rootless session, scoped by the catalog (cli.md §6.8). The fallback is confined
+/// to reads on purpose: a maintain command has nothing to maintain without a package, and
+/// its `no corpus found` error is the right answer rather than a scope substitution.
+///
+/// Note which way the fallback runs. It never rescues a *resolution* — an author's
+/// declared dependency that cannot be located still fails, because a manifest that
+/// silently resolves from ambient machine state has stopped meaning anything. It rescues
+/// only the case where there is no manifest at all to betray.
+fn read_ctx(
+    repo: Option<std::path::PathBuf>,
+    config: Option<std::path::PathBuf>,
+    all: bool,
+    frozen: bool,
+) -> Result<Ctx> {
+    let home = vaire::userconfig::vaire_home();
+    // `--all` widens the closure query, so whatever package you are standing in stays in
+    // scope — including one the catalog has never been told about. Standing nowhere is not
+    // an error here: `--all` is exactly as valid from `~` as from inside a package.
+    if all {
+        let standing_in = Ctx::new(repo, config)
+            .ok()
+            .map(|ctx| (ctx.config.name.clone(), ctx.repo.root().to_path_buf()));
+        return Ctx::rootless_with(home, standing_in, frozen);
+    }
+    // An explicit `--repo` / `VAIRE_REPO` naming something that is not a package is a
+    // mistake to report, not the ambient "no package anywhere above me" the fallback is
+    // for. Both arrive as `NoRepo`; only the ambient one may be answered with a different
+    // scope, or a typo'd override would silently return results from the whole machine.
+    let overridden = repo.is_some() || std::env::var_os("VAIRE_REPO").is_some();
+    match Ctx::new(repo, config) {
+        Err(VaireError::NoRepo) if !overridden => Ctx::rootless_with(home, None, frozen),
+        other => other,
     }
 }

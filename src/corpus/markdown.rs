@@ -129,6 +129,113 @@ pub fn mask_code_spans(line: &str) -> String {
     out.into_iter().collect()
 }
 
+/// Extract relative link/image targets with 1-based line numbers: inline
+/// `[text](target)` / `![alt](target)` plus reference-style definitions
+/// (`[label]: target` on its own line). Shared by `vaire pack` (registry.md §11 —
+/// inclusion rides on extraction) and diagram-file discovery (a fenced-off `.puml` link
+/// is found the same way a packed asset link is). Code is skipped via the fence/code-span
+/// awareness above, HTML (`<img src>`) is out of scope, and anything URL-shaped
+/// (`https://…`, `mailto:`, bare `#anchor`) is ignored. Wikilinks (`[[type:id]]`) never
+/// match: they have no `](`.
+pub fn relative_link_targets(content: &str) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    let mut fences = Fences::new();
+    for (i, raw_line) in content.lines().enumerate() {
+        let line_no = (i + 1) as u32;
+        if fences.is_code(raw_line) {
+            continue;
+        }
+        // A link inside an inline code span is an example, not a demand.
+        let masked = mask_code_spans(raw_line);
+        let trimmed = masked.trim_start();
+        // Reference-style definition: `[label]: target` alone on a line. Footnotes
+        // (`[^…]`) are prose; a label containing brackets means this was actually an
+        // inline link followed by a colon, which the `](` scan below handles.
+        if let Some(rest) = trimmed.strip_prefix('[')
+            && !rest.starts_with('^')
+            && let Some((label, def)) = rest.split_once("]:")
+            && !label.contains(['[', ']'])
+        {
+            let def = def.trim();
+            let raw_target = match def.strip_prefix('<') {
+                Some(bracketed) => bracketed
+                    .split_once('>')
+                    .map(|(t, _)| t)
+                    .unwrap_or(bracketed),
+                None => def.split(char::is_whitespace).next().unwrap_or(def),
+            };
+            if let Some(target) = classify(raw_target) {
+                out.push((target, line_no));
+            }
+            continue;
+        }
+        let mut rest = masked.as_str();
+        while let Some(idx) = rest.find("](") {
+            let after = &rest[idx + 2..];
+            let (raw_target, remainder) = match after.strip_prefix('<') {
+                // `](<path with spaces>)` — the brackets exist to permit spaces, so no
+                // title-splitting applies inside them.
+                Some(bracketed) => match bracketed.split_once('>') {
+                    Some((t, r)) => (t, r),
+                    None => break,
+                },
+                None => match after.split_once(')') {
+                    // `](path "title")` — the title is not part of the path.
+                    Some((t, r)) => (t.split(char::is_whitespace).next().unwrap_or(t), r),
+                    None => break,
+                },
+            };
+            rest = remainder;
+            if let Some(target) = classify(raw_target) {
+                out.push((target, line_no));
+            }
+        }
+    }
+    out
+}
+
+/// Reduce a raw link target to a relative file path worth checking, or `None` for
+/// targets that are not package files (URLs, anchors, empty). A leading-`/` "absolute"
+/// path is returned as-is so resolution can flag it — corpus Markdown is portable and an
+/// absolute path is broken everywhere but one machine.
+fn classify(raw: &str) -> Option<String> {
+    let mut target = raw.trim();
+    // `path#fragment` — the file is what must exist.
+    if let Some((path, _fragment)) = target.split_once('#') {
+        target = path;
+    }
+    if target.is_empty() {
+        return None;
+    }
+    // A scheme (`https://…`, `mailto:…`, `tel:…`) marks an external target: a colon
+    // before any path separator. Relative file paths cannot contain one there.
+    let head = target.split('/').next().unwrap_or(target);
+    if head.contains(':') {
+        return None;
+    }
+    Some(target.to_string())
+}
+
+/// Resolve `target` relative to `source` (both `/`-separated, package-root-relative).
+/// `None` when the target escapes the package root (including absolute paths).
+pub fn resolve_relative(source: &str, target: &str) -> Option<String> {
+    if target.starts_with('/') {
+        return None;
+    }
+    let mut stack: Vec<&str> = source.split('/').collect();
+    stack.pop(); // the source file itself; links resolve from its directory
+    for comp in target.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                stack.pop()?;
+            }
+            other => stack.push(other),
+        }
+    }
+    Some(stack.join("/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +305,81 @@ mod tests {
             mask_code_spans("a ` [[person:jane]]"),
             "a ` [[person:jane]]"
         );
+    }
+
+    #[test]
+    fn extracts_relative_targets_with_lines() {
+        let md = "# T\n\nSee [spec](docs/spec.md) and ![wiring](../attachments/w.png).\n\n\
+                  ```\n[not a link](inside/fence.md)\n```\n\nAlso [ext](https://x.example) \
+                  and [anchor](#top) and [mail](mailto:a@b.c).\n";
+        let links = relative_link_targets(md);
+        assert_eq!(
+            links,
+            vec![
+                ("docs/spec.md".to_string(), 3),
+                ("../attachments/w.png".to_string(), 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn titles_are_split_in_extraction() {
+        let md = "[doc](a.md \"the title\")\n";
+        assert_eq!(relative_link_targets(md), vec![("a.md".to_string(), 1)]);
+    }
+
+    #[test]
+    fn code_awareness_is_shared_with_the_corpus() {
+        let md = "~~~\n```\n[not](a.md)\n```\n[not](b.md)\n~~~\n\
+                  [real](c.md) and `[not](d.md)`\n";
+        assert_eq!(relative_link_targets(md), vec![("c.md".to_string(), 7)]);
+    }
+
+    #[test]
+    fn reference_style_definitions_extract() {
+        let md = "![photo][p]\n\n[p]: assets/photo.jpg\n[q]: <my file.png>\n\
+                  [^fn]: a footnote, not a file\n[r]: https://x.example\n\
+                  [text](a.md): an inline link before a colon is not a definition\n";
+        assert_eq!(
+            relative_link_targets(md),
+            vec![
+                ("assets/photo.jpg".to_string(), 3),
+                ("my file.png".to_string(), 4),
+                ("a.md".to_string(), 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn classify_strips_fragments_and_schemes() {
+        assert_eq!(classify("a.md#sec"), Some("a.md".into()));
+        assert_eq!(classify("#only-anchor"), None);
+        assert_eq!(classify("https://x.example/p"), None);
+        assert_eq!(classify("tel:123"), None);
+        assert_eq!(classify(""), None);
+        assert_eq!(classify("/etc/passwd"), Some("/etc/passwd".into()));
+    }
+
+    #[test]
+    fn angle_bracket_targets_keep_spaces() {
+        let md = "[doc](<my file.md>)\n";
+        assert_eq!(
+            relative_link_targets(md),
+            vec![("my file.md".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn resolution_is_directory_relative_and_containment_checked() {
+        assert_eq!(
+            resolve_relative("knowledge/a/b.md", "../x.md"),
+            Some("knowledge/x.md".into())
+        );
+        assert_eq!(
+            resolve_relative("readme.md", "attachments/p.png"),
+            Some("attachments/p.png".into())
+        );
+        assert_eq!(resolve_relative("a.md", "../../out.md"), None);
+        assert_eq!(resolve_relative("a.md", "/abs.md"), None);
     }
 }

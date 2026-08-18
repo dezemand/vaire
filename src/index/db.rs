@@ -26,11 +26,12 @@
 //! WAL is Turso's default journal mode. The DB is gitignored and per-checkout: each machine
 //! rebuilds its own from the Markdown.
 
-use std::future::Future;
 use std::path::Path;
 
-use turso::{Builder, Connection, Database, IntoParams, Row, Value};
+use turso::{IntoParams, Row};
 
+use crate::db::Db;
+pub use crate::db::{col_blob, col_f64, col_i64, col_opt_i64, col_opt_text, col_text, col_u32};
 use crate::error::{Result, VaireError};
 
 /// The current index schema version, stored in the `schema_version` table. **Bump this on
@@ -44,7 +45,15 @@ use crate::error::{Result, VaireError};
 /// manifest `name`) and `edges.to_package` (NULL = local; set for an `@pkg/` target).
 /// v4: lookup indexes for incremental replacement and section/embedding joins.
 /// v5: `nodes.alias_text` — name + aliases denormalized for alias matching.
-pub const SCHEMA_VERSION: u32 = 5;
+/// v6: `diagram_links(from_id, path)` — every diagram file a node's prose links to,
+/// recorded regardless of whether that file currently carries a `vaire/` marker (or
+/// even exists), so an edit to an external diagram file can invalidate the nodes that
+/// link to it (issue #23) without relying on there already being a `diagram` edge.
+/// v7: `malformed_diagram_refs` — `vaire/` markers whose target fails the reference
+/// grammar. A diagram has no loose-end form, so a mistyped target has nowhere else to
+/// live; recorded here it becomes a `vaire check` warning instead of evaporating
+/// (design.md §6).
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// The schema as individual statements, run in order on a fresh database. Kept inline
 /// (rather than a `.sql` asset) so the binary is self-contained. No `PRAGMA`s: WAL is
@@ -84,6 +93,28 @@ const SCHEMA_STMTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS edges_to   ON edges(to_id)",
     "CREATE INDEX IF NOT EXISTS edges_from ON edges(from_id)",
     "CREATE INDEX IF NOT EXISTS edges_source_file ON edges(source_file)",
+    // Every diagram file a node's prose links to (issue #23), independent of whether that
+    // file currently carries a `vaire/` marker or even exists — this is the *link*
+    // relationship, not the derived edge, so incremental indexing can invalidate a node
+    // when its linked diagram file changes even before that file had any marker at all.
+    "CREATE TABLE IF NOT EXISTS diagram_links (
+        from_id TEXT NOT NULL,
+        path    TEXT NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS diagram_links_from ON diagram_links(from_id)",
+    "CREATE INDEX IF NOT EXISTS diagram_links_path ON diagram_links(path)",
+    // `vaire/` markers whose target does not parse as a reference. Not an edge (there is
+    // no address to point at) and not an unresolved reference (a diagram has no loose-end
+    // form), so without a table of its own a typo in a diagram would simply not exist.
+    "CREATE TABLE IF NOT EXISTS malformed_diagram_refs (
+        from_id     TEXT NOT NULL,
+        raw         TEXT NOT NULL,
+        source_file TEXT NOT NULL,
+        line        INTEGER NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS malformed_diagram_refs_from ON malformed_diagram_refs(from_id)",
+    "CREATE INDEX IF NOT EXISTS malformed_diagram_refs_source_file
+        ON malformed_diagram_refs(source_file)",
     "CREATE TABLE IF NOT EXISTS unresolved (
         record_id   TEXT NOT NULL,
         type_guess  TEXT,                   -- nullable: [[?: ...]] has no type
@@ -131,12 +162,10 @@ const SCHEMA_STMTS: &[&str] = &[
 const FTS_INDEX_STMT: &str = "CREATE INDEX IF NOT EXISTS sections_fts ON sections USING fts (heading, body) \
      WITH (weights='heading=2.0,body=1.0')";
 
-/// An open handle to the derived index: a Turso connection plus the runtime that drives it.
+/// An open handle to the derived index — the shared Turso facade plus this schema's
+/// discipline (version gate, `meta`, the deferred FTS index).
 pub struct Index {
-    rt: tokio::runtime::Runtime,
-    // Held so the database outlives the connection; the connection does the work.
-    _db: Database,
-    conn: Connection,
+    db: Db,
 }
 
 impl Index {
@@ -182,50 +211,24 @@ impl Index {
         Ok(())
     }
 
-    /// Build the runtime, open the local Turso file, and connect. The experimental index
-    /// method is enabled per-connection so the native FTS index is available.
     fn connect(path: &Path) -> Result<Index> {
-        // A bare current-thread runtime: Turso owns its own async I/O (io_uring), so we need
-        // none of tokio's resource drivers (no `enable_all`, no io/time features) — the runtime
-        // exists only to `block_on` Turso's futures.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .map_err(|e| VaireError::IndexCorrupt(format!("tokio runtime: {e}")))?;
-        let path_str = path.to_string_lossy().into_owned();
-        let db = rt.block_on(async {
-            Builder::new_local(&path_str)
-                .experimental_index_method(true)
-                .build()
-                .await
-        })?;
-        let conn = db.connect()?;
-        Ok(Index { rt, _db: db, conn })
-    }
-
-    /// Block on a future using the index's own runtime — the sole async→sync bridge.
-    fn block<F: Future>(&self, fut: F) -> F::Output {
-        self.rt.block_on(fut)
+        Ok(Index {
+            db: Db::connect(path)?,
+        })
     }
 
     /// Run a statement, returning the number of rows changed. Use for INSERT/UPDATE/DELETE
     /// and DDL; a statement that yields rows must go through [`Index::query_rows`].
     pub fn execute(&self, sql: &str, params: impl IntoParams) -> Result<u64> {
-        Ok(self.block(self.conn.execute(sql, params))?)
+        self.db.execute(sql, params)
     }
 
     /// Run a query and map every row, collecting into a `Vec`.
-    pub fn query_rows<T, F>(&self, sql: &str, params: impl IntoParams, mut map: F) -> Result<Vec<T>>
+    pub fn query_rows<T, F>(&self, sql: &str, params: impl IntoParams, map: F) -> Result<Vec<T>>
     where
         F: FnMut(&Row) -> Result<T>,
     {
-        self.block(async move {
-            let mut rows = self.conn.query(sql, params).await?;
-            let mut out = Vec::new();
-            while let Some(row) = rows.next().await? {
-                out.push(map(&row)?);
-            }
-            Ok(out)
-        })
+        self.db.query_rows(sql, params, map)
     }
 
     /// Run a query and map its **first** row, or `None` if it returned none.
@@ -233,18 +236,12 @@ impl Index {
     where
         F: FnOnce(&Row) -> Result<T>,
     {
-        self.block(async move {
-            let mut rows = self.conn.query(sql, params).await?;
-            match rows.next().await? {
-                Some(row) => Ok(Some(map(&row)?)),
-                None => Ok(None),
-            }
-        })
+        self.db.query_opt(sql, params, map)
     }
 
     /// A single `i64` scalar (e.g. `SELECT count(*)`), defaulting to `0` for no rows.
     pub fn scalar_i64(&self, sql: &str, params: impl IntoParams) -> Result<i64> {
-        Ok(self.query_opt(sql, params, |r| col_i64(r, 0))?.unwrap_or(0))
+        self.db.scalar_i64(sql, params)
     }
 
     /// Run `f` inside a transaction: `BEGIN`, then `COMMIT` on success or `ROLLBACK` on
@@ -301,59 +298,4 @@ impl Index {
         )?;
         Ok(())
     }
-}
-
-// --- Row extractors -----------------------------------------------------------------------
-// Turso hands back a `Value` enum; these pull typed columns with a clear error on a type
-// mismatch, so the query sites read much like rusqlite's `row.get::<_, T>(i)`.
-
-/// A required `TEXT` column.
-pub fn col_text(row: &Row, i: usize) -> Result<String> {
-    match row.get_value(i)? {
-        Value::Text(s) => Ok(s),
-        other => Err(type_err(i, "TEXT", &other)),
-    }
-}
-
-/// A nullable `TEXT` column: SQL `NULL` → `None`.
-pub fn col_opt_text(row: &Row, i: usize) -> Result<Option<String>> {
-    match row.get_value(i)? {
-        Value::Text(s) => Ok(Some(s)),
-        Value::Null => Ok(None),
-        other => Err(type_err(i, "TEXT or NULL", &other)),
-    }
-}
-
-/// A required `INTEGER` column.
-pub fn col_i64(row: &Row, i: usize) -> Result<i64> {
-    match row.get_value(i)? {
-        Value::Integer(n) => Ok(n),
-        other => Err(type_err(i, "INTEGER", &other)),
-    }
-}
-
-/// A required `INTEGER` column narrowed to `u32` (line numbers, counts).
-pub fn col_u32(row: &Row, i: usize) -> Result<u32> {
-    Ok(col_i64(row, i)? as u32)
-}
-
-/// A required `REAL` column (e.g. `vector_distance_cos`, `fts_score`); an `INTEGER` widens.
-pub fn col_f64(row: &Row, i: usize) -> Result<f64> {
-    match row.get_value(i)? {
-        Value::Real(f) => Ok(f),
-        Value::Integer(n) => Ok(n as f64),
-        other => Err(type_err(i, "REAL", &other)),
-    }
-}
-
-/// A required `BLOB` column.
-pub fn col_blob(row: &Row, i: usize) -> Result<Vec<u8>> {
-    match row.get_value(i)? {
-        Value::Blob(b) => Ok(b),
-        other => Err(type_err(i, "BLOB", &other)),
-    }
-}
-
-fn type_err(i: usize, want: &str, got: &Value) -> VaireError {
-    VaireError::IndexCorrupt(format!("column {i}: expected {want}, got {got:?}"))
 }

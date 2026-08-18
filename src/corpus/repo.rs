@@ -64,6 +64,13 @@ impl Repo {
 
     /// Whether the corpus root is itself a Git repository (has its own `.git`). A corpus
     /// nested inside a larger repo is *not* one — it is indexed from the working tree.
+    /// A repo handle at an explicit root, with no discovery and no manifest requirement.
+    /// For the rootless session, whose "root" is the vaire home and whose commands never
+    /// read a corpus through it.
+    pub fn at(root: PathBuf) -> Repo {
+        Repo { root }
+    }
+
     pub fn is_git_root(&self) -> bool {
         self.root.join(".git").exists()
     }

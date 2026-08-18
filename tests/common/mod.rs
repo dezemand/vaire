@@ -167,9 +167,11 @@ impl Corpus {
         self.dir.path().join(".vaire").join("packages")
     }
 
-    /// A command context pointed at this corpus.
+    /// A command context pointed at this corpus, with its own catalog ([`Ws::ctx`]).
     pub fn ctx(&self) -> Ctx {
-        Ctx::new(Some(self.dir.path().to_path_buf()), None).unwrap()
+        Ctx::new(Some(self.dir.path().to_path_buf()), None)
+            .unwrap()
+            .with_home(self.dir.path().join(".vaire-home"))
     }
 
     /// Build the standard spec fixture (the design.md/cli.md examples), commit, index.
@@ -361,9 +363,20 @@ impl Ws {
         self
     }
 
-    /// A command context rooted at one member.
+    /// A command context rooted at one member, pointed at **this workspace's own** catalog.
+    ///
+    /// Per-workspace rather than per-process: Turso locks a database exclusively on open,
+    /// so tests sharing one catalog would serialize on it — and a test that reached the
+    /// developer's real `~/.vaire` would not be a test.
     pub fn ctx(&self, pkg: &str) -> Ctx {
-        Ctx::new(Some(self.root(pkg)), None).unwrap()
+        Ctx::new(Some(self.root(pkg)), None)
+            .unwrap()
+            .with_home(self.home())
+    }
+
+    /// This workspace's hermetic vaire home (the catalog lives here).
+    pub fn home(&self) -> PathBuf {
+        self.dir.path().join(".vaire-home")
     }
 
     /// The acceptance-criteria workspace (issue #2): acme-core [team, person] and

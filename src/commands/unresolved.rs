@@ -2,7 +2,7 @@
 //!
 //! The work list for the entity-creation pass (design.md §8), derived fresh from the
 //! files on each call — there is no stored queue. Default scope is the CURRENT package:
-//! a descriptor is package-agnostic (packages.md §7) and a dependency's loose ends are
+//! a descriptor is package-agnostic (cli.md §3.5) and a dependency's loose ends are
 //! its owner's worklist. `--all-packages` widens to the linked closure, each row tagged
 //! with its package.
 
@@ -30,6 +30,19 @@ pub fn run(
     }
 
     let ws = ctx.workspace()?;
+    // A rootless session (cli.md §6.8) has no current package, so the default scope has
+    // nothing to mean and the widened form is the only one there is. Taken here rather
+    // than left to fail later: asking the synthetic root for an index would report a
+    // missing index, which names neither the situation nor anything the caller can fix.
+    let all_packages = all_packages || ws.is_rootless();
+    if ws.is_rootless() && scope.is_some() {
+        return Err(VaireError::Usage(
+            "--scope needs a package to be relative to, and there is none here — run this \
+             inside a package, or drop --scope to list every unresolved reference in your \
+             catalog"
+                .into(),
+        ));
+    }
     let run_root = ws.current();
     let (members, mut skipped) = if all_packages {
         ws.consult_closure()

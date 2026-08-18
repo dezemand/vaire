@@ -16,7 +16,14 @@
 //! - `deps_snapshot` is rewritten to `{name, version, constraint}` — an artifact records
 //!   choices, never locations (registry.md §5.1);
 //! - provenance meta (`last_indexed_commit`, `index_source`, `package_name`,
-//!   `embed_provider`) is carried over, plus `packed_by` (the packing vaire's version).
+//!   `embed_provider`) is carried over, plus [`ARTIFACT_FORMAT`].
+//!
+//! **Nothing here may identify the build.** The artifact's digest is what a lockfile pins
+//! and what `push` re-derives from a tag, so it has to be a property of the release rather
+//! than of whoever packed it. A stamp naming the packing vaire's own version — which this
+//! once carried — meant the same tag packed to different bytes after a `vaire upgrade`,
+//! and a re-push then reported the release as somebody else's. What ships instead is the
+//! *format* number below, which changes only when the artifact layout deliberately does.
 
 use std::path::Path;
 
@@ -24,6 +31,13 @@ use turso::Value;
 
 use crate::error::{Result, VaireError};
 use crate::index::db::{Index, SCHEMA_VERSION, col_blob, col_opt_text, col_text, col_u32};
+
+/// The artifact layout's own version, stamped into every packed index as `artifact_format`.
+///
+/// Bump when the artifact's shape changes in a way a consumer must notice. Deliberately
+/// **not** the vaire version: two builds of one tag differ in the latter and must not
+/// differ in their bytes.
+pub const ARTIFACT_FORMAT: &str = "1";
 
 /// What the export wrote — surfaced in `vaire pack`'s output.
 #[derive(Debug, Clone, Copy)]
@@ -41,7 +55,6 @@ pub(crate) fn export_artifact_index(
     src_path: &Path,
     dest_path: &Path,
     include_embeddings: bool,
-    packed_by: &str,
 ) -> Result<ExportStats> {
     let src = Index::open(src_path)?;
     if src.schema_version() != Some(SCHEMA_VERSION) {
@@ -66,7 +79,7 @@ pub(crate) fn export_artifact_index(
         } else {
             0
         };
-        copy_meta(&src, dest, packed_by)?;
+        copy_meta(&src, dest)?;
         Ok(ExportStats {
             nodes,
             edges,
@@ -308,8 +321,8 @@ fn copy_embeddings(src: &Index, dest: &Index) -> Result<usize> {
 }
 
 /// Carry provenance meta across, rewrite `deps_snapshot` to drop machine paths, and stamp
-/// the packing vaire's version.
-fn copy_meta(src: &Index, dest: &Index, packed_by: &str) -> Result<()> {
+/// the artifact format.
+fn copy_meta(src: &Index, dest: &Index) -> Result<()> {
     for key in [
         "last_indexed_commit",
         "index_source",
@@ -342,6 +355,6 @@ fn copy_meta(src: &Index, dest: &Index, packed_by: &str) -> Result<()> {
             &serde_json::to_string(&entries).expect("json array"),
         )?;
     }
-    dest.set_meta("packed_by", packed_by)?;
+    dest.set_meta("artifact_format", ARTIFACT_FORMAT)?;
     Ok(())
 }

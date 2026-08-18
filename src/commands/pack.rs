@@ -1,17 +1,17 @@
 //! `vaire pack [--no-embeddings]` — build this package's distributable artifact
-//! (registry.md §5). Maintain command — not on the MCP surface.
+//! (registry.md §11). Maintain command — not on the MCP surface.
 //!
 //! The artifact is `<name>-<version>.tgz` in `.vaire/dist/`: a gzipped tar with a single
 //! top-level directory holding the manifest, every corpus file the manifest's
 //! include/exclude selects, **every file those reference** by relative link or image
-//! (transitively through referenced Markdown — registry.md §5.2), and a freshly
+//! (transitively through referenced Markdown — registry.md §11), and a freshly
 //! exported `.vaire/index.db` (the machine-readable manifest — registry.md §5.1).
 //! Everything is read **from the committed tree**: what you commit is what you publish,
 //! and the artifact is reproducible because its inputs are a commit, not a mood.
 //!
 //! Pack is also a publication gate: it refuses to build when `vaire check` reports
 //! violations, and it fails on a relative Markdown link whose target is missing from
-//! the committed tree (registry.md §5.2). Links to targets the author chose to keep out
+//! the committed tree (registry.md §11). Links to targets the author chose to keep out
 //! — exclude-glob-vetoed or gitignored — and a dirty working tree are warnings, not
 //! stops. Orphans cannot exist: an unreferenced file simply does not ship.
 
@@ -19,7 +19,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::commands::Ctx;
-use crate::corpus::markdown::{Fences, mask_code_spans};
+use crate::config::Config;
+use crate::corpus::markdown::{relative_link_targets, resolve_relative};
 use crate::corpus::repo::Repo;
 use crate::corpus::scan::Scanner;
 use crate::error::{Result, VaireError};
@@ -81,14 +82,17 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
     let head_files = git::list_files_at_head(root)?;
     let head_set: BTreeSet<&str> = head_files.iter().map(String::as_str).collect();
     let scanner = Scanner::from_config(&ctx.config)?;
-    let mut selected: BTreeSet<String> = BTreeSet::new();
-    selected.insert("knowledge.toml".to_string());
-    for file in &head_files {
-        if scanner.is_match(Path::new(file)) {
-            selected.insert(file.clone());
-        }
-    }
-    let payload = collect_referenced_files(root, &selected, &head_set, &scanner, &mut warnings)?;
+    let selected = select_files(&head_files, &scanner);
+    let payload = collect_referenced_files(
+        root,
+        "HEAD",
+        Absent::AskGitignore,
+        &selected,
+        &head_set,
+        &scanner,
+        &mut warnings,
+    )?;
+    let mut selected = selected;
     selected.extend(payload);
 
     // ---- the artifact index (registry.md §5.1) -----------------------------------------
@@ -109,12 +113,7 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
         std::path::PathBuf::from(format!("{}-shm", staging_db.display())),
         tmp.clone(),
     ]);
-    let stats = export::export_artifact_index(
-        &ctx.repo.index_db(),
-        &staging_db,
-        !no_embeddings,
-        concat!("vaire ", env!("CARGO_PKG_VERSION")),
-    )?;
+    let stats = export::export_artifact_index(&ctx.repo.index_db(), &staging_db, !no_embeddings)?;
 
     // ---- the deterministic archive -----------------------------------------------------
     // Entry order is the BTreeMap's (sorted); timestamps are the commit's; ownership is
@@ -155,6 +154,169 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
     })
 }
 
+/// The artifact for a **released tag**, rebuilt from that tag's committed tree.
+///
+/// This is what makes `.vaire/dist/` a cache rather than a requirement (amendment 15):
+/// `vaire push` works from a fresh clone because a tag carries everything the artifact is
+/// made of. Three differences from [`run`], each of them a consequence of packing history
+/// rather than the present:
+///
+/// * **No embedder.** The index is built by [`build::snapshot`], which reads a rev straight
+///   into a scratch database with no vectors — and the publish default is stripped
+///   artifacts anyway (§11), so there was nothing for an embedder to contribute. CI
+///   therefore needs no embedding configuration to publish (amendment 21).
+/// * **No `check` gate.** `vaire release` ran it before it created the tag. Re-running it
+///   here would judge an old tree by today's rules, and a tag cannot be edited in response.
+/// * **Nothing is written into the package.** The staging files live in `dest_dir`, so
+///   packing a tag never touches the working checkout or its index.
+/// * **A referenced file the tag does not carry is a warning, not a refusal**
+///   ([`Absent::Warn`]). [`run`] separates "declared local-only" from "forgotten
+///   `git add`" by asking `git check-ignore`, which only ever answers for the working
+///   tree — so asking it here would make publishing a release depend on today's
+///   `.gitignore`, and the tag cannot be edited in response to either answer.
+pub fn at_rev(root: &Path, rev: &str, dest_dir: &Path) -> Result<RevArtifact> {
+    let manifest = git::show_many_at(root, rev, &["knowledge.toml".to_string()])?
+        .into_iter()
+        .next()
+        .flatten()
+        .ok_or_else(|| {
+            VaireError::Pack(format!(
+                "{rev} has no knowledge.toml — it is not a package tree"
+            ))
+        })?;
+    // Parsed from the tag, never from the working tree: the manifest is the artifact's
+    // identity and its file-selection rules, and both are properties of the release.
+    let config = Config::parse(&manifest, &format!("{rev}:knowledge.toml"))?;
+
+    let files = git::list_files_at(root, rev)?;
+    let file_set: BTreeSet<&str> = files.iter().map(String::as_str).collect();
+    let scanner = Scanner::from_config(&config)?;
+    let selected = select_files(&files, &scanner);
+    let mut warnings = Vec::new();
+    let payload = collect_referenced_files(
+        root,
+        rev,
+        Absent::Warn,
+        &selected,
+        &file_set,
+        &scanner,
+        &mut warnings,
+    )?;
+    let mut selected = selected;
+    selected.extend(payload);
+
+    std::fs::create_dir_all(dest_dir)?;
+    let top = format!("{}-{}", config.name, config.version);
+    let file_name = format!("{top}.tgz");
+    let pid = std::process::id();
+    let snapshot_db = dest_dir.join(format!(".push-snapshot-{pid}.db"));
+    let staging_db = dest_dir.join(format!(".push-index-{pid}.db"));
+    let tmp = dest_dir.join(format!(".{file_name}.{pid}.tmp"));
+    let _scratch = RemoveOnDrop(
+        [&snapshot_db, &staging_db]
+            .iter()
+            .flat_map(|db| {
+                ["", "-wal", "-shm"]
+                    .map(|suffix| std::path::PathBuf::from(format!("{}{suffix}", db.display())))
+            })
+            .chain([tmp.clone()])
+            .collect(),
+    );
+
+    build::snapshot(root, &config, rev, &snapshot_db)?;
+    // `snapshot` records no provenance — it exists for the release classifier, which reads
+    // an index once and deletes it. An *artifact* index is read by every consumer that
+    // materializes it, and one that cannot say which commit it is leaves a store entry
+    // unable to answer the same question. Stamped from the tag it was built from.
+    {
+        let index = crate::index::Index::open(&snapshot_db)?;
+        if let Some(commit) = git::resolve_rev(root, rev)? {
+            index.set_meta("last_indexed_commit", &commit)?;
+        }
+        index.set_meta("index_source", "committed")?;
+    }
+    // Always stripped. A released artifact's checksum has to be reproducible for the
+    // lockfile to mean anything, and vectors are consumer configuration (§11).
+    export::export_artifact_index(&snapshot_db, &staging_db, false)?;
+
+    let git_paths: Vec<String> = selected.iter().cloned().collect();
+    let blobs = git::show_many_at_bytes(root, rev, &git_paths)?;
+    let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for (path, blob) in git_paths.iter().zip(blobs) {
+        let bytes = blob.ok_or_else(|| {
+            VaireError::Pack(format!(
+                "{path} is listed at {rev} but has no readable blob"
+            ))
+        })?;
+        entries.insert(path.clone(), bytes);
+    }
+    entries.insert(".vaire/index.db".to_string(), std::fs::read(&staging_db)?);
+
+    let epoch = git::commit_epoch_at(root, rev)?.unwrap_or(0).max(0) as u64;
+    write_archive(&tmp, &top, &entries, epoch)?;
+    let artifact = dest_dir.join(&file_name);
+    std::fs::rename(&tmp, &artifact)?;
+
+    Ok(RevArtifact {
+        name: config.name,
+        version: config.version,
+        description: config.description,
+        dependencies: config.dependencies,
+        sha256: crate::hash::sha256_file(&artifact)?,
+        size_bytes: std::fs::metadata(&artifact)?.len(),
+        entries: entries.len(),
+        path: artifact,
+        warnings,
+    })
+}
+
+/// What to do about a referenced file the packed tree does not carry.
+///
+/// The distinction exists because `git check-ignore` only ever answers for the **working
+/// tree**. Asking it about a tag would make publishing a release depend on today's
+/// `.gitignore`: a rule added since would turn an old tag's broken link into a warning, or
+/// its removal turn a declared-local-only target into a failure. Either way the tag is what
+/// it is, and no answer to that question can be acted on.
+#[derive(Clone, Copy)]
+enum Absent {
+    /// Packing the working tree: its ignore rules are the right thing to ask, and they
+    /// separate "declared local-only" from "forgotten `git add`".
+    AskGitignore,
+    /// Packing history. Every absent target is reported and the artifact still builds —
+    /// the alternative is refusing to publish a release nobody can edit in response, which
+    /// would make the tool's own past permanently unpublishable.
+    Warn,
+}
+
+/// An artifact rebuilt from a tag, plus what the wire needs to describe it.
+///
+/// `dependencies` rides along because the index document carries them (§8.3, decision 9):
+/// transitive resolution must never download an artifact to read a manifest, so `push`
+/// reads them here, from the manifest it already parsed.
+pub struct RevArtifact {
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub dependencies: std::collections::BTreeMap<String, String>,
+    pub path: std::path::PathBuf,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub entries: usize,
+    pub warnings: Vec<String>,
+}
+
+/// The corpus files of a tree: the manifest, plus whatever the include/exclude globs select.
+fn select_files(files: &[String], scanner: &Scanner) -> BTreeSet<String> {
+    let mut selected: BTreeSet<String> = BTreeSet::new();
+    selected.insert("knowledge.toml".to_string());
+    for file in files {
+        if scanner.is_match(Path::new(file)) {
+            selected.insert(file.clone());
+        }
+    }
+    selected
+}
+
 /// Grow the artifact's payload from references, validating every relative link.
 ///
 /// **Inclusion is by reference, not location** (registry.md §5.2): every relative
@@ -167,8 +329,13 @@ pub fn run(ctx: &Ctx, no_embeddings: bool) -> Result<PackOutput> {
 /// package root) **fails the pack** — a typo or a forgotten `git add`. A trailing-`/`
 /// target is a directory link: satisfied by any shipped file under it, but never an
 /// inclusion demand — a link asks for a file, not a tree.
+///
+/// `absent` decides only the middle of those: what to do about a target the tree does not
+/// carry (see [`Absent`]).
 fn collect_referenced_files(
     root: &Path,
+    rev: &str,
+    absent: Absent,
     corpus: &BTreeSet<String>,
     head_set: &BTreeSet<&str>,
     scanner: &Scanner,
@@ -191,7 +358,7 @@ fn collect_referenced_files(
     // Breadth-first over the reference graph, one Git batch per frontier.
     let mut frontier: Vec<String> = visited_md.iter().cloned().collect();
     while !frontier.is_empty() {
-        let contents = git::show_many_at_head(root, &frontier)?;
+        let contents = git::show_many_at(root, rev, &frontier)?;
         let mut next = Vec::new();
         for (path, content) in frontier.iter().zip(contents) {
             let Some(content) = content else { continue };
@@ -249,20 +416,32 @@ fn collect_referenced_files(
         }
     }
 
-    // The tiebreaker for a target absent from HEAD: the repository's own ignore rules.
-    // A gitignored target was *declared* local-only by the author — warn. An unignored
-    // one is a typo or a forgotten `git add` — fail.
-    if !missing.is_empty() {
-        let ask: Vec<String> = missing.iter().map(|(_, _, _, p, _)| p.clone()).collect();
-        let ignored = git::ignored_paths(root, &ask)?;
-        for (path, line, target, asked, kind) in missing {
-            if ignored.contains(&asked) {
+    // The tiebreaker for a target absent from the tree: the repository's own ignore rules.
+    // A gitignored target was *declared* local-only by the author — warn. An unignored one
+    // is a typo or a forgotten `git add` — fail. Only available when the working tree is
+    // the thing being packed; see [`Absent`].
+    match (missing.is_empty(), absent) {
+        (true, _) => {}
+        (false, Absent::AskGitignore) => {
+            let ask: Vec<String> = missing.iter().map(|(_, _, _, p, _)| p.clone()).collect();
+            let ignored = git::ignored_paths(root, &ask)?;
+            for (path, line, target, asked, kind) in missing {
+                if ignored.contains(&asked) {
+                    warnings.push(format!(
+                        "{path}:{line} links to {target}, which is gitignored (local-only by \
+                         this package's own declaration) and not distributed"
+                    ));
+                } else {
+                    violations.push(format!("{path}:{line} → {target} (no such {kind} at HEAD)"));
+                }
+            }
+        }
+        (false, Absent::Warn) => {
+            for (path, line, target, _, kind) in missing {
                 warnings.push(format!(
-                    "{path}:{line} links to {target}, which is gitignored (local-only by \
-                     this package's own declaration) and not distributed"
+                    "{path}:{line} links to {target}, and no such {kind} is committed at \
+                     {rev}; it is not in the artifact"
                 ));
-            } else {
-                violations.push(format!("{path}:{line} → {target} (no such {kind} at HEAD)"));
             }
         }
     }
@@ -275,114 +454,6 @@ fn collect_referenced_files(
         )));
     }
     Ok(payload)
-}
-
-/// Extract relative link/image targets with 1-based line numbers: inline
-/// `[text](target)` / `![alt](target)` plus reference-style definitions
-/// (`[label]: target` on its own line). Because **inclusion rides on extraction**
-/// (registry.md §5.2), the scope is deliberate and documented: code is skipped via the
-/// shared CommonMark awareness (`corpus::markdown` — fences tracked by their opening
-/// marker, inline spans masked), HTML (`<img src>`) is out of scope, and anything
-/// URL-shaped (`https://…`, `mailto:`, bare `#anchor`) is ignored — those are not files
-/// this artifact must carry. Wikilinks (`[[type:id]]`) never match: they have no `](`,
-/// and `vaire check` owns them.
-fn relative_link_targets(content: &str) -> Vec<(String, u32)> {
-    let mut out = Vec::new();
-    let mut fences = Fences::new();
-    for (i, raw_line) in content.lines().enumerate() {
-        let line_no = (i + 1) as u32;
-        if fences.is_code(raw_line) {
-            continue;
-        }
-        // A link inside an inline code span is an example, not a demand.
-        let masked = mask_code_spans(raw_line);
-        let trimmed = masked.trim_start();
-        // Reference-style definition: `[label]: target` alone on a line. Footnotes
-        // (`[^…]`) are prose; a label containing brackets means this was actually an
-        // inline link followed by a colon, which the `](` scan below handles.
-        if let Some(rest) = trimmed.strip_prefix('[')
-            && !rest.starts_with('^')
-            && let Some((label, def)) = rest.split_once("]:")
-            && !label.contains(['[', ']'])
-        {
-            let def = def.trim();
-            let raw_target = match def.strip_prefix('<') {
-                Some(bracketed) => bracketed
-                    .split_once('>')
-                    .map(|(t, _)| t)
-                    .unwrap_or(bracketed),
-                None => def.split(char::is_whitespace).next().unwrap_or(def),
-            };
-            if let Some(target) = classify(raw_target) {
-                out.push((target, line_no));
-            }
-            continue;
-        }
-        let mut rest = masked.as_str();
-        while let Some(idx) = rest.find("](") {
-            let after = &rest[idx + 2..];
-            let (raw_target, remainder) = match after.strip_prefix('<') {
-                // `](<path with spaces>)` — the brackets exist to permit spaces, so no
-                // title-splitting applies inside them.
-                Some(bracketed) => match bracketed.split_once('>') {
-                    Some((t, r)) => (t, r),
-                    None => break,
-                },
-                None => match after.split_once(')') {
-                    // `](path "title")` — the title is not part of the path.
-                    Some((t, r)) => (t.split(char::is_whitespace).next().unwrap_or(t), r),
-                    None => break,
-                },
-            };
-            rest = remainder;
-            if let Some(target) = classify(raw_target) {
-                out.push((target, line_no));
-            }
-        }
-    }
-    out
-}
-
-/// Reduce a raw link target to a relative file path worth checking, or `None` for
-/// targets that are not package files (URLs, anchors, empty). A leading-`/` "absolute"
-/// path is returned as-is so resolution can flag it — corpus Markdown is portable and an
-/// absolute path is broken everywhere but one machine.
-fn classify(raw: &str) -> Option<String> {
-    let mut target = raw.trim();
-    // `path#fragment` — the file is what must exist.
-    if let Some((path, _fragment)) = target.split_once('#') {
-        target = path;
-    }
-    if target.is_empty() {
-        return None;
-    }
-    // A scheme (`https://…`, `mailto:…`, `tel:…`) marks an external target: a colon
-    // before any path separator. Relative file paths cannot contain one there.
-    let head = target.split('/').next().unwrap_or(target);
-    if head.contains(':') {
-        return None;
-    }
-    Some(target.to_string())
-}
-
-/// Resolve `target` relative to `source` (both `/`-separated, package-root-relative).
-/// `None` when the target escapes the package root (including absolute paths).
-fn resolve_relative(source: &str, target: &str) -> Option<String> {
-    if target.starts_with('/') {
-        return None;
-    }
-    let mut stack: Vec<&str> = source.split('/').collect();
-    stack.pop(); // the source file itself; links resolve from its directory
-    for comp in target.split('/') {
-        match comp {
-            "" | "." => {}
-            ".." => {
-                stack.pop()?;
-            }
-            other => stack.push(other),
-        }
-    }
-    Some(stack.join("/"))
 }
 
 /// Best-effort scratch cleanup on every exit path — a `?` anywhere in `run` must not
@@ -427,89 +498,4 @@ fn write_archive(
     let file = gz.finish()?;
     file.sync_all()?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{classify, relative_link_targets, resolve_relative};
-
-    #[test]
-    fn extracts_relative_targets_with_lines() {
-        let md = "# T\n\nSee [spec](docs/spec.md) and ![wiring](../attachments/w.png).\n\n\
-                  ```\n[not a link](inside/fence.md)\n```\n\nAlso [ext](https://x.example) \
-                  and [anchor](#top) and [mail](mailto:a@b.c).\n";
-        let links = relative_link_targets(md);
-        assert_eq!(
-            links,
-            vec![
-                ("docs/spec.md".to_string(), 3),
-                ("../attachments/w.png".to_string(), 3),
-            ]
-        );
-    }
-
-    #[test]
-    fn titles_are_split_in_extraction() {
-        let md = "[doc](a.md \"the title\")\n";
-        assert_eq!(relative_link_targets(md), vec![("a.md".to_string(), 1)]);
-    }
-
-    #[test]
-    fn code_awareness_is_shared_with_the_corpus() {
-        // A backtick fence nested inside a tilde fence stays code — the naive toggle
-        // failed exactly here, which is why `corpus::markdown::Fences` exists — and an
-        // inline code span is an example, not a demand.
-        let md = "~~~\n```\n[not](a.md)\n```\n[not](b.md)\n~~~\n\
-                  [real](c.md) and `[not](d.md)`\n";
-        assert_eq!(relative_link_targets(md), vec![("c.md".to_string(), 7)]);
-    }
-
-    #[test]
-    fn reference_style_definitions_extract() {
-        let md = "![photo][p]\n\n[p]: assets/photo.jpg\n[q]: <my file.png>\n\
-                  [^fn]: a footnote, not a file\n[r]: https://x.example\n\
-                  [text](a.md): an inline link before a colon is not a definition\n";
-        assert_eq!(
-            relative_link_targets(md),
-            vec![
-                ("assets/photo.jpg".to_string(), 3),
-                ("my file.png".to_string(), 4),
-                ("a.md".to_string(), 7),
-            ]
-        );
-    }
-
-    #[test]
-    fn classify_strips_fragments_and_schemes() {
-        assert_eq!(classify("a.md#sec"), Some("a.md".into()));
-        assert_eq!(classify("#only-anchor"), None);
-        assert_eq!(classify("https://x.example/p"), None);
-        assert_eq!(classify("tel:123"), None);
-        assert_eq!(classify(""), None);
-        // Absolute paths survive classification so resolution can reject them.
-        assert_eq!(classify("/etc/passwd"), Some("/etc/passwd".into()));
-    }
-
-    #[test]
-    fn angle_bracket_targets_keep_spaces() {
-        let md = "[doc](<my file.md>)\n";
-        assert_eq!(
-            relative_link_targets(md),
-            vec![("my file.md".to_string(), 1)]
-        );
-    }
-
-    #[test]
-    fn resolution_is_directory_relative_and_containment_checked() {
-        assert_eq!(
-            resolve_relative("knowledge/a/b.md", "../x.md"),
-            Some("knowledge/x.md".into())
-        );
-        assert_eq!(
-            resolve_relative("readme.md", "attachments/p.png"),
-            Some("attachments/p.png".into())
-        );
-        assert_eq!(resolve_relative("a.md", "../../out.md"), None);
-        assert_eq!(resolve_relative("a.md", "/abs.md"), None);
-    }
 }

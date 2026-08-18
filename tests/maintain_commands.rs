@@ -135,7 +135,7 @@ fn orphan_is_a_warning_not_a_failure_unless_strict() {
 #[test]
 fn check_flags_undeclared_cross_package_import() {
     // A cross-package `@pkg/` reference whose package isn't in [dependencies] is an
-    // undeclared import — a violation (packages.md §8). Pure table check, no resolution.
+    // undeclared import — a violation (manifest.md §5). Pure table check, no resolution.
     let c = Corpus::empty();
     c.add(
         "knowledge/checkout.md",

@@ -25,6 +25,7 @@ lets you do is bounded by what its role may change.
 | [vaire-entity-creation](vaire-entity-creation/SKILL.md) | running the gated pass: loose ends → identities | maintainer |
 | [vaire-package-curation](vaire-package-curation/SKILL.md) | package boundaries, the substance bar, the type ladder, migrations | maintainer |
 | [vaire-versioning](vaire-versioning/SKILL.md) | deciding a bump, cutting a release, consuming a MAJOR | maintainer |
+| [vaire-release-summary](vaire-release-summary/SKILL.md) | writing the prose `vaire release --summary` carries into the record | contributor |
 | [vaire-check-triage](vaire-check-triage/SKILL.md) | `vaire check` failed — what each finding means and its fix | any |
 
 An agent doing autonomous corpus work typically loads **vaire-contributing** (its role),

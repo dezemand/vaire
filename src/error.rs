@@ -26,6 +26,13 @@ pub enum ExitCode {
     IdNotFound = 5,
     /// `6` — `vaire check` found violations (or warnings under `--strict`).
     CheckViolations = 6,
+    /// `7` — `vaire release` classified a MAJOR and stopped, because a MAJOR is a claim
+    /// about meaning that only a maintainer can make (classified per registry.md §3.1).
+    /// An *outcome*, not a failure, and distinct from a generic failure on purpose: an
+    /// automated release pipeline must be able to tell "this needs a human" from "this
+    /// broke", and report the first as a pending decision rather than a red build. The
+    /// exit-code and `--json` consequences of that distinction are cli.md §7.
+    ReleaseBlocked = 7,
 }
 
 impl ExitCode {
@@ -48,6 +55,8 @@ pub enum ErrorKind {
     Dependency,
     Upgrade,
     Pack,
+    Release,
+    Registry,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -95,6 +104,21 @@ pub enum VaireError {
     #[error("cannot pack: {0}")]
     Pack(String),
 
+    /// `vaire release` refused: a dirty tree, a branch that is not the mainline, a
+    /// corpus that is not its own repository, a version that already exists, or a MAJOR
+    /// missing its invalidated-assumptions notes. The message carries the exact fix.
+    /// Exit `1` — the *blocked-on-a-human* case is not an error at all, it is
+    /// [`ExitCode::ReleaseBlocked`] carrying a full classification.
+    #[error("cannot release: {0}")]
+    Release(String),
+
+    /// A registry operation failed. The typed [`crate::registry::RegistryError`] is what a
+    /// fan-out dispatches on and is kept intact for as long as it is useful; this variant
+    /// is where it lands once the decision has been made and only a person is left to tell.
+    /// Exit `1`.
+    #[error("registry error: {0}")]
+    Registry(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -136,6 +160,8 @@ impl VaireError {
             VaireError::Dependency(_) => ErrorKind::Dependency,
             VaireError::Upgrade(_) => ErrorKind::Upgrade,
             VaireError::Pack(_) => ErrorKind::Pack,
+            VaireError::Release(_) => ErrorKind::Release,
+            VaireError::Registry(_) => ErrorKind::Registry,
             _ => ErrorKind::Generic,
         }
     }
