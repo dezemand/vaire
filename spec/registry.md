@@ -91,6 +91,17 @@ instead of being built:
 oversight: a removed entity has no address left to point at. It costs nothing, because
 removals only happen in a MAJOR, where a human reads the notes anyway.
 
+A **first** release writes a record like any other. Having no baseline to diff is not the
+same as having nothing to say: the edges answer "which release published this?", and nothing
+ever re-adds an entity that was already there, so a founding entity with no record would be
+permanently unattributed.
+
+A record's edges are **history, and may cite an entity a later release removed**. That is not
+a dangling reference to be fixed — it cannot be corrected without lying about what was
+published, and nobody typed it. It is exempt from the resolution lints accordingly; left as
+an ordinary dangling reference it would fail `check` forever, and since `release` gates on
+`check`, the package could never be released again.
+
 The classifier **excludes the release type from its own diff**. Otherwise every release
 would add an entity and no later release could ever classify as PATCH.
 
@@ -167,14 +178,27 @@ recorded twice.
 
 ### 4.5 Schema
 
-The catalog stamps its own schema version. A version the binary knows how to bring
-forward is **migrated in place**; anything else is recreated, which stays affordable
-because every row is an observation something can produce again.
+The catalog stamps its own schema version. A version the binary knows how to bring forward
+is **migrated in place**. Each step is idempotent, because nothing transacts the schema
+change together with the version stamp — a process killed between the two has to be able to
+finish on the next open.
 
-Migration exists for one reason: `vaire clean` reads its roots from these rows (§7), so
-forgetting them stopped costing a rescan and started costing deletions. Each migration
-step is idempotent, because nothing transacts the schema change together with the version
-stamp — a process killed between the two has to be able to finish on the next open.
+Recreating was free while every row was an observation a rescan reproduces. **It stopped
+being free when `vaire clean` began reading its roots from these rows** (§8): a pin, and the
+record that a package was pulled by name, are not re-observable by anything, so forgetting
+them means the next sweep deletes the releases they were holding. Two rules follow:
+
+- **Unreadable must be proven, never inferred.** A failed connection says the engine did not
+  get a database; it does not say the bytes are at fault. The file is re-opened directly, and
+  only one this process can itself read and write is treated as garbage. A catalog that is
+  merely unreachable — permissions, a half-mounted home — is an **error**, and an error
+  deletes nothing.
+- **A newer catalog is refused, not rebuilt.** The lockfile's rule (§7) applied to the same
+  problem: refusing to *read* a format you do not know is only coherent if you also refuse to
+  *overwrite* it.
+
+What is displaced is kept beside the catalog rather than removed, so a wrong guess here costs
+a file to look at rather than the record of what this machine holds.
 
 ## 5. The store
 
@@ -406,6 +430,15 @@ compare-and-swap rather than a blind write. It is also the only step that is
 an exact-name lookup reads `/v1/index/<name>.json` directly. A publish that succeeded in
 every way that matters must not be reported as failed because this one document was busy.
 
+**An interrupted publish can be finished.** Only the first write is atomic, so the window
+between the three is real: a push killed after the artifact lands leaves the index silent
+about it. Refusing on the next attempt would make that state permanent — the identity would
+be immutably taken and no later push could claim it — which is the opposite of the
+retryable, publish-a-tag-you-did-not-cut contract (§3.3). So the question is decided **by the
+bytes**: an artifact on the host that is byte-identical to the one in hand, with no index
+entry naming it, is this push's own earlier attempt, and the push completes what it finds
+half-done. Different bytes under the same version stay a refusal.
+
 A yank is an index edit; the artifact never moves. That is the whole difference between a
 yank and a deletion — a yanked version is skipped for a *new* resolution and stays fetchable
 by exact version, so anything already pinned to it keeps resolving.
@@ -498,7 +531,9 @@ pack, because an artifact that is not self-contained is worse than one that was 
 
 Everything is read **from the committed tree**: what you commit is what you publish. That is
 what makes the artifact reproducible — sorted entries, timestamps pinned to the commit,
-zeroed ownership, untimestamped compression — and reproducibility is what lets `push` rebuild
+zeroed ownership, untimestamped compression, and **nothing recording which vaire packed it**,
+since a builder's own version in the bytes would rehash a tag on every upgrade — and
+reproducibility is what lets `push` rebuild
 a release from its tag and get byte-identical output, so the checksum a lockfile pins belongs
 to the release rather than to whoever uploaded it.
 
