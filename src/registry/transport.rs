@@ -152,7 +152,44 @@ pub fn normalize_url(url: &str) -> TransportResult<String> {
     // Canonicalize when it exists; a registry directory that does not exist yet is a
     // legitimate thing to configure (push creates it), so absence is not fatal here.
     let absolute = std::fs::canonicalize(&absolute).unwrap_or(absolute);
-    Ok(format!("file://{}", absolute.display()))
+    Ok(file_url_for(&absolute.display().to_string()))
+}
+
+/// The `file://` URL for an absolute path, spelled the same on every platform.
+///
+/// On Windows `canonicalize` answers with a verbatim path (`\\?\C:\reg`), which is not a
+/// spelling anything outside the kernel wants back; and a drive path needs the extra
+/// slash of `file:///C:/reg` so the URL has an (empty) host like every other. Backslashes
+/// become `/` so the stored URL is one a browser, a colleague on another OS, or
+/// [`FileTransport::from_url`] can all read.
+fn file_url_for(path: &str) -> String {
+    let path = path
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .unwrap_or_else(|| path.strip_prefix(r"\\?\").unwrap_or(path).to_string());
+    let path = path.replace('\\', "/");
+    match path.starts_with('/') {
+        true => format!("file://{path}"),
+        false => format!("file:///{path}"),
+    }
+}
+
+/// The filesystem path a `file://` URL's remainder names.
+///
+/// `file:///abs/path` (the canonical form) and `file://abs/path` (what people actually
+/// type) both mean the same directory. A Windows drive path is the one case where the
+/// leading slash is *not* part of the path: `file:///C:/reg` names `C:/reg`.
+fn file_url_path(rest: &str) -> String {
+    let is_drive = |s: &str| {
+        let b = s.as_bytes();
+        b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+    };
+    match rest.strip_prefix('/') {
+        Some(after) if is_drive(after) => after.to_string(),
+        Some(_) => rest.to_string(),
+        None if is_drive(rest) => rest.to_string(),
+        None => format!("/{rest}"),
+    }
 }
 
 /// The scheme of a URL, or `None` when there is none. Deliberately stricter than "contains
@@ -189,15 +226,7 @@ impl FileTransport {
         let rest = url
             .strip_prefix("file://")
             .ok_or_else(|| TransportError::Io(format!("{url} is not a file:// URL")))?;
-        // `file:///abs/path` (the canonical form) and `file://abs/path` (what people
-        // actually type) both mean the same directory here. A genuine host component is
-        // not something this can serve, and pretending otherwise would silently read the
-        // wrong place.
-        let path = match rest.strip_prefix('/') {
-            Some(_) => rest.to_string(),
-            None => format!("/{rest}"),
-        };
-        Ok(FileTransport::at(PathBuf::from(path)))
+        Ok(FileTransport::at(PathBuf::from(file_url_path(rest))))
     }
 
     fn resolve(&self, path: &str) -> PathBuf {
@@ -469,6 +498,28 @@ mod tests {
         // Read-only, and honest about it rather than failing at publish time with an
         // unrelated message.
         assert!(!open("https://packages.example/kg").unwrap().writable());
+    }
+
+    #[test]
+    fn a_windows_drive_path_normalizes_to_a_url_with_the_slash_before_the_drive_letter() {
+        assert_eq!(file_url_for(r"C:\Users\me\reg"), "file:///C:/Users/me/reg");
+        // The verbatim prefix canonicalize hands back on Windows is not a spelling
+        // anything outside the kernel wants — stripped, not carried into the URL.
+        assert_eq!(file_url_for(r"\\?\C:\Users\me\reg"), "file:///C:/Users/me/reg");
+        assert_eq!(file_url_path("C:/Users/me/reg"), "C:/Users/me/reg");
+    }
+
+    #[test]
+    fn a_registry_added_by_a_windows_path_round_trips_through_normalize_and_open() {
+        let dir = temp();
+        let url = normalize_url(&dir.path().display().to_string()).unwrap();
+        // Every part of the pipeline that touches this URL later must agree it is
+        // writable and point at the same directory — `registry add`'s reachability
+        // probe and `push` both go through exactly this path.
+        let transport = open(&url).unwrap();
+        assert!(transport.writable());
+        transport.put_new("v1/index/a.json", b"{}").unwrap();
+        assert!(dir.path().join("v1/index/a.json").exists());
     }
 
     #[test]
