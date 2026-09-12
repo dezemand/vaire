@@ -211,7 +211,14 @@ impl Registry for Api {
 
         // 2. the upload itself — not part of the wire contract proper (§2.2.2); whatever
         //    the storage backend's own ack looks like is fine, only failure matters here.
+        //    The bearer token still goes on it: an object store's presigned URL carries
+        //    its own authorization and would ignore this header, but a deployment that
+        //    routes the upload through its own endpoint (as a directory-backed registry
+        //    does) may well check it, and there is no way to know which from here.
         let mut upload = self.agent.request(&begin.upload.method, &begin.upload.url);
+        if let Some(token) = self.token() {
+            upload = upload.set("Authorization", &format!("Bearer {token}"));
+        }
         for (header, value) in &begin.upload.headers {
             upload = upload.set(header, value);
         }
