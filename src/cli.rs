@@ -449,6 +449,20 @@ pub enum RegistryAction {
 
     /// What a registry is, what it can do, and what it holds.
     Show { name: String },
+
+    /// Sign in to a registry that requires identity to publish (registry-server.md
+    /// §2.3). Refuses for a registry with no declared `auth` — there is nothing to log
+    /// in to.
+    Login {
+        name: String,
+        /// Paste a token directly instead of running the device-code flow — for a
+        /// registry whose issuer has no interactive device flow, or for scripting.
+        #[arg(long = "token-stdin")]
+        token_stdin: bool,
+    },
+
+    /// Forget a registry's stored token. Not an error if there was none.
+    Logout { name: String },
 }
 
 /// The sections `vaire configure <section>` can set non-interactively. Bare `vaire
