@@ -419,7 +419,9 @@ impl Transport for HttpTransport {
             // `None` means "expect nothing there" — the same create-shaped swap `file://`
             // treats as a conflict on a second call (module tests), so the two transports
             // agree on what a `None` etag means.
-            None => self.conditional_put(path, bytes, "If-None-Match", "*", TransportError::Conflict),
+            None => {
+                self.conditional_put(path, bytes, "If-None-Match", "*", TransportError::Conflict)
+            }
         }
     }
 
@@ -595,7 +597,11 @@ mod tests {
         reader.read_line(&mut request_line).unwrap();
         let mut parts = request_line.split_whitespace();
         let method = parts.next().unwrap_or("").to_string();
-        let path = parts.next().unwrap_or("/").trim_start_matches('/').to_string();
+        let path = parts
+            .next()
+            .unwrap_or("/")
+            .trim_start_matches('/')
+            .to_string();
 
         let mut content_length = 0usize;
         let mut if_none_match = None;
@@ -680,7 +686,9 @@ mod tests {
     fn http_create_only_write_is_rejected_the_second_time() {
         let server = ConditionalPutServer::start(3);
         let transport = HttpTransport::new(&server.base);
-        transport.put_new("v1/artifacts/a/a-1.0.0.tgz", b"first").unwrap();
+        transport
+            .put_new("v1/artifacts/a/a-1.0.0.tgz", b"first")
+            .unwrap();
         assert!(matches!(
             transport.put_new("v1/artifacts/a/a-1.0.0.tgz", b"second"),
             Err(TransportError::Exists)
