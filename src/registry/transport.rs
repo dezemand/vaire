@@ -505,7 +505,10 @@ mod tests {
         assert_eq!(file_url_for(r"C:\Users\me\reg"), "file:///C:/Users/me/reg");
         // The verbatim prefix canonicalize hands back on Windows is not a spelling
         // anything outside the kernel wants — stripped, not carried into the URL.
-        assert_eq!(file_url_for(r"\\?\C:\Users\me\reg"), "file:///C:/Users/me/reg");
+        assert_eq!(
+            file_url_for(r"\\?\C:\Users\me\reg"),
+            "file:///C:/Users/me/reg"
+        );
         assert_eq!(file_url_path("C:/Users/me/reg"), "C:/Users/me/reg");
     }
 
