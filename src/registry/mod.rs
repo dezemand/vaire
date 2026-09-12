@@ -55,6 +55,7 @@
 //! ranked together. `fetch` likewise has no `pull` command above it yet: it is exercised by
 //! the conformance suite and consumed when the store lands.
 
+pub mod api_wire;
 pub mod static_http;
 pub mod transport;
 pub mod wire;

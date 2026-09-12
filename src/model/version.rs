@@ -38,7 +38,9 @@ pub struct Version {
 
 /// The size of a version change (registry.md §3.1). Ordered by severity, so the
 /// "highest applicable" rule for a mixed diff is `max()`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Bump {
     Patch,
