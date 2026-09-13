@@ -268,16 +268,17 @@ pub fn forget_registry_token_from(registry: &str, home: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// `VAIRE_TOKEN` (and its per-registry forms) are process-global, and cargo runs a
+/// crate's tests on several threads by default — without this, a test that sets one can
+/// race a sibling test that assumes it is unset. Held for the duration of any test in the
+/// crate that touches the variables; shared rather than per-module because the token
+/// tests in `registry::api_http` read the same environment.
+#[cfg(test)]
+pub(crate) static VAIRE_TOKEN_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod token_tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// `VAIRE_TOKEN` is process-global, and cargo runs a crate's tests on several
-    /// threads by default — without this, a test that sets it can race a sibling test
-    /// that assumes it is unset. Held for the duration of any test that touches the
-    /// variable.
-    static VAIRE_TOKEN_ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn a_bare_vaire_token_wins_over_everything_per_registry() {

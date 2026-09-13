@@ -58,6 +58,7 @@
 pub mod api_http;
 pub mod api_wire;
 pub mod static_http;
+pub mod token;
 pub mod transport;
 pub mod wire;
 
@@ -352,6 +353,21 @@ pub enum RegistryError {
     /// waiting — retrying it is never the fix (registry-server.md §2.2.1).
     #[error("{registry}: not permitted to {action}")]
     PermissionDenied { registry: String, action: String },
+
+    /// The token on file was minted for a different party than this registry declares
+    /// (registry-server.md §4), so it was **not sent**. A fact about the caller's
+    /// credentials, caught on this side of the wire — the registry would have refused it
+    /// too, but only after the token had travelled to somewhere it was not issued for.
+    #[error(
+        "{registry}: the token on file was issued with {claim} `{found}`, and this registry \
+         expects `{expected}` — it was not sent; run `vaire registry login {registry}`"
+    )]
+    TokenMismatch {
+        registry: String,
+        claim: &'static str,
+        expected: String,
+        found: String,
+    },
 }
 
 impl RegistryError {
@@ -371,7 +387,8 @@ impl RegistryError {
             | RegistryError::Malformed { .. }
             | RegistryError::Io { .. }
             | RegistryError::LoginRequired { .. }
-            | RegistryError::PermissionDenied { .. } => Disposition::Fatal,
+            | RegistryError::PermissionDenied { .. }
+            | RegistryError::TokenMismatch { .. } => Disposition::Fatal,
         }
     }
 }

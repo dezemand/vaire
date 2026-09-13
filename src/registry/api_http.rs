@@ -46,10 +46,35 @@ impl Api {
         Ok(Api {
             name: name.to_string(),
             reads,
+            // Redirects are not followed on this agent (registry-server.md §4): every
+            // call it makes carries a bearer token, and a `Location` is whoever answered
+            // asking us to send it somewhere else. A registry that has moved is
+            // reconfigured at its new address — `registry add` again — never followed
+            // into on the strength of one response.
             agent: ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_secs(API_TIMEOUT_SECS))
+                .redirects(0)
                 .build(),
         })
+    }
+
+    /// The error for a 3xx answer, which [`Self::open`]'s agent hands back rather than
+    /// following. `Unreachable` because that is what it is from here: the address on file
+    /// does not answer the protocol, and the fix is a configuration change.
+    fn redirected(&self, response: ureq::Response) -> RegistryError {
+        let location = response
+            .header("location")
+            .unwrap_or("somewhere it did not say")
+            .to_string();
+        RegistryError::Unreachable {
+            registry: self.name.clone(),
+            url: self.base().to_string(),
+            detail: format!(
+                "answered {} redirecting to {location}; credentials are not sent along \
+                 a redirect — re-add the registry at its current address",
+                response.status()
+            ),
+        }
     }
 
     fn base(&self) -> &str {
@@ -64,8 +89,29 @@ impl Api {
     /// (userconfig's precedence rule, §2.3). `None` for a request the caller has not
     /// logged in for yet — sent anyway, so the server's 401 is what actually reports the
     /// problem, with whatever challenge it carries.
-    fn token(&self) -> Option<String> {
-        userconfig::registry_token(&self.name)
+    ///
+    /// A token that *is* on file is checked against the descriptor's `auth` block before
+    /// it goes anywhere (§4): one minted for a different issuer or audience is refused
+    /// here, on this side of the wire, rather than handed to a registry it was not
+    /// issued for. Only `publish` and `yank` call this — reads never carry a token in
+    /// this tier — and both run against exactly one registry the caller named or
+    /// `select` picked unambiguously, which is what keeps the bare `VAIRE_TOKEN` scoped
+    /// to a single target rather than every configured registry.
+    fn token(&self) -> RegistryResult<Option<String>> {
+        let Some(token) = userconfig::registry_token(&self.name) else {
+            return Ok(None);
+        };
+        if let Some(auth) = &self.descriptor().auth
+            && let Err(mismatch) = super::token::matches(auth, &token)
+        {
+            return Err(RegistryError::TokenMismatch {
+                registry: self.name.clone(),
+                claim: mismatch.claim,
+                expected: mismatch.expected,
+                found: mismatch.found,
+            });
+        }
+        Ok(Some(token))
     }
 
     /// `POST` JSON with the registry's bearer token, returning the response body as text.
@@ -84,13 +130,16 @@ impl Api {
     ) -> RegistryResult<String> {
         let text = serde_json::to_string(body).unwrap_or_default();
         let mut request = self.agent.post(&self.url_for(path));
-        if let Some(token) = self.token() {
+        if let Some(token) = self.token()? {
             request = request.set("Authorization", &format!("Bearer {token}"));
         }
         let response = request
             .set("Content-Type", "application/json")
             .send_string(&text)
             .map_err(|e| self.translate(e, name, version))?;
+        if (300..400).contains(&response.status()) {
+            return Err(self.redirected(response));
+        }
         response.into_string().map_err(|e| RegistryError::Io {
             registry: self.name.clone(),
             detail: e.to_string(),
@@ -215,16 +264,19 @@ impl Registry for Api {
         //    routes the upload through its own endpoint (as a directory-backed registry
         //    does) may well check it, and there is no way to know which from here.
         let mut upload = self.agent.request(&begin.upload.method, &begin.upload.url);
-        if let Some(token) = self.token() {
+        if let Some(token) = self.token()? {
             upload = upload.set("Authorization", &format!("Bearer {token}"));
         }
         for (header, value) in &begin.upload.headers {
             upload = upload.set(header, value);
         }
-        upload.send_bytes(&bytes).map_err(|e| RegistryError::Io {
+        let uploaded = upload.send_bytes(&bytes).map_err(|e| RegistryError::Io {
             registry: self.name.clone(),
             detail: format!("uploading the artifact: {e}"),
         })?;
+        if (300..400).contains(&uploaded.status()) {
+            return Err(self.redirected(uploaded));
+        }
 
         // 3. commit — nothing left for the client to assert; the token names it all.
         let response = self.post_json(
@@ -313,5 +365,162 @@ mod tests {
             Some("central".to_string())
         );
         assert_eq!(parse_bearer_realm("Bearer"), None);
+    }
+
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A registry that serves one descriptor and answers every api-tier call with a fixed
+    /// status line and headers, counting those calls — enough to prove what the client
+    /// does *before* and *instead of* trusting an answer.
+    struct MockRegistry {
+        base: String,
+        api_calls: Arc<AtomicUsize>,
+        _thread: std::thread::JoinHandle<()>,
+    }
+
+    fn serve(descriptor: &str, api_status: &str, api_headers: &str) -> MockRegistry {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock registry");
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let descriptor = descriptor.to_string();
+        let (api_status, api_headers) = (api_status.to_string(), api_headers.to_string());
+        let api_calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&api_calls);
+        let thread = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let (status, headers, body) = match path {
+                    "/.well-known/vaire-registry.json" => {
+                        ("200 OK", String::new(), descriptor.as_bytes())
+                    }
+                    _ => {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        (api_status.as_str(), api_headers.clone(), &b""[..])
+                    }
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        MockRegistry {
+            base,
+            api_calls,
+            _thread: thread,
+        }
+    }
+
+    fn publish_request(artifact: &Path) -> PublishRequest<'_> {
+        PublishRequest {
+            name: "acme-core",
+            version: Version::new(1, 0, 0),
+            artifact,
+            changelog: None,
+            changelog_excerpt: None,
+            deps: Default::default(),
+            description: None,
+            access: None,
+            claimed_bump: None,
+            prior_version: None,
+        }
+    }
+
+    /// The unsigned-JWT helper from `token::tests`, reproduced rather than shared: what
+    /// matters is the payload, and the signature is never read.
+    fn jwt(payload: &str) -> String {
+        fn enc(bytes: &[u8]) -> String {
+            const ALPHABET: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            let mut out = String::new();
+            for chunk in bytes.chunks(3) {
+                let mut buffer = 0u32;
+                for (i, b) in chunk.iter().enumerate() {
+                    buffer |= u32::from(*b) << (16 - 8 * i);
+                }
+                for i in 0..(chunk.len() + 1) {
+                    out.push(ALPHABET[((buffer >> (18 - 6 * i)) & 63) as usize] as char);
+                }
+            }
+            out
+        }
+        format!("{}.{}.{}", enc(b"{}"), enc(payload.as_bytes()), enc(b"sig"))
+    }
+
+    const WITH_IDENTITY: &str = r#"{"schema_version":1,"name":"central",
+        "capabilities":{"publish":"api"},
+        "auth":{"issuer":"https://login.example/tenant","audience":"api://vaire"}}"#;
+
+    #[test]
+    fn a_token_minted_for_another_registry_never_leaves_the_machine() {
+        let _guard = crate::userconfig::VAIRE_TOKEN_ENV.lock().unwrap();
+        let mock = serve(WITH_IDENTITY, "200 OK", "");
+        // SAFETY: guarded by VAIRE_TOKEN_ENV — every test touching these variables
+        // holds it.
+        unsafe {
+            std::env::set_var(
+                "VAIRE_TOKEN_SCOPED_TEST",
+                jwt(r#"{"iss":"https://login.elsewhere/","aud":"api://vaire"}"#),
+            )
+        };
+        let api = Api::open("scoped-test", &mock.base).expect("descriptor reads");
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("a.tgz");
+        std::fs::write(&artifact, b"bytes").unwrap();
+
+        let err = api.publish(publish_request(&artifact)).unwrap_err();
+        unsafe { std::env::remove_var("VAIRE_TOKEN_SCOPED_TEST") };
+
+        assert!(
+            matches!(
+                &err,
+                RegistryError::TokenMismatch { claim: "iss", found, .. }
+                    if found == "https://login.elsewhere/"
+            ),
+            "{err}"
+        );
+        assert_eq!(
+            mock.api_calls.load(Ordering::SeqCst),
+            0,
+            "the token was refused before any api-tier request was made"
+        );
+    }
+
+    #[test]
+    fn a_redirect_is_reported_rather_than_followed_with_the_token() {
+        let _guard = crate::userconfig::VAIRE_TOKEN_ENV.lock().unwrap();
+        let mock = serve(
+            WITH_IDENTITY,
+            "307 Temporary Redirect",
+            "Location: http://elsewhere.invalid/v1/api/publish/begin\r\n",
+        );
+        // An opaque token: nothing to compare, so it is the redirect that refuses.
+        unsafe { std::env::set_var("VAIRE_TOKEN_REDIRECT_TEST", "opaque-token") };
+        let api = Api::open("redirect-test", &mock.base).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("a.tgz");
+        std::fs::write(&artifact, b"bytes").unwrap();
+
+        let err = api.publish(publish_request(&artifact)).unwrap_err();
+        unsafe { std::env::remove_var("VAIRE_TOKEN_REDIRECT_TEST") };
+
+        assert!(
+            matches!(&err, RegistryError::Unreachable { detail, .. }
+                if detail.contains("elsewhere.invalid") && detail.contains("redirect")),
+            "{err}"
+        );
+        assert_eq!(
+            mock.api_calls.load(Ordering::SeqCst),
+            1,
+            "exactly the one call that was answered with the redirect — nothing after it"
+        );
     }
 }
