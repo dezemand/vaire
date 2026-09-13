@@ -52,15 +52,34 @@ pub fn add(
         priority,
         search_by_default,
     };
-    {
+    // What was there before, so a refused re-add of an existing name can put it back
+    // rather than deleting a row the user did not ask to lose.
+    let previous = {
         let catalog = Catalog::open(home)?;
+        let previous = catalog.registries()?.into_iter().find(|r| r.name == name);
         catalog.add_registry(&row)?;
-    }
+        previous
+    };
 
     // Probe after recording, so a failed probe cannot lose the configuration the user just
     // asked for. What comes back is reported as information, never as a verdict.
     let probe = match StaticHttp::open(name, &url) {
         Ok(registry) => {
+            // The one thing a probe *can* veto (registry-server.md §2.3): a registry that
+            // declares identity over plain `http://`. A bearer token is a bare credential,
+            // so a location that would have this client send one in clear is not
+            // recorded at all — the row is withdrawn again rather than left for a later
+            // `push` to discover the problem with a token already on the wire.
+            if let Some(why) = insecure_identity(&url, registry.descriptor()) {
+                let catalog = Catalog::open(home)?;
+                match &previous {
+                    Some(row) => catalog.add_registry(row)?,
+                    None => {
+                        catalog.forget_registry(name)?;
+                    }
+                }
+                return Err(VaireError::Usage(why));
+            }
             let publish = registry.descriptor().capabilities.publish;
             let writable = publish.is_some();
             // The kind this client will actually construct on every later `open()` —
@@ -112,6 +131,29 @@ pub fn add(
         enumeration: probe.as_ref().ok().and_then(|p| p.enumeration.clone()),
         note: probe.err(),
     })
+}
+
+/// Why `url` may not be recorded, when its descriptor carries an `auth` block and the
+/// scheme would carry a bearer token in clear — `None` when it may.
+///
+/// The exception is the loopback host (registry-server.md §2.3): `vaire serve` against a
+/// local test issuer has nothing on the wire to eavesdrop on, and demanding TLS there
+/// would demand a certificate for a socket that never leaves the machine.
+fn insecure_identity(url: &str, descriptor: &crate::registry::Descriptor) -> Option<String> {
+    let auth = descriptor.auth.as_ref()?;
+    let parsed = url::Url::parse(url).ok()?;
+    if parsed.scheme() != "http" {
+        return None;
+    }
+    if matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")) {
+        return None;
+    }
+    Some(format!(
+        "{url} declares an identity provider ({}) but is served over plain http:// — a \
+         bearer token sent there would travel in clear, so this registry is not recorded; \
+         use its https:// address",
+        auth.issuer
+    ))
 }
 
 struct Probe {
@@ -283,4 +325,52 @@ pub fn logout(name: &str) -> Result<RegistryLogoutOutput> {
         name: name.to_string(),
         forgotten: userconfig::forget_registry_token(name)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::wire::{Auth, Capabilities, Descriptor};
+
+    fn descriptor(auth: Option<Auth>) -> Descriptor {
+        Descriptor {
+            schema_version: 1,
+            name: None,
+            capabilities: Capabilities::default(),
+            auth,
+        }
+    }
+
+    fn identity() -> Option<Auth> {
+        Some(Auth {
+            issuer: "https://login.example/tenant".into(),
+            audience: None,
+            client_id: None,
+            scopes: vec![],
+            grants: vec![],
+        })
+    }
+
+    #[test]
+    fn identity_over_plain_http_is_refused_except_on_loopback() {
+        let refused = insecure_identity("http://packages.example/kg", &descriptor(identity()));
+        assert!(refused.is_some_and(|why| why.contains("https://")));
+
+        for local in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            assert!(
+                insecure_identity(local, &descriptor(identity())).is_none(),
+                "{local} has nothing on the wire to eavesdrop on"
+            );
+        }
+        assert!(
+            insecure_identity("https://packages.example/kg", &descriptor(identity())).is_none()
+        );
+        // Anonymous over http is the whole static-host story and stays allowed.
+        assert!(insecure_identity("http://packages.example/kg", &descriptor(None)).is_none());
+        assert!(insecure_identity("file:///srv/registry", &descriptor(identity())).is_none());
+    }
 }
