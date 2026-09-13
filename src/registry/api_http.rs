@@ -111,10 +111,9 @@ impl Api {
                     login_command: format!("vaire registry login {login_command}"),
                 }
             }
-            ureq::Error::Status(403, response) => RegistryError::Unreachable {
+            ureq::Error::Status(403, response) => RegistryError::PermissionDenied {
                 registry: self.name.clone(),
-                url: self.base().to_string(),
-                detail: error_detail(response, "not permitted"),
+                action: error_detail(response, "this action"),
             },
             ureq::Error::Status(409, response) => match error_kind(response) {
                 ApiErrorKind::VersionExists => RegistryError::VersionExists {

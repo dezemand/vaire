@@ -342,6 +342,14 @@ pub enum RegistryError {
         registry: String,
         login_command: String,
     },
+
+    /// Authenticated, but not permitted to do this — a fact about the caller, not the
+    /// network. Kept distinct from [`RegistryError::Unreachable`] specifically because
+    /// their dispositions differ: a timeout is `Partial` (report what you have, move on),
+    /// but a permission refusal will not resolve itself by asking a different registry or
+    /// waiting — retrying it is never the fix (registry-server.md §2.2.1).
+    #[error("{registry}: not permitted to {action}")]
+    PermissionDenied { registry: String, action: String },
 }
 
 impl RegistryError {
@@ -360,7 +368,8 @@ impl RegistryError {
             | RegistryError::Conflict { .. }
             | RegistryError::Malformed { .. }
             | RegistryError::Io { .. }
-            | RegistryError::LoginRequired { .. } => Disposition::Fatal,
+            | RegistryError::LoginRequired { .. }
+            | RegistryError::PermissionDenied { .. } => Disposition::Fatal,
         }
     }
 }
