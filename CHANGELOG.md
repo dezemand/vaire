@@ -3,7 +3,7 @@
 The format loosely follows [Keep a Changelog](https://keepachangelog.com); this project
 uses [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [0.3.1] — 2026-09-13
 
 ### Added
 - **`-o <fmt>` / `--output <fmt>` and `VAIRE_OUTPUT`** (cli.md §2.2, §2.3) — pick the
@@ -21,6 +21,13 @@ uses [Semantic Versioning](https://semver.org).
 - **`--json` is now shorthand for `-o json`.** It keeps working exactly as before — every
   script and skill that passes it is unaffected — but `-o`/`VAIRE_OUTPUT` win if both are
   given, and new callers should prefer them.
+
+### Fixed
+- **`file://` registry URLs on Windows.** Drive letters, UNC paths, and reserved
+  characters now round-trip through `url::Url`, so `vaire registry add lab C:\registry`
+  produces a row that can be opened again (#40).
+- **ANSI codes were double-escaped in nested style calls**, leaving literal escape
+  sequences in `vaire deps` and `vaire status` output (#45).
 
 ## [0.3.0] — 2026-08-18
 
