@@ -148,6 +148,10 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             RegistryAction::List => emit(&commands::registry::list(&home)?, json),
             RegistryAction::Rm { name } => emit(&commands::registry::remove(&home, &name)?, json),
             RegistryAction::Show { name } => emit(&commands::registry::show(&home, &name)?, json),
+            RegistryAction::Login { name, token_stdin } => {
+                emit(&commands::registry::login(&name, token_stdin)?, json)
+            }
+            RegistryAction::Logout { name } => emit(&commands::registry::logout(&name)?, json),
         }
         return Ok(ExitCode::Success);
     }

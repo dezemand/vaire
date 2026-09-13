@@ -55,6 +55,8 @@
 //! ranked together. `fetch` likewise has no `pull` command above it yet: it is exercised by
 //! the conformance suite and consumed when the store lands.
 
+pub mod api_http;
+pub mod api_wire;
 pub mod static_http;
 pub mod transport;
 pub mod wire;
@@ -63,8 +65,18 @@ use std::path::Path;
 
 use crate::model::Version;
 
+pub use api_http::Api;
 pub use static_http::StaticHttp;
 pub use wire::{Access, Capabilities, Descriptor, PackageIndex, ReleaseMeta, SearchCapability};
+
+/// A digest in the form the wire contract writes everywhere a `sha256` field appears.
+///
+/// One place, so the client's `push` and the server's ingest never disagree about how a
+/// digest is spelled.
+pub(crate) fn digest_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 pub type RegistryResult<T> = std::result::Result<T, RegistryError>;
 
@@ -320,6 +332,24 @@ pub enum RegistryError {
 
     #[error("registry '{registry}': {detail}")]
     Io { registry: String, detail: String },
+
+    /// No valid token for a registry that requires one on this request
+    /// (registry-server.md §2.3). `login_command` is built from the 401's
+    /// `WWW-Authenticate` challenge, so the message says exactly what to run rather than
+    /// leaving the caller to guess.
+    #[error("{registry} needs you to sign in — run `{login_command}`")]
+    LoginRequired {
+        registry: String,
+        login_command: String,
+    },
+
+    /// Authenticated, but not permitted to do this — a fact about the caller, not the
+    /// network. Kept distinct from [`RegistryError::Unreachable`] specifically because
+    /// their dispositions differ: a timeout is `Partial` (report what you have, move on),
+    /// but a permission refusal will not resolve itself by asking a different registry or
+    /// waiting — retrying it is never the fix (registry-server.md §2.2.1).
+    #[error("{registry}: not permitted to {action}")]
+    PermissionDenied { registry: String, action: String },
 }
 
 impl RegistryError {
@@ -337,7 +367,9 @@ impl RegistryError {
             | RegistryError::SchemaTooNew { .. }
             | RegistryError::Conflict { .. }
             | RegistryError::Malformed { .. }
-            | RegistryError::Io { .. } => Disposition::Fatal,
+            | RegistryError::Io { .. }
+            | RegistryError::LoginRequired { .. }
+            | RegistryError::PermissionDenied { .. } => Disposition::Fatal,
         }
     }
 }

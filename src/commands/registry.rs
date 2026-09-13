@@ -15,14 +15,18 @@
 //! down, the bucket is not created yet) is an ordinary thing to do, and refusing it would
 //! mean the tool insisting the network exist before it will remember a URL.
 
+use std::io::Read;
 use std::path::Path;
 
-use crate::catalog::{Catalog, KIND_STATIC, RegistryRow};
+use crate::catalog::{Catalog, KIND_API, KIND_STATIC, RegistryRow};
 use crate::error::{Result, VaireError};
 use crate::output::{
-    RegistryAddOutput, RegistryListOutput, RegistryRemoveOutput, RegistryShowOutput,
+    RegistryAddOutput, RegistryListOutput, RegistryLoginOutput, RegistryLogoutOutput,
+    RegistryRemoveOutput, RegistryShowOutput,
 };
-use crate::registry::{Registry, StaticHttp, transport};
+use crate::registry::wire::PublishCapability;
+use crate::registry::{Api, Registry, StaticHttp, transport};
+use crate::userconfig;
 
 /// `vaire registry add <name> <url> [--priority N] [--no-search]`.
 pub fn add(
@@ -57,7 +61,24 @@ pub fn add(
     // asked for. What comes back is reported as information, never as a verdict.
     let probe = match StaticHttp::open(name, &url) {
         Ok(registry) => {
-            let writable = registry.descriptor().capabilities.publish.is_some();
+            let publish = registry.descriptor().capabilities.publish;
+            let writable = publish.is_some();
+            // The kind this client will actually construct on every later `open()` —
+            // decided once, here, from what the registry declared, and corrected in the
+            // catalog below. `registry add` is the one place this probe runs unforced,
+            // so it is the one place a registry that has since grown `publish: api`
+            // (or lost it) gets noticed; `registry show`/`push` trust the stored kind
+            // rather than re-probing on every call.
+            if publish == Some(PublishCapability::Api) {
+                let catalog = Catalog::open(home)?;
+                catalog.add_registry(&RegistryRow {
+                    name: name.to_string(),
+                    url: url.clone(),
+                    kind: KIND_API.to_string(),
+                    priority,
+                    search_by_default,
+                })?;
+            }
             // A location with no descriptor has never been published to. Reported as such
             // rather than as "0 packages": an empty registry and a directory that is not a
             // registry yet look identical in a count and are not the same situation.
@@ -218,10 +239,48 @@ pub fn select(home: &Path, requested: Option<&str>) -> Result<RegistryRow> {
 pub fn open(row: &RegistryRow) -> Result<Box<dyn Registry>> {
     match row.kind.as_str() {
         KIND_STATIC => Ok(Box::new(StaticHttp::open(&row.name, &row.url)?)),
+        KIND_API => Ok(Box::new(Api::open(&row.name, &row.url)?)),
         other => Err(VaireError::Registry(format!(
             "registry '{}' is recorded as kind '{other}', which this vaire cannot speak — \
              re-add it, or run `vaire upgrade`",
             row.name
         ))),
     }
+}
+
+/// `vaire registry login <name> [--token-stdin]`.
+///
+/// The device-code flow of registry-server.md §2.3 needs a chosen identity provider to
+/// run against and is not wired yet (§9) — `--token-stdin` is the honest present-tense
+/// surface: paste a token however the registry's own portal issued one, and it is stored
+/// exactly where the device flow will store its own tokens later, so nothing above this
+/// (push, yank) needs to change when it lands.
+pub fn login(name: &str, token_stdin: bool) -> Result<RegistryLoginOutput> {
+    if !token_stdin {
+        return Err(VaireError::Usage(format!(
+            "interactive sign-in is not available in this vaire yet — obtain a token from \
+             '{name}' and run `vaire registry login {name} --token-stdin`"
+        )));
+    }
+    let mut token = String::new();
+    std::io::stdin()
+        .read_to_string(&mut token)
+        .map_err(|e| VaireError::Usage(format!("could not read the token from stdin: {e}")))?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(VaireError::Usage("no token was given on stdin".into()));
+    }
+    userconfig::save_registry_token(name, token)?;
+    Ok(RegistryLoginOutput {
+        name: name.to_string(),
+    })
+}
+
+/// `vaire registry logout <name>`. Not an error to log out of a registry you never
+/// logged in to.
+pub fn logout(name: &str) -> Result<RegistryLogoutOutput> {
+    Ok(RegistryLogoutOutput {
+        name: name.to_string(),
+        forgotten: userconfig::forget_registry_token(name)?,
+    })
 }

@@ -1782,6 +1782,38 @@ impl Output for RegistryShowOutput {
     }
 }
 
+/// `vaire registry login`.
+#[derive(Debug, Serialize)]
+pub struct RegistryLoginOutput {
+    pub name: String,
+}
+
+impl Output for RegistryLoginOutput {
+    fn render_human(&self) -> String {
+        green(&format!(
+            "✓ signed in to '{}' — the token is stored in credentials.toml",
+            self.name
+        ))
+        .to_string()
+    }
+}
+
+/// `vaire registry logout`.
+#[derive(Debug, Serialize)]
+pub struct RegistryLogoutOutput {
+    pub name: String,
+    pub forgotten: bool,
+}
+
+impl Output for RegistryLogoutOutput {
+    fn render_human(&self) -> String {
+        match self.forgotten {
+            true => green(&format!("✓ signed out of '{}'", self.name)).to_string(),
+            false => dim(&format!("not signed in to '{}'", self.name)).to_string(),
+        }
+    }
+}
+
 /// `vaire push`.
 #[derive(Debug, Serialize)]
 pub struct PushOutput {

@@ -203,6 +203,9 @@ pub struct RegistryRow {
 
 /// The registry kinds this client can construct.
 pub const KIND_STATIC: &str = "static";
+/// A registry whose descriptor declares `publish: api` (registry-server.md §2.2) — writes
+/// go through begin/commit and carry a bearer token; reads are identical to `static`.
+pub const KIND_API: &str = "api";
 
 /// A materialized release in the store (registry.md §5).
 ///

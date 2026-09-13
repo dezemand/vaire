@@ -323,7 +323,7 @@ impl Registry for StaticHttp {
                 detail: format!("it lists {version}, but {path} is not there"),
             })?;
 
-        let actual = digest(&fetched.bytes);
+        let actual = super::digest_hex(&fetched.bytes);
         if actual != release.sha256 {
             // Nothing is written. The mismatch may be corruption or substitution, and the
             // two are indistinguishable from here — which is exactly why neither gets to
@@ -423,7 +423,7 @@ impl Registry for StaticHttp {
             registry: self.name.clone(),
             detail: format!("{}: {e}", artifact.display()),
         })?;
-        let sha256 = digest(&bytes);
+        let sha256 = super::digest_hex(&bytes);
         let size = bytes.len() as u64;
 
         // 1. The artifact, create-only. Storage adjudicates, so "already published" is a
@@ -445,7 +445,7 @@ impl Registry for StaticHttp {
                 // to the one in hand and the index does not list it, this push finishes
                 // the job it finds half-done rather than reporting a dead end.
                 let ours = match self.transport.get(&artifact_path) {
-                    Ok(Some(fetched)) => digest(&fetched.bytes) == sha256,
+                    Ok(Some(fetched)) => super::digest_hex(&fetched.bytes) == sha256,
                     // Cannot read it back: fall through to the plain refusal below rather
                     // than guess about bytes nobody has seen.
                     _ => false,
@@ -592,11 +592,6 @@ fn to_json<T: serde::Serialize>(value: &T) -> Vec<u8> {
     let mut bytes = serde_json::to_vec_pretty(value).unwrap_or_else(|_| b"{}".to_vec());
     bytes.push(b'\n');
     bytes
-}
-
-fn digest(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn translate(registry: &str, url: &str, e: TransportError) -> RegistryError {
