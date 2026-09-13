@@ -54,6 +54,15 @@ fn wrap(code: &str, s: &str) -> String {
 pub fn bold(s: &str) -> String {
     wrap("1", s)
 }
+
+/// Bold + cyan in one pass. Composing via `bold(&cyan(s))` sanitizes `s` twice: `cyan`'s
+/// `wrap` escapes control characters and emits raw `\x1b[36m...\x1b[0m`, then `bold`'s own
+/// `plain()` call escapes those very escape bytes again, corrupting the color codes into
+/// visible `\u{1b}[36m` text. Applying both SGR codes in a single `wrap` sanitizes the
+/// underlying text exactly once.
+pub fn bold_cyan(s: &str) -> String {
+    wrap("1;36", s)
+}
 pub fn dim(s: &str) -> String {
     wrap("2", s)
 }
