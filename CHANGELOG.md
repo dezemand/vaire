@@ -3,6 +3,87 @@
 The format loosely follows [Keep a Changelog](https://keepachangelog.com); this project
 uses [Semantic Versioning](https://semver.org).
 
+## [0.4.0] — unreleased
+
+**0.4 is the identity release.** A registry can now be a *service* rather than a pile of
+files: it validates who is publishing, mediates the upload, and refuses what it will not
+serve — while every read stays the same five documents a static host serves, so nothing
+above the client changes. The server side is specified in
+[`spec/registry-server.md`](spec/registry-server.md) and implemented separately; this
+release is the client half of tier 1 (publish) of that ladder. Search over registries is
+0.5.
+
+### Added
+- **`publish: api` registries** (registry-server.md §2.2, §4). A descriptor declaring
+  `publish: api` routes `vaire push` and `vaire yank` through a **begin → upload → commit**
+  protocol instead of conditional `PUT`s: every fact about a release is asserted once at
+  `begin`, the artifact goes wherever the registry says (an object store's presigned URL,
+  or the registry's own staging endpoint), and `commit` is the moment it becomes visible —
+  after the server has checked length and digest against what was declared. Which client a
+  configured registry gets is decided once, at `vaire registry add`, from what its
+  descriptor declares; `add` re-run against a registry that has since grown (or lost)
+  `publish: api` notices. Reads go through exactly the code path a static host uses.
+- **`vaire registry login <name> --token-stdin` / `logout`** (cli.md §4.9). Tokens land in
+  `credentials.toml`, keyed by registry name, and a CI job needs no login step:
+  `VAIRE_TOKEN` (or `VAIRE_TOKEN_<NAME>`, for a job juggling several) takes precedence.
+  `registry show` reports whether a login is on file and where it comes from, so what it
+  says is exactly what `push` will send. The interactive device-code flow of
+  registry-server.md §2.3 is designed but not wired — it needs a chosen identity provider
+  to run against — so `--token-stdin` is the present-tense surface; the stored token lands
+  where the device flow will store its own, and nothing above changes when it arrives.
+- **The descriptor's `auth` block** (registry-server.md §2.3): the OIDC issuer a person
+  signs in against, its audience, client id, scopes and grants. Absent means anonymous,
+  which is what every existing descriptor already implied.
+- **Conditional writes over HTTP** for `publish: put` registries: `If-None-Match: *` for the
+  create-only artifact write, `If-Match` for the index compare-and-swap. A WebDAV-style
+  host, or a bucket fronted by something that honours the two, is now a publishable
+  registry with no server code at all. Whether a given `https://` host actually accepts
+  them is found out by trying: an `https://` registry is assumed writable until it says
+  otherwise.
+- **Three errors that name the fix.** A 401 is `LoginRequired`, carrying the exact command
+  from the server's `WWW-Authenticate` realm; a 403 is `PermissionDenied`, kept distinct
+  from unreachable because waiting or asking another registry will never resolve it; and
+  `TokenMismatch` is raised on *this* side of the wire, before anything is sent — see
+  below. All three are fatal to a fan-out.
+
+### Changed
+- **A bearer token is scoped to the registry it was minted for** (registry-server.md §4).
+  Before a token is attached, its own `iss`/`aud` are compared against the descriptor's
+  `auth` block; one issued for a different party is refused with `TokenMismatch` rather than
+  handed to a registry it was not issued for. `registry login --token-stdin` applies the
+  same check at paste time. An opaque (non-JWT) token carries no claims and is sent as-is.
+  The api-tier client **never follows a redirect**: a 3xx is reported with its `Location`
+  and the fix (re-add the registry at its current address) instead of carrying credentials
+  to wherever one response pointed. Tokens are read only on `push` and `yank`, both of which
+  run against exactly one registry, which is what keeps a bare `VAIRE_TOKEN` scoped to a
+  single target.
+- **A registry that declares identity must be `https://`** (registry-server.md §2.3).
+  `vaire registry add` refuses a plain `http://` location whose descriptor carries an
+  `auth` block — a bearer token sent there would travel in clear — with the loopback host
+  as the one exception, for `vaire serve` against a local issuer. The row is withdrawn
+  again (or the previous row restored) rather than left for a later `push` to discover.
+- **`registry login` refuses an anonymous registry** — one that declares no issuer and does
+  not publish through the api tier has nothing to sign in to. `logout` stays permissive:
+  forgetting a token is never the wrong thing to allow.
+- **`file://` URLs are built and parsed by `url::Url`** on every platform. The previous
+  hand-rolled conversion mis-serialized Windows drive letters and UNC paths and did not
+  percent-encode reserved characters, so `vaire registry add lab C:\registry` produced a
+  row that could not be opened. (Also shipped as 0.3.1.)
+
+### Not built in 0.4.0
+- **Search over registries.** `Registry::search` remains an unwired seam and there is no
+  search endpoint; the fan-out engine is 0.5, where local and remote hits are ranked
+  together. registry.md §12 said search and authentication would arrive together — they
+  did not, and the spec now says so.
+- **The device-code login.** Designed (registry-server.md §2.3), not wired: see above.
+- **`vaire serve`.** The local registry server lives in its own crate.
+
+## [0.3.1] — unreleased
+
+### Fixed
+- **`file://` URLs on Windows.** Drive letters, UNC paths, and reserved characters now
+  round-trip through `url::Url`, so a registry added by a Windows path can be opened again.
+
 ## [0.3.0] — 2026-08-18
 
 **0.3 is the distribution release.** A package can now be released, published, and pulled

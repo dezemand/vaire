@@ -11,7 +11,7 @@ break links; IDs don't. Change an entity's `name:` once and every reference re-r
 files stay the source of truth — the index is a disposable cache, rebuildable in seconds and
 never written back to the corpus.
 
-> **Status:** early (0.3). The CLI and on-disk shapes are settling; expect changes.
+> **Status:** early (0.4). The CLI and on-disk shapes are settling; expect changes.
 
 A corpus is a **knowledge package** (`knowledge.toml`), and packages reference each other:
 declare a dependency (`vaire add acme-core`) and `@acme-core/team:platform` resolves,
@@ -36,6 +36,13 @@ vaire add acme-core && vaire pull        # fetch it, verify it, rebuild its inde
 Nothing is fetched behind your back: resolution never reaches the network, and a
 dependency this machine cannot satisfy is reported with the `vaire pull` that would fix
 it. See [Distribution](#distribution) below.
+
+**0.4 adds identity.** A registry can also be a *service* that validates who is publishing
+— a descriptor declaring `publish: api` routes `push` through a begin/upload/commit
+protocol, `vaire registry login <name>` stores a token for it, and a CI job just sets
+`VAIRE_TOKEN`. Reads are unchanged: the same five documents, whoever serves them. The
+server is specified in [`spec/registry-server.md`](spec/registry-server.md) and lives in
+its own crate.
 
 ## Install
 
@@ -171,6 +178,7 @@ package, `search --all` / `suggest --all` reach past the closure the same way.
 | `release` (`--major` / `--summary`) | Cut a release: classify, version, record, commit, tag. |
 | `pack` | Build the distributable artifact. |
 | `registry add \| rm \| list \| show` | The registries this machine publishes to and pulls from. |
+| `registry login \| logout` | Sign in to a registry that requires identity to publish. |
 | `push`, `yank` | Upload releases; withdraw one from new adoption. |
 | `pull` (`--locked`) | Fetch a release into the store. |
 | `pin`, `unpin` | Hold a dependency at one exact version. |

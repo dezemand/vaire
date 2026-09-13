@@ -1,6 +1,6 @@
 # Vairë — distribution: catalog, store, lockfile, registries
 
-Status: **implemented in 0.3.0** except where §12 says otherwise.
+Status: **implemented in 0.4.0** except where §12 says otherwise.
 
 [design.md](design.md) defines the corpus and its index; [manifest.md](manifest.md)
 defines package identity and the `^MAJOR` constraint; [cli.md](cli.md) defines the exact
@@ -406,9 +406,12 @@ global document:
 ### 9.1 The documents
 
 The **descriptor** declares `schema_version`, the registry's name, and its capabilities:
-`search`, `enumerable`, `publish`, `yank`, `validate_bump`, `access_enforcement`. The
-schema version gates hard — an older client refuses a newer-major registry cleanly rather
-than misreading it.
+`search`, `enumerable`, `publish` (`put` for conditional writes against object storage,
+`api` for a mediating service — registry-server.md §2.2), `yank`, `validate_bump`,
+`access_enforcement`. Since 0.4 it may also carry an **`auth` block** naming the OIDC
+issuer a person logs in against (registry-server.md §2.3); absent means anonymous, which is
+what every earlier descriptor already implied. The schema version gates hard — an older
+client refuses a newer-major registry cleanly rather than misreading it.
 
 The **index document** carries, per release: `version`, `sha256`, `size`, `published_at`,
 `yanked`, `deps`, `description`, `changelog_excerpt`, and a reserved `signatures` slot.
@@ -554,16 +557,21 @@ pull that refused.
 The full-text index is likewise rebuilt rather than shipped, because its on-disk form
 embeds identity that is not portable between builds.
 
-## 12. Not built in 0.3.0
+## 12. Not built in 0.4.0
 
 Named because the shape is decided and the absence is deliberate:
 
-- **`push` over `http(s)`.** Reads work fully over HTTP; the create-only/CAS write path is
-  wired for `file://` only. CI publishes by fetching, pushing into a local `file://` copy,
-  and uploading — which uploads exactly one artifact however long the history is.
-- **A search endpoint, and client authentication.** `Registry::search` is an unwired seam,
-  and there is no auth anywhere. Both are 0.4 work, and they arrive together because both
-  need a server that knows who is asking.
-- **`serve` and the browse API.**
+- **A search endpoint.** `Registry::search` is an unwired seam, and no registry declares
+  `search` above `none`. 0.3 said search and authentication would arrive together; 0.4
+  shipped authentication (registry-server.md §2.3, the client half in cli.md §4.9) and not
+  search, because the server tier that knows who is asking turned out to be useful on its
+  own. Search is 0.5, with the fan-out engine that ranks local and remote hits together.
+- **The interactive login.** `vaire registry login` takes `--token-stdin` only; the
+  device-code flow is designed and waits on an issuer to run against.
+- **`serve` and the browse API.** The registry server lives in its own crate
+  (registry-server.md §5); the read commands over HTTP are its query tier.
 - **Signing.** The `signatures` slot exists so adding it later is not a schema break; no
   scheme is designed.
+
+Built since 0.3.0, contrary to what this section said then: `push` over `http(s)`, both as
+conditional writes (`publish: put`) and through the api tier (`publish: api`).

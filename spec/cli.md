@@ -985,6 +985,8 @@ vaire registry list
 vaire registry add <name> <url> [--priority <n>] [--no-search]
 vaire registry show <name>
 vaire registry rm <name>
+vaire registry login <name> --token-stdin
+vaire registry logout <name>
 ```
 
 The remotes this machine publishes to and pulls from (registry.md §9). The third of the
@@ -1010,10 +1012,36 @@ three "add"s, and the last one the grammar had to keep apart.
   and mean opposite things.
 - **Removing a registry cascades nothing.** Releases already pulled from it stay in the
   store: "stop asking here" is not "unlearn what it told me".
+- **Which client a registry gets is decided at `add`**, from what its descriptor declares
+  (registry-server.md §4): `publish: api` records the api-tier client, anything else the
+  static one. `add` is the one probe that runs unforced, so re-running it is how a registry
+  that has since grown or lost `publish: api` gets noticed; `show` and `push` trust the
+  stored kind.
+- **Identity over plain `http://` is refused at `add`** (registry-server.md §2.3). A
+  descriptor carrying an `auth` block over anything but `https://` — the loopback host
+  excepted, for `vaire serve` against a local issuer — is not recorded, because a bearer
+  token sent there would travel in clear. The one thing the probe can veto.
 
-An `https://` registry is readable today and not publishable — writing to object storage
-needs that provider's own credentials, which arrive with the S3 step. `show` says so rather
-than letting a push fail somewhere less obvious.
+**`login` and `logout`** (registry-server.md §2.3, §4). `login` stores a token for a
+registry in `credentials.toml`, keyed by the registry's name; `logout` forgets it, and is
+not an error for a registry never logged in to. `login` refuses a registry that is
+*anonymous* — no `auth` block and not `publish: api` — since there is nothing to sign in
+to. `--token-stdin` pastes a token however the registry's own portal issued one; the
+interactive device-code flow is designed and not yet wired, so in 0.4 the flag is required.
+A pasted token whose own `iss`/`aud` do not match the descriptor's `auth` block is refused
+at paste time rather than at the next `push`.
+
+A CI job needs no login: `VAIRE_TOKEN` takes precedence over `credentials.toml`, and
+`VAIRE_TOKEN_<NAME>` (uppercased, non-alphanumerics as `_`) scopes one to a single registry
+in a job that talks to several. `show` reports whether a token is on file and **which of
+the three sources it comes from**, so what it says is exactly what `push` will send. The
+login state is reported only for a registry that takes identity at all; against a static
+host, "no" would read as something to fix.
+
+An `https://` registry declaring `publish: put` is assumed writable until it says otherwise
+— a host honouring `If-None-Match: *` and `If-Match` is a publishable registry with no
+server code. One declaring `publish: api` publishes through the begin/commit protocol
+(§4.10). One declaring neither is readable and not publishable, and `show` says so.
 
 ### 4.10 `vaire push`
 
@@ -1058,6 +1086,17 @@ re-run a ritual, and CI must be able to publish a tag it did not cut.
 Which registry: the only one configured, else the one with strictly the highest priority,
 else `--registry`. It refuses to guess, because publishing to the wrong registry cannot be
 taken back — the artifact is immutable, and the only remedy is a yank that stays visible.
+
+**Against a `publish: api` registry** (registry-server.md §2.2) the upload is
+begin → upload → commit: every fact about the release is asserted once at `begin`, the
+bytes go where the registry says, and `commit` is when the version becomes visible — after
+the server has checked length and digest against what was declared. Every call carries the
+registry's bearer token (§4.9), and only that registry's: a token whose claims name another
+issuer or audience is refused **before it is sent** (`TokenMismatch`), and a redirect is
+never followed with it — a 3xx is reported with its `Location` and the fix is to re-add the
+registry at its current address. A 401 exits `1` naming the exact `vaire registry login`
+to run; a 403 exits `1` as `PermissionDenied`, which no retry or other registry will fix.
+The `--json` error `kind` for all three is `registry`.
 
 ### 4.11 `vaire yank`
 
