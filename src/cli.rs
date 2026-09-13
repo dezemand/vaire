@@ -531,13 +531,22 @@ mod tests {
 
     #[test]
     fn json_flag_still_selects_json() {
-        assert_eq!(parse(&["status", "--json"]).output_format(), OutputFormat::Json);
+        assert_eq!(
+            parse(&["status", "--json"]).output_format(),
+            OutputFormat::Json
+        );
     }
 
     #[test]
     fn output_flag_selects_each_format_in_either_spelling() {
-        assert_eq!(parse(&["status", "-o", "json"]).output_format(), OutputFormat::Json);
-        assert_eq!(parse(&["status", "-o", "toon"]).output_format(), OutputFormat::Toon);
+        assert_eq!(
+            parse(&["status", "-o", "json"]).output_format(),
+            OutputFormat::Json
+        );
+        assert_eq!(
+            parse(&["status", "-o", "toon"]).output_format(),
+            OutputFormat::Toon
+        );
         assert_eq!(
             parse(&["status", "--output", "human"]).output_format(),
             OutputFormat::Human
