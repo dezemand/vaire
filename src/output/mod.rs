@@ -48,6 +48,16 @@ fn kv(out: &mut String, label: &str, width: usize, value: &str) {
     out.push_str(&format!("  {} {}\n", dim(&label), plain(value)));
 }
 
+/// Like [`kv`], but for a `value` already composed from `style::*` calls (e.g. `dim(...)`
+/// mixed with plain interpolation). `kv`'s own `plain()` pass would re-escape the raw
+/// `\x1b[...m` bytes those calls just emitted — see `style::bold_cyan` for the same
+/// double-escaping pitfall. Callers are responsible for sanitizing any raw/untrusted
+/// fragments themselves before composing `value`.
+fn kv_styled(out: &mut String, label: &str, width: usize, value: &str) {
+    let label = format!("{:<width$}", format!("{}:", plain(label)));
+    out.push_str(&format!("  {} {}\n", dim(&label), value));
+}
+
 /// `path:line`, dimmed — the clickable pointer the caller opens.
 fn loc(path: &str, line: u32) -> String {
     dim(&format!("{}:{line}", plain(path)))
@@ -275,7 +285,7 @@ impl Output for StatusOutput {
         } else {
             dim("not built yet")
         };
-        kv(&mut out, "last-indexed", 13, &last);
+        kv_styled(&mut out, "last-indexed", 13, &last);
 
         let by_type = self
             .nodes
@@ -289,7 +299,7 @@ impl Output for StatusOutput {
         } else {
             format!("{}   {}", self.nodes.total, dim(&format!("({by_type})")))
         };
-        kv(&mut out, "nodes", 13, &nodes);
+        kv_styled(&mut out, "nodes", 13, &nodes);
         kv(&mut out, "edges", 13, &self.edges.to_string());
         kv(
             &mut out,
