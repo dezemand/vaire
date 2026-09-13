@@ -168,13 +168,18 @@ from the client's say-so; the client's own identity is still asserted on `commit
 same `Authorization` header as always.
 
 Errors reuse the registry's typed vocabulary so the CLI's existing fan-out dispositions
-apply unchanged:
+apply unchanged, with one addition: `PermissionDenied`, a **new** `RegistryError` variant
+whose disposition is `Fatal`. `Unreachable`'s own disposition is `Partial` — a network
+timeout is exactly the case where a fan-out reports what it has and moves on — which is
+the wrong shape for "authenticated, but not permitted", a fact about the caller that
+retrying elsewhere cannot change. Reusing `Unreachable` for both would make a fan-out
+treat a permission refusal as a transient network blip.
 
 | status | body `error` | meaning | CLI disposition |
 |---|---|---|---|
 | 400 | `Malformed` | name or a field failed validation | fatal |
 | 401 | — (`WWW-Authenticate` only) | no or expired token | login, then retry |
-| 403 | `Unreachable` | authenticated, but lacks publish permission | fatal, names the permission |
+| 403 | `PermissionDenied` | authenticated, but lacks publish permission | fatal, names the permission |
 | 409 | `VersionExists` | already published | not an error in `push`'s ordinary flow |
 | 413 | `Io` | artifact exceeds the deployment's ceiling | fatal |
 
@@ -182,7 +187,15 @@ apply unchanged:
 This request is *not* part of the wire contract proper: it is answered by whatever the
 storage backend's presigned-upload mechanism answers (a plain `200`/`204` from an object
 store, or the directory-backed test server's own ack). The one contract it keeps
-regardless of backend: a checksum mismatch is caught at `commit`, never trusted here.
+regardless of backend, whichever kind of location `upload.url` turns out to be: it grants
+**exactly one expiring `PUT` to the one object `begin` staged**, nothing else — no listing
+of `staging/`, no reading or deleting any object under it, and no access to any other
+package's staging area. An object store's presigned URL gets this for free (it is scoped
+to one key by construction); a plain authenticated endpoint on a directory-backed server
+has to enforce it deliberately, by checking the token names an upload *this* request is
+allowed to complete rather than accepting any valid bearer token for any staged path. A
+checksum mismatch is still caught at `commit`, never trusted here — that contract is
+unrelated to and does not substitute for scoping the upload capability itself.
 
 **`POST /v1/api/publish/commit`**
 
@@ -199,9 +212,16 @@ commit has nothing to edit.
 
 The server, in order:
 
-1. Reads the staged bytes and checks them against the `sha256` declared at `begin`. A
-   mismatch is `422 ChecksumMismatch` and stops here — nothing downstream ever sees
-   unverified bytes.
+1. Reads the staged bytes and checks their length against the `size` declared at
+   `begin`, then their digest against the declared `sha256`. Either mismatch is `422
+   ChecksumMismatch` and stops here — nothing downstream ever sees unverified bytes. The
+   length check is not redundant with the digest one: `begin`'s size ceiling (§2.2.1)
+   is enforced against the *declared* size, and a publisher who declares a small size to
+   pass that check, then uploads something larger and reports *that* upload's real
+   digest, would otherwise have their true size go unchecked all the way through — the
+   digest matches because it was computed honestly for the oversized bytes, and only
+   comparing the staged length against what was declared at `begin` catches the lie the
+   ceiling was supposed to stop.
 2. Runs the publish choreography of registry.md §9.2 exactly as a static host's
    conditional writes would, with the server itself performing each write: create-only
    copy from staging to `v1/artifacts/<name>/<name>-<version>.tgz`, write the changelog,
@@ -271,6 +291,13 @@ The registry validates tokens; it never issues or stores credentials. Every toke
 OIDC-issued JWT, checked against the issuer's published signing keys (fetched from the
 issuer's discovery document and cached per process), the issuer as `iss`, and the
 registry's declared audience as `aud`.
+
+**HTTPS is mandatory for any registry whose descriptor carries an `auth` block**, with
+one documented exception: `http://127.0.0.1` and `http://localhost`, for `vaire serve`
+run against a local test issuer with nothing to eavesdrop on. A bearer token is a bare
+credential — anyone who reads the wire reads the identity it names — so a registry that
+declares identity over plain `http://` is refused at `registry add`, the same boundary
+that already validates a URL before storing it.
 
 #### Discovery: the descriptor names the party
 
@@ -371,6 +398,18 @@ uses, and diff it against the shipped one**. A mismatch rejects the publish. Thi
 server's half of "the index is a claim": the only thing that crosses into what the server
 will later *answer from* is what it built itself.
 
+The bytes being unpacked and parsed here passed the checksum in §2.2's commit step, not
+a trust check — a publisher able to reach `begin` can shape the archive's *contents*
+however it likes, so this is the one tier that unpacks and parses attacker-controlled
+input, and it is treated that way, not just in the containment check above but in what
+the deployment is willing to spend on it: an expanded-size ceiling (independent of the
+already-checked compressed artifact size — a small archive can still expand large), an
+entry-count ceiling, a maximum extraction depth, and a wall-clock timeout on the whole
+verify step, past which it is refused rather than left running. These are deployment
+operational limits, the same kind of number as §2.2.1's artifact size ceiling — not part
+of the wire contract, and not designed here; a deployment sets them to what its own
+compute budget can absorb.
+
 Once the rebuilt index exists, `validate_bump` is nearly free: diff the entity set of the
 prior release's verified index against this one, classify exactly as `vaire release`
 does, and refuse a claimed bump the diff does not support — a PATCH that removed an
@@ -413,7 +452,15 @@ lacks.
 
 `render` at this tier needs the shipped Markdown, not only the index. The artifact has it;
 the server unpacks on demand and caches. Attachments are served by their
-package-relative path from the same unpack.
+package-relative path from the same unpack — and because that path and its bytes are
+entirely a publisher's choice, an attachment response never trusts what a publisher named
+it: `Content-Type` is inferred from a fixed extension allowlist rather than taken from
+anything in the artifact, every response carries `X-Content-Type-Options: nosniff` and a
+`Content-Disposition` that forces a download for any type outside a small inline-safe set
+(images, PDF, plain text), and the registry's own origin never executes what it serves —
+no attachment is rendered inline in a context that could run script from it. A knowledge
+package is content agents and people read (registry.md §13's "content is a source, not an
+authority"); the same caution applies to what a browser is asked to do with the bytes.
 
 Scope defaults follow the existing rule: a query answers from the registry it was asked
 of. Fan-out across registries is the *client's* catalog job, not the server's.
@@ -454,14 +501,22 @@ Very little, and all of it selected by the descriptor:
 - An `auth` block enables `vaire registry login <name>` / `logout`, and `registry show`
   reports the login state. Without the block the verbs refuse with "this registry is
   anonymous".
-- A bearer token is read from `VAIRE_TOKEN` (or its per-registry form), else from
-  `credentials.toml` for that registry, and sent on every request to a registry that
-  declares `auth`. Nothing about tokens reaches a manifest or a lockfile.
+- A bearer token is resolved **per registry, never globally**: `VAIRE_TOKEN` is read only
+  when exactly one registry is the target of the current command (`push --registry
+  central`, or the one registry `select` would already pick unambiguously); its
+  per-registry form (`VAIRE_TOKEN_<NAME>`) or `credentials.toml` is what a command
+  touching several registries in one fan-out uses instead, so a token never travels to a
+  registry the caller did not name. Before sending it, the client confirms the token's own
+  `iss`/`aud` match what that registry's descriptor declared — a token minted for one
+  registry is not attached to a different one just because both happen to be configured.
+  Nothing about tokens reaches a manifest or a lockfile, and a redirect response is never
+  followed with the `Authorization` header attached unless the redirect target is the same
+  origin the token was resolved for.
 - `search: lexical` lets the fan-out engine use `Registry::search` instead of walking the
   degradation ladder to enumeration.
 - Enforced access surfaces as the errors that already exist — `PullRestricted` with a
-  hint, `Unreachable` for a 403 that is not a restriction, `NotFound` for a 404 — plus
-  one new one for a 401, which carries the login command.
+  hint, the new `PermissionDenied` for a 403 that is not a restriction, `NotFound` for a
+  404 — plus one new one for a 401, which carries the login command.
 
 Everything above the trait — the catalog, `pull`, resolution, the lockfile — is untouched.
 
@@ -490,7 +545,7 @@ function's target group:
 | route group | function | storage access |
 |---|---|---|
 | `/.well-known/…`, `/v1/index/…`, `/v1/artifacts/…`, `/v1/changelogs/…`, `/v1/packages.json` | the existing docs handler — already passes these through byte-exact | read |
-| `/v1/api/publish/…`, `/v1/api/yank` | publish | write to `v1/*` and `staging/*` — the **only** principal allowed to |
+| `/v1/api/publish/…` | publish | write to `v1/*` and `staging/*` — the **only** principal allowed to |
 | `/v1/api/search`, `/v1/api/query/…`, `/mcp` | search & query | read, plus the verified-index store |
 
 Identity is not a function; it is a layer each function applies, with the trusted-issuer
