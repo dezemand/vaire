@@ -1,13 +1,13 @@
 //! `vaire` binary entry point.
 //!
 //! Thin by design: parse the CLI, build the per-invocation context, dispatch to a
-//! command, render its output (human or `--json`), and map the outcome to one of the
+//! command, render its output (human, JSON, or TOON), and map the outcome to one of the
 //! documented exit codes (cli.md §7). All real work lives in the `vaire` library crate.
 
 use std::io::Read;
 use std::process::ExitCode as ProcExitCode;
 
-use vaire::cli::{Cli, Command, ConfigureSection};
+use vaire::cli::{Cli, Command, ConfigureSection, OutputFormat};
 use vaire::commands::{self, Ctx};
 use vaire::error::{ExitCode, VaireError};
 use vaire::output::Output;
@@ -17,13 +17,13 @@ use clap::Parser;
 
 fn main() -> ProcExitCode {
     let cli = Cli::parse();
-    let json = cli.json;
+    let format = cli.output_format();
     vaire::output::init_color(cli.no_color);
 
     let code = match dispatch(cli) {
         Ok(code) => code,
         Err(err) => {
-            emit_error(&err, json);
+            emit_error(&err, format);
             err.exit_code()
         }
     };
@@ -34,14 +34,14 @@ fn main() -> ProcExitCode {
 /// Run the requested command and return the exit code on success paths (including
 /// `check`'s non-clean exit `6`, which is a successful run with a non-zero status).
 fn dispatch(cli: Cli) -> Result<ExitCode> {
-    let json = cli.json;
+    let format = cli.output_format();
 
     // `init` scaffolds the corpus, so it runs *before* discovery (which needs `.vaire/`).
     // Its target is the positional path if given, else the `--repo`/`VAIRE_REPO` override,
     // else the current directory.
     if let Command::Init { path } = &cli.command {
         let target = path.as_deref().or(cli.repo.as_deref());
-        emit(&commands::init::run(target)?, json);
+        emit(&commands::init::run(target)?, format);
         return Ok(ExitCode::Success);
     }
 
@@ -70,13 +70,13 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             }
             None => commands::configure::run_interactive(&home)?,
         };
-        emit(&out, json);
+        emit(&out, format);
         return Ok(ExitCode::Success);
     }
 
     // `upgrade` operates on the binary itself — corpus-independent, no discovery.
     if let Command::Upgrade { version, check } = &cli.command {
-        emit(&commands::upgrade::run(version.as_deref(), *check)?, json);
+        emit(&commands::upgrade::run(version.as_deref(), *check)?, format);
         return Ok(ExitCode::Success);
     }
 
@@ -106,7 +106,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 eprintln!("warning: {warning}");
             }
         }
-        emit(&out, json);
+        emit(&out, format);
         return Ok(ExitCode::Success);
     }
 
@@ -118,14 +118,14 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         use vaire::cli::CatalogAction;
         match action {
             CatalogAction::Add { path } => {
-                emit(&commands::catalog::add(&home, path.as_deref())?, json)
+                emit(&commands::catalog::add(&home, path.as_deref())?, format)
             }
-            CatalogAction::Scan { dir } => emit(&commands::catalog::scan_dir(&home, &dir)?, json),
+            CatalogAction::Scan { dir } => emit(&commands::catalog::scan_dir(&home, &dir)?, format),
             CatalogAction::Rm { target, missing } => emit(
                 &commands::catalog::remove(&home, target.as_deref(), missing)?,
-                json,
+                format,
             ),
-            CatalogAction::List => emit(&commands::catalog::list(&home)?, json),
+            CatalogAction::List => emit(&commands::catalog::list(&home)?, format),
         }
         return Ok(ExitCode::Success);
     }
@@ -143,11 +143,11 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 no_search,
             } => emit(
                 &commands::registry::add(&home, &name, &url, priority, !no_search)?,
-                json,
+                format,
             ),
-            RegistryAction::List => emit(&commands::registry::list(&home)?, json),
-            RegistryAction::Rm { name } => emit(&commands::registry::remove(&home, &name)?, json),
-            RegistryAction::Show { name } => emit(&commands::registry::show(&home, &name)?, json),
+            RegistryAction::List => emit(&commands::registry::list(&home)?, format),
+            RegistryAction::Rm { name } => emit(&commands::registry::remove(&home, &name)?, format),
+            RegistryAction::Show { name } => emit(&commands::registry::show(&home, &name)?, format),
         }
         return Ok(ExitCode::Success);
     }
@@ -164,7 +164,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 dry_run: *dry_run,
             },
         )?;
-        emit(&out, json);
+        emit(&out, format);
         return Ok(ExitCode::Success);
     }
 
@@ -178,7 +178,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     {
         let home = vaire::userconfig::vaire_home();
         let out = commands::yank::run(&home, spec, registry.as_deref(), *undo)?;
-        emit(&out, json);
+        emit(&out, format);
         return Ok(ExitCode::Success);
     }
 
@@ -229,7 +229,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             },
         )?;
         let failed = !out.failed.is_empty();
-        emit(&out, json);
+        emit(&out, format);
         return Ok(match failed {
             true => ExitCode::Generic,
             false => ExitCode::Success,
@@ -246,10 +246,10 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
 
     match cli.command {
         Command::Resolve { id } => {
-            emit(&commands::resolve::run(&ctx, &id)?, json);
+            emit(&commands::resolve::run(&ctx, &id)?, format);
         }
         Command::Render { id } => {
-            emit(&commands::render::run(&ctx, &id)?, json);
+            emit(&commands::render::run(&ctx, &id)?, format);
         }
         Command::Backlinks {
             id,
@@ -257,7 +257,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             limit,
         } => {
             let out = commands::backlinks::run(&ctx, &id, type_filter.as_deref(), limit)?;
-            emit(&out, json);
+            emit(&out, format);
         }
         Command::Refs {
             id,
@@ -265,7 +265,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             type_filter,
         } => {
             let out = commands::refs::run(&ctx, &id, depth, type_filter.as_deref())?;
-            emit(&out, json);
+            emit(&out, format);
         }
         Command::Search {
             query,
@@ -283,7 +283,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 Some(limit),
                 local,
             )?;
-            emit(&out, json);
+            emit(&out, format);
         }
         Command::Suggest {
             descriptor,
@@ -299,7 +299,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 Some(limit),
                 local,
             )?;
-            emit(&out, json);
+            emit(&out, format);
         }
         Command::Unresolved {
             type_filter,
@@ -312,7 +312,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 scope.as_deref(),
                 all_packages,
             )?;
-            emit(&out, json);
+            emit(&out, format);
         }
         Command::Index {
             full,
@@ -325,7 +325,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             for warning in commands::catalog::register_ambient(&ctx, no_register) {
                 eprintln!("warning: {warning}");
             }
-            emit(&out, json);
+            emit(&out, format);
         }
         Command::Check {
             strict,
@@ -337,13 +337,13 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             for warning in commands::catalog::register_ambient(&ctx, no_register) {
                 eprintln!("warning: {warning}");
             }
-            emit(&report, json);
+            emit(&report, format);
             if failed {
                 return Ok(ExitCode::CheckViolations);
             }
         }
         Command::Status => {
-            emit(&commands::status::run(&ctx)?, json);
+            emit(&commands::status::run(&ctx)?, format);
         }
         Command::Release {
             major,
@@ -377,7 +377,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             )?;
             let blocked = out.status == vaire::output::ReleaseStatus::Blocked;
             let released = out.status == vaire::output::ReleaseStatus::Released;
-            emit(&out, json);
+            emit(&out, format);
             if blocked {
                 // Not a failure: a decision waiting on a maintainer. Its own code so a
                 // pipeline can report it as pending rather than broken.
@@ -400,7 +400,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                     },
                 )?;
                 let failed = !out.failed.is_empty();
-                emit(&out, json);
+                emit(&out, format);
                 if failed {
                     return Ok(ExitCode::Generic);
                 }
@@ -419,7 +419,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         }
         #[cfg(feature = "pack")]
         Command::Pack { no_embeddings } => {
-            emit(&commands::pack::run(&ctx, no_embeddings)?, json);
+            emit(&commands::pack::run(&ctx, no_embeddings)?, format);
         }
         #[cfg(feature = "pack")]
         Command::Pull {
@@ -438,7 +438,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 },
             )?;
             let failed = !out.failed.is_empty();
-            emit(&out, json);
+            emit(&out, format);
             if failed {
                 return Ok(ExitCode::Generic);
             }
@@ -462,7 +462,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
                 },
             )?;
             let failed = !out.failed.is_empty();
-            emit(&out, json);
+            emit(&out, format);
             if failed {
                 // Some versions did not publish. Reported per version above; the exit code
                 // is what a pipeline branches on.
@@ -470,13 +470,13 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             }
         }
         Command::Pin { spec } => {
-            emit(&commands::pin::pin(&ctx, &spec)?, json);
+            emit(&commands::pin::pin(&ctx, &spec)?, format);
         }
         Command::Unpin { name } => {
-            emit(&commands::pin::unpin(&ctx, &name)?, json);
+            emit(&commands::pin::unpin(&ctx, &name)?, format);
         }
         Command::Deps => {
-            emit(&commands::deps::run(&ctx)?, json);
+            emit(&commands::deps::run(&ctx)?, format);
         }
         Command::Init { .. }
         | Command::Catalog { .. }
@@ -517,22 +517,22 @@ fn read_api_key_from_stdin() -> Result<String> {
     Ok(key.to_string())
 }
 
-/// Write a command result to stdout — JSON or human text (cli.md §2.3).
-fn emit<O: Output>(out: &O, json: bool) {
-    if json {
-        println!("{}", out.to_json());
-    } else {
-        println!("{}", out.render_human());
+/// Write a command result to stdout — human text, JSON, or TOON (cli.md §2.3).
+fn emit<O: Output>(out: &O, format: OutputFormat) {
+    match format {
+        OutputFormat::Human => println!("{}", out.render_human()),
+        OutputFormat::Json => println!("{}", out.to_json()),
+        OutputFormat::Toon => println!("{}", out.to_toon()),
     }
 }
 
-/// Write an error: the `{"error": {...}}` JSON shape on stdout under `--json`, or a
-/// plain message on stderr otherwise (cli.md §7).
-fn emit_error(err: &VaireError, json: bool) {
-    if json {
-        println!("{}", err.to_json());
-    } else {
-        eprintln!("error: {err}");
+/// Write an error: the `{"error": {...}}` shape on stdout under a machine format (JSON,
+/// or its TOON encoding), or a plain message on stderr otherwise (cli.md §7).
+fn emit_error(err: &VaireError, format: OutputFormat) {
+    match format {
+        OutputFormat::Human => eprintln!("error: {err}"),
+        OutputFormat::Json => println!("{}", err.to_json()),
+        OutputFormat::Toon => println!("{}", err.to_toon()),
     }
 }
 

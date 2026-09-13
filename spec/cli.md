@@ -26,7 +26,8 @@ vaire [GLOBAL FLAGS] <command> [ARGS] [COMMAND FLAGS]
 Two classes of command:
 
 - **Read** — `resolve`, `render`, `backlinks`, `refs`, `search`, `suggest`, `unresolved`. Queries
-  against the index. Available over MCP. Every read command accepts `--json`. (`render`
+  against the index. Available over MCP. Every read command accepts `-o json`/`--json` and
+  `-o toon` (§2.3). (`render`
   is the one read that returns a file *body* rather than pointers — see §3.6.)
 - **Maintain** — `init`, `index`, `check`, `status`, `configure`. Scaffold, build, validate,
   report, and set global user settings. **Not** exposed over MCP; run by humans, git hooks, or CI.
@@ -59,7 +60,8 @@ question, decided by `vaire index` from the corpus's Git state (§4.1).
 | Flag | Meaning |
 | --- | --- |
 | `--repo <path>` | Corpus repo root. Overrides discovery and `VAIRE_REPO`. |
-| `--json` | Emit JSON instead of human-readable text. Read commands only. |
+| `--output <fmt>` / `-o <fmt>` | Output format: `human` (default), `json`, or `toon`. Also settable via `VAIRE_OUTPUT`; the flag wins over the environment. |
+| `--json` | Shorthand for `-o json`, kept for compatibility. `-o`/`VAIRE_OUTPUT` win when both are given. |
 | `--config <path>` | Path to the config file (default: `<root>/knowledge.toml`, see §6). |
 | `--quiet` / `-q` | Suppress progress and non-essential output (errors still print). |
 | `--verbose` / `-v` | Extra diagnostics on stderr. Repeatable. |
@@ -70,13 +72,21 @@ question, decided by `vaire index` from the corpus's Git state (§4.1).
 
 ### 2.3 Output discipline
 
-- **stdout** carries the command's result (human text or, with `--json`, a single JSON
-  value). Nothing else is written to stdout.
+- **stdout** carries the command's result (human text or, under a machine format, a
+  single value). Nothing else is written to stdout.
 - **stderr** carries progress, warnings, and errors. `--quiet` silences progress and
   warnings; errors always print.
-- With `--json`, stdout is **always** valid JSON — including errors, which are emitted as
-  `{"error": {...}}` (§7) rather than a bare message — so a machine consumer can parse one
-  shape unconditionally.
+- There is **one canonical machine shape** per command — the JSON documented in §3–§4,
+  which MCP returns verbatim — and two encodings of it: `-o json` (or `--json`) emits it
+  as JSON; `-o toon` emits the same value as TOON (Token-Oriented Object Notation), a
+  compact indentation-based encoding that costs an LLM meaningfully fewer tokens. TOON is
+  derived from the JSON value, never authored separately, so the two cannot drift.
+- Under a machine format, stdout is **always** that format — including errors, which are
+  emitted as `{"error": {...}}` (§7) rather than a bare message — so a machine consumer
+  can parse one shape unconditionally.
+- The format is chosen by `-o`/`--output`, else `VAIRE_OUTPUT`, else `--json`, else
+  `human`. The environment variable is the intended hook for an agent harness: set it
+  once and every `vaire` invocation answers in the format the caller can read.
 - Output is **stable and deterministic**: results are sorted by a documented key (noted
   per command) so diffs and snapshots are reproducible.
 

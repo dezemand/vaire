@@ -86,8 +86,9 @@ skill; the dependency model behind `add`/`deps` (linking, the local-packages roo
 
 ## Global flags
 
-`--repo <path>` (corpus root, overrides discovery and `VAIRE_REPO`), `--json`,
-`--config <path>`, `--quiet`/`-q`, `--no-color`.
+`--repo <path>` (corpus root, overrides discovery and `VAIRE_REPO`), `-o <fmt>` /
+`--output <fmt>` (`human`, `json`, or `toon`; also via `VAIRE_OUTPUT`), `--json` (shorthand
+for `-o json`), `--config <path>`, `--quiet`/`-q`, `--no-color`.
 
 ## Typical flows
 
@@ -107,11 +108,15 @@ vaire unresolved --type person --json | jq '.unresolved[].descriptor'
 vaire render department:hr
 ```
 
-## JSON output
+## Machine output: JSON and TOON
 
-With `--json`, stdout is **always** a single JSON value — including errors, emitted as
-`{"error": {"code": …, "kind": …, "message": …}}` — so a consumer parses one shape.
-Results are sorted deterministically. Example shapes:
+With `-o json` (or `--json`), stdout is **always** a single JSON value — including errors,
+emitted as `{"error": {"code": …, "kind": …, "message": …}}` — so a consumer parses one
+shape. `-o toon` emits the *same* value as TOON (Token-Oriented Object Notation): a
+compact, indentation-based encoding that costs meaningfully fewer tokens than JSON on the
+list-heavy results (`search`, `backlinks`, `refs`, `deps`). Prefer it when the output is
+going straight into your own context rather than into `jq`. Set `VAIRE_OUTPUT=toon` once
+and every call answers that way. Results are sorted deterministically. Example JSON shapes:
 
 - `resolve` → `{ "id", "type", "path", "frontmatter": {…}, "superseded_by": null }`
 - `backlinks` → `{ "id", "backlinks": [{ "id","type","path","ref_type","line" }], "count" }`

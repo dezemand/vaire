@@ -141,7 +141,7 @@ contract.
 
 ## Commands
 
-**Read** (also exposed over MCP) — every command takes `--json`:
+**Read** (also exposed over MCP) — every command takes `-o json` (or `--json`) and `-o toon`, a token-cheaper encoding of the same shape for LLM contexts; set `VAIRE_OUTPUT` to choose once:
 
 | Command | Purpose |
 | --- | --- |
