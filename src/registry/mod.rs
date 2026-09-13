@@ -67,7 +67,9 @@ use crate::model::Version;
 
 pub use api_http::Api;
 pub use static_http::StaticHttp;
-pub use wire::{Access, Capabilities, Descriptor, PackageIndex, ReleaseMeta, SearchCapability};
+pub use wire::{
+    Access, Auth, Capabilities, Descriptor, PackageIndex, ReleaseMeta, SearchCapability,
+};
 
 /// A digest in the form the wire contract writes everywhere a `sha256` field appears.
 ///

@@ -259,6 +259,8 @@ impl StaticHttp {
             schema_version: SCHEMA_VERSION,
             name: Some(self.name.clone()),
             capabilities: static_capabilities(),
+            // A static host has nobody to log in to.
+            auth: None,
         };
         match self
             .transport
@@ -582,6 +584,7 @@ fn uninitialized(name: &str, writable: bool) -> Descriptor {
             true => static_capabilities(),
             false => Capabilities::default(),
         },
+        auth: None,
     }
 }
 

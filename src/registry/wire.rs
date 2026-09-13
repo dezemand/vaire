@@ -36,6 +36,41 @@ pub struct Descriptor {
     pub name: Option<String>,
     #[serde(default)]
     pub capabilities: Capabilities,
+    /// What a **person** logs in against (registry-server.md §2.3). Absent means
+    /// anonymous — which is what every descriptor written before identity existed already
+    /// implies, so adding the block is not a schema break.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<Auth>,
+}
+
+/// The descriptor's `auth` block: the OIDC party a person signs in with, and what the
+/// registry expects the resulting token to say about itself.
+///
+/// This is advertisement, not enforcement. The registry validates tokens against its own
+/// trusted-issuer list, which is server-side and may be longer than this (a CI issuer is
+/// never listed here — nothing interactive needs it). What the client uses it for is the
+/// other direction: refusing to *send* a token this block says was not minted for this
+/// registry (registry-server.md §4), which is a check about the caller's credentials
+/// rather than about the registry's policy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Auth {
+    /// The OIDC issuer URL, exactly as it appears in the `iss` claim.
+    pub issuer: String,
+    /// The audience the registry checks tokens for (`aud`). Optional because an issuer
+    /// that mints tokens for exactly one party has nothing to distinguish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    /// The public client id the CLI presents to the issuer. Only the device-code and
+    /// PKCE flows need it; a registry whose tokens come from elsewhere may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// Which grants the issuer supports, as `"device_code"` / `"authorization_code"`.
+    /// Free strings rather than an enum, so a grant this client does not know about is
+    /// carried rather than rejected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<String>,
 }
 
 /// What the registry claims it can do. Every field defaults to the **least** capable
@@ -348,6 +383,31 @@ mod tests {
             descriptor.capabilities.access_enforcement,
             AccessEnforcement::Advisory
         );
+        // No `auth` block is anonymous, which every pre-identity descriptor implies.
+        assert!(descriptor.auth.is_none());
+    }
+
+    #[test]
+    fn an_auth_block_is_read_with_only_the_issuer_required() {
+        let descriptor: Descriptor = serde_json::from_str(
+            r#"{"schema_version":1,"auth":{"issuer":"https://login.example/tenant"}}"#,
+        )
+        .unwrap();
+        let auth = descriptor.auth.unwrap();
+        assert_eq!(auth.issuer, "https://login.example/tenant");
+        assert!(auth.audience.is_none() && auth.client_id.is_none());
+        assert!(auth.scopes.is_empty() && auth.grants.is_empty());
+
+        let full: Descriptor = serde_json::from_str(
+            r#"{"schema_version":1,"auth":{"issuer":"https://login.example/tenant",
+                "audience":"api://vaire-registry","client_id":"abc",
+                "scopes":["openid"],"grants":["device_code","something_newer"]}}"#,
+        )
+        .unwrap();
+        let auth = full.auth.unwrap();
+        assert_eq!(auth.audience.as_deref(), Some("api://vaire-registry"));
+        // A grant this client does not know is carried, not refused.
+        assert_eq!(auth.grants, ["device_code", "something_newer"]);
     }
 
     #[test]
