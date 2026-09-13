@@ -193,3 +193,137 @@ fn write_private(path: &Path, text: &str) -> Result<()> {
     std::fs::write(path, text)?;
     Ok(())
 }
+
+/// The `credentials.toml` key a registry's bearer token is stored under
+/// (registry-server.md §2.3). One key per registry name, not one shared key, so logging
+/// in to a second registry never overwrites the first.
+fn registry_token_key(registry: &str) -> String {
+    format!("registry_{registry}_token")
+}
+
+/// The environment variable a per-registry token override reads — `VAIRE_TOKEN_<NAME>`,
+/// uppercased and with anything that is not an ASCII letter/digit turned into `_`, so a
+/// registry name with a `.` or `-` in it still yields a shell-legal variable name.
+fn registry_token_env(registry: &str) -> String {
+    let upper: String = registry
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("VAIRE_TOKEN_{upper}")
+}
+
+/// The bearer token to send to `registry`, or `None` for an anonymous request.
+///
+/// Precedence (registry-server.md §2.3, §4): a bare `VAIRE_TOKEN` — set in a CI job that
+/// only ever talks to one registry — wins outright; then the per-registry
+/// `VAIRE_TOKEN_<NAME>`, for a job juggling more than one; then whatever `vaire registry
+/// login` stored in `credentials.toml`. A CI job therefore needs no login step at all.
+pub fn registry_token(registry: &str) -> Option<String> {
+    registry_token_from(registry, &config_home())
+}
+
+/// [`registry_token`] against an explicit config home (the DI seam for tests).
+pub fn registry_token_from(registry: &str, home: &Path) -> Option<String> {
+    if let Ok(v) = std::env::var("VAIRE_TOKEN")
+        && !v.is_empty()
+    {
+        return Some(v);
+    }
+    credential_from(&registry_token_env(registry), home)
+        .or_else(|| credential_from(&registry_token_key(registry), home))
+}
+
+/// Store the token `vaire registry login` obtained for `registry`.
+pub fn save_registry_token(registry: &str, token: &str) -> Result<PathBuf> {
+    save_credential(&registry_token_key(registry), token)
+}
+
+/// Forget the token for `registry` (`vaire registry logout`). `Ok(false)` when there was
+/// none — logging out of a registry you never logged in to is not an error.
+pub fn forget_registry_token(registry: &str) -> Result<bool> {
+    forget_registry_token_from(registry, &config_home())
+}
+
+/// [`forget_registry_token`] against an explicit config home (the DI seam for tests).
+pub fn forget_registry_token_from(registry: &str, home: &Path) -> Result<bool> {
+    let path = home.join("credentials.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let mut table: toml::Table = toml::from_str(&text)
+        .map_err(|e| VaireError::Config(format!("{}: {e}", path.display())))?;
+    let key = registry_token_key(registry);
+    if table.remove(&key).is_none() {
+        return Ok(false);
+    }
+    let text = toml::to_string_pretty(&table)
+        .map_err(|e| VaireError::Config(format!("serialize credentials: {e}")))?;
+    write_private(&path, &text)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// `VAIRE_TOKEN` is process-global, and cargo runs a crate's tests on several
+    /// threads by default — without this, a test that sets it can race a sibling test
+    /// that assumes it is unset. Held for the duration of any test that touches the
+    /// variable.
+    static VAIRE_TOKEN_ENV: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn a_bare_vaire_token_wins_over_everything_per_registry() {
+        let _guard = VAIRE_TOKEN_ENV.lock().unwrap();
+        // SAFETY: no other thread reads or writes VAIRE_TOKEN while the guard above is
+        // held — every test in this file that touches it takes the same lock first.
+        unsafe { std::env::set_var("VAIRE_TOKEN", "global-token") };
+        let dir = tempfile::tempdir().unwrap();
+        save_credential_to(dir.path(), &registry_token_key("central"), "stored-token").unwrap();
+        assert_eq!(
+            registry_token_from("central", dir.path()),
+            Some("global-token".to_string())
+        );
+        unsafe { std::env::remove_var("VAIRE_TOKEN") };
+    }
+
+    #[test]
+    fn a_stored_login_is_used_when_nothing_in_the_environment_overrides_it() {
+        let _guard = VAIRE_TOKEN_ENV.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(registry_token_from("central", dir.path()), None);
+        save_registry_token_to(dir.path(), "central", "abc123").unwrap();
+        assert_eq!(
+            registry_token_from("central", dir.path()),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn logging_out_forgets_only_that_registrys_token() {
+        let _guard = VAIRE_TOKEN_ENV.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        save_registry_token_to(dir.path(), "central", "abc123").unwrap();
+        save_registry_token_to(dir.path(), "lab", "def456").unwrap();
+        assert!(forget_registry_token_from("central", dir.path()).unwrap());
+        assert_eq!(registry_token_from("central", dir.path()), None);
+        assert_eq!(
+            registry_token_from("lab", dir.path()),
+            Some("def456".to_string())
+        );
+        // Logging out twice is not an error, just a no-op.
+        assert!(!forget_registry_token_from("central", dir.path()).unwrap());
+    }
+
+    /// [`save_registry_token`] against an explicit home (the DI seam these tests need).
+    fn save_registry_token_to(home: &Path, registry: &str, token: &str) -> Result<PathBuf> {
+        save_credential_to(home, &registry_token_key(registry), token)
+    }
+}
