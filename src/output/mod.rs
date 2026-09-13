@@ -15,7 +15,7 @@ use crate::index::build::IndexSummary;
 use crate::index::check::CheckReport;
 
 pub mod style;
-use style::{bold, cyan, dim, green, inline_text, plain, red, yellow};
+use style::{bold, bold_cyan, cyan, dim, green, inline_text, plain, red, yellow};
 
 /// Initialize human-output coloring from the `--no-color` flag (also honors `NO_COLOR`
 /// and a non-tty stdout). Call once in `main` before rendering.
@@ -79,7 +79,7 @@ fn pluralize(n: usize, singular: &str) -> String {
 impl Output for ResolveOutput {
     fn render_human(&self) -> String {
         let mut out = String::new();
-        out.push_str(&bold(&cyan(&self.id)));
+        out.push_str(&bold_cyan(&self.id));
         out.push('\n');
         if let (Some(req), Some(_target)) = (&self.requested_id, &self.superseded_by) {
             out.push_str(&dim(&format!("  ↳ superseded; requested {req}\n")));
@@ -121,7 +121,7 @@ impl Output for BacklinksOutput {
         let mut out = format!(
             "{} reference {}\n",
             pluralize(self.count, "node"),
-            bold(&cyan(&self.id))
+            bold_cyan(&self.id)
         );
         let w = col_width(self.backlinks.iter().map(|b| b.id.as_str()));
         for b in &self.backlinks {
@@ -149,7 +149,7 @@ impl Output for RefsOutput {
         }
         let mut out = format!(
             "{} → {} (depth {})\n",
-            bold(&cyan(&self.id)),
+            bold_cyan(&self.id),
             pluralize(self.count, "node"),
             self.depth,
         );
@@ -942,7 +942,7 @@ pub struct DepNode {
 
 impl Output for DepsOutput {
     fn render_human(&self) -> String {
-        let mut out = format!("{} {}\n", bold(&cyan(&self.name)), dim(&self.version));
+        let mut out = format!("{} {}\n", bold_cyan(&self.name), dim(&self.version));
         render_dep_nodes(&mut out, &self.dependencies, "");
         out.trim_end().to_string()
     }
@@ -1077,7 +1077,7 @@ impl Output for PackOutput {
         out.push_str(&format!(
             "{} {} {}\n",
             green("packed"),
-            bold(&cyan(&self.name)),
+            bold_cyan(&self.name),
             plain(&self.version)
         ));
         kv(&mut out, "artifact", 10, &self.artifact);
