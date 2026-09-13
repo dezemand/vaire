@@ -152,7 +152,46 @@ pub fn normalize_url(url: &str) -> TransportResult<String> {
     // Canonicalize when it exists; a registry directory that does not exist yet is a
     // legitimate thing to configure (push creates it), so absence is not fatal here.
     let absolute = std::fs::canonicalize(&absolute).unwrap_or(absolute);
-    Ok(format!("file://{}", absolute.display()))
+    Ok(file_url_for(&absolute))
+}
+
+/// The `file://` URL for an absolute path, spelled the same on every platform.
+///
+/// Delegates to the `url` crate rather than hand-rolling it, on the strength of a bug
+/// report against an earlier hand-rolled version: percent-encoding was missing (a space
+/// or `#` in a path produced a URL that read back as something else) and UNC paths were
+/// mis-serialized (`\\?\UNC\server\share` needs `server` as the URL's *authority* —
+/// `file://server/share` — not folded into the path as `file:////server/share`).
+/// `Url::from_file_path` already gets both right, including the verbatim (`\\?\…`)
+/// prefixes Windows' `canonicalize` returns — it matches on [`std::path::Prefix`], not on
+/// substrings, which is what a hand-rolled version cannot do without re-deriving the
+/// platform's own path-parsing rules.
+fn file_url_for(path: &Path) -> String {
+    match url::Url::from_file_path(path) {
+        Ok(url) => url.into(),
+        // `from_file_path` only refuses a relative path, which nothing here ever passes
+        // (this is always called with an already-canonicalized/absolute path) — degrade
+        // rather than panic if that invariant is ever violated elsewhere.
+        Err(()) => format!("file://{}", path.display().to_string().replace('\\', "/")),
+    }
+}
+
+/// The filesystem path a `file://` URL's remainder names.
+///
+/// `rest` is everything after `file://` (what [`FileTransport::from_url`] strips before
+/// calling this), so the URL is reconstructed once and handed to `Url`'s own parser
+/// rather than re-parsed by hand — the same reasoning as [`file_url_for`], in reverse.
+fn file_url_path(rest: &str) -> String {
+    let reconstructed = format!("file://{rest}");
+    match url::Url::parse(&reconstructed)
+        .ok()
+        .and_then(|url| url.to_file_path().ok())
+    {
+        Some(path) => path.display().to_string(),
+        // Not a URL `Url` can turn back into a path (should not happen for anything this
+        // module itself produced) — fall back to the bare remainder rather than panic.
+        None => rest.trim_start_matches('/').to_string(),
+    }
 }
 
 /// The scheme of a URL, or `None` when there is none. Deliberately stricter than "contains
@@ -189,15 +228,7 @@ impl FileTransport {
         let rest = url
             .strip_prefix("file://")
             .ok_or_else(|| TransportError::Io(format!("{url} is not a file:// URL")))?;
-        // `file:///abs/path` (the canonical form) and `file://abs/path` (what people
-        // actually type) both mean the same directory here. A genuine host component is
-        // not something this can serve, and pretending otherwise would silently read the
-        // wrong place.
-        let path = match rest.strip_prefix('/') {
-            Some(_) => rest.to_string(),
-            None => format!("/{rest}"),
-        };
-        Ok(FileTransport::at(PathBuf::from(path)))
+        Ok(FileTransport::at(PathBuf::from(file_url_path(rest))))
     }
 
     fn resolve(&self, path: &str) -> PathBuf {
@@ -469,6 +500,67 @@ mod tests {
         // Read-only, and honest about it rather than failing at publish time with an
         // unrelated message.
         assert!(!open("https://packages.example/kg").unwrap().writable());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_windows_drive_path_normalizes_to_a_url_with_the_slash_before_the_drive_letter() {
+        assert_eq!(
+            file_url_for(Path::new(r"C:\Users\me\reg")),
+            "file:///C:/Users/me/reg"
+        );
+        // The verbatim prefix canonicalize hands back on Windows is not a spelling
+        // anything outside the kernel wants — `url` matches on `std::path::Prefix`, not
+        // on this substring, so it strips it the same way for both spellings.
+        assert_eq!(
+            file_url_for(Path::new(r"\\?\C:\Users\me\reg")),
+            "file:///C:/Users/me/reg"
+        );
+        assert_eq!(file_url_path("C:/Users/me/reg"), r"C:\Users\me\reg");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_unc_path_round_trips_through_its_url_authority() {
+        // The bug this guards: a hand-rolled version folded the server name into the
+        // path (`file:////server/share`) instead of the URL's authority
+        // (`file://server/share`), and could not tell a `\\?\UNC\` path from a plain one.
+        assert_eq!(
+            file_url_for(Path::new(r"\\?\UNC\server\share\reg")),
+            "file://server/share/reg"
+        );
+        assert_eq!(file_url_path("server/share/reg"), r"\\server\share\reg");
+    }
+
+    #[test]
+    fn a_path_with_reserved_url_characters_round_trips() {
+        // The other bug this guards: unescaped `file_url_for` produced a URL that a
+        // standards-conforming reader (a browser, `url::Url::parse` itself) would decode
+        // back to a *different* path than the one that produced it.
+        let dir = temp();
+        let sub = dir.path().join("has space & a # mark");
+        std::fs::create_dir(&sub).unwrap();
+        let url = file_url_for(&sub);
+        assert!(
+            url.contains("%20") && url.contains("%23"),
+            "reserved characters must be percent-encoded: {url}"
+        );
+        let transport = open(&url).unwrap();
+        transport.put_new("v1/index/a.json", b"{}").unwrap();
+        assert!(sub.join("v1/index/a.json").exists());
+    }
+
+    #[test]
+    fn a_registry_added_by_a_windows_path_round_trips_through_normalize_and_open() {
+        let dir = temp();
+        let url = normalize_url(&dir.path().display().to_string()).unwrap();
+        // Every part of the pipeline that touches this URL later must agree it is
+        // writable and point at the same directory — `registry add`'s reachability
+        // probe and `push` both go through exactly this path.
+        let transport = open(&url).unwrap();
+        assert!(transport.writable());
+        transport.put_new("v1/index/a.json", b"{}").unwrap();
+        assert!(dir.path().join("v1/index/a.json").exists());
     }
 
     #[test]
