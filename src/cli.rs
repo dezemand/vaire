@@ -21,10 +21,8 @@ pub struct Cli {
     #[arg(long, global = true, env = "VAIRE_REPO")]
     pub repo: Option<PathBuf>,
 
-    /// Emit JSON instead of human-readable text. Read commands only.
-    ///
-    /// Deprecated: prefer `-o json` / `--output json`. Kept as a shorthand; if both are
-    /// given, `--output`/`-o` wins.
+    /// Deprecated shorthand for `-o json` / `--output json`. Kept so existing scripts
+    /// keep working; if both are given, `--output`/`-o` wins.
     #[arg(long, global = true)]
     pub json: bool,
 

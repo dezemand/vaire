@@ -74,16 +74,19 @@ question, decided by `vaire index` from the corpus's Git state (§4.1).
 
 - **stdout** carries the command's result (human text or, under a machine format, a
   single value). Nothing else is written to stdout.
-- **stderr** carries progress, warnings, and errors. `--quiet` silences progress and
-  warnings; errors always print.
+- **stderr** carries progress, warnings, and — under `human` — errors. `--quiet` silences
+  progress and warnings; errors always print somewhere (see the machine-format rule below
+  for where).
 - There is **one canonical machine shape** per command — the JSON documented in §3–§4,
   which MCP returns verbatim — and two encodings of it: `-o json` (or `--json`) emits it
   as JSON; `-o toon` emits the same value as TOON (Token-Oriented Object Notation), a
   compact indentation-based encoding that costs an LLM meaningfully fewer tokens. TOON is
   derived from the JSON value, never authored separately, so the two cannot drift.
-- Under a machine format, stdout is **always** that format — including errors, which are
-  emitted as `{"error": {...}}` (§7) rather than a bare message — so a machine consumer
-  can parse one shape unconditionally.
+- Under a machine format, stdout is **always** that format — including errors. An error
+  is the canonical `{"error": {code, kind, message}}` value (§7) written to **stdout** in
+  the selected encoding (JSON under `-o json`, TOON under `-o toon`), never a bare message
+  on stderr — so a machine consumer parses one shape unconditionally and never has to
+  switch parsers to read a failure.
 - The format is chosen by `-o`/`--output`, else `VAIRE_OUTPUT`, else `--json`, else
   `human`. The environment variable is the intended hook for an agent harness: set it
   once and every `vaire` invocation answers in the format the caller can read.
@@ -1683,12 +1686,22 @@ only a maintainer can make, so an automated release pipeline has to be able to t
 needs a human" from "this broke", and report the first as a pending decision rather than a
 red build.
 
-With `--json`, an **error** exit (`1`–`5`) writes a JSON error to stdout so machine callers
-parse one shape:
+Under a machine format (`-o json`/`--json`, or `-o toon`), an **error** exit (`1`–`5`)
+writes the canonical error value to stdout in that encoding, so machine callers parse one
+shape:
 
 ```json
 { "error": { "code": 5, "kind": "id_not_found", "message": "no node with id 'person:nobody'" } }
 ```
+
+```
+error:
+  code: 5
+  kind: id_not_found
+  message: "no node with id 'person:nobody'"
+```
+
+Under `human`, the same error is a plain `error: …` line on stderr.
 
 An **outcome** exit writes the command's own JSON instead — a `check` report carrying its
 findings, or a release output whose `status` is `blocked`. There is nothing to report as an
