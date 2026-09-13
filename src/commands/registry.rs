@@ -22,7 +22,7 @@ use crate::catalog::{Catalog, KIND_API, KIND_STATIC, RegistryRow};
 use crate::error::{Result, VaireError};
 use crate::output::{
     RegistryAddOutput, RegistryListOutput, RegistryLoginOutput, RegistryLogoutOutput,
-    RegistryRemoveOutput, RegistryShowOutput,
+    RegistryRemoveOutput, RegistryShowOutput, SignedIn,
 };
 use crate::registry::wire::PublishCapability;
 use crate::registry::{Api, Registry, StaticHttp, transport};
@@ -204,6 +204,15 @@ pub fn show(home: &Path, name: &str) -> Result<RegistryShowOutput> {
         true => Some(registry.list()?),
         false => None,
     };
+    // Login state is reported only where identity means something: a static host has
+    // nothing to be signed in to, and "no" against it would read as something to fix.
+    let signed_in = takes_identity(&descriptor).then(|| {
+        let source = userconfig::registry_token_source(&row.name);
+        SignedIn {
+            signed_in: source.is_some(),
+            source,
+        }
+    });
     Ok(RegistryShowOutput {
         name: row.name,
         url: row.url,
@@ -212,8 +221,19 @@ pub fn show(home: &Path, name: &str) -> Result<RegistryShowOutput> {
         schema_version: descriptor.schema_version,
         declared_name: descriptor.name,
         capabilities: descriptor.capabilities,
+        auth: descriptor.auth,
+        signed_in,
         packages,
     })
+}
+
+/// Whether a registry has any use for a token: it declares an identity provider, or it
+/// publishes through the api tier, whose writes are never anonymous (registry-server.md
+/// §2.2). The second without the first is a registry that validates tokens it does not
+/// advertise an issuer for — a local `vaire serve` with fixed tokens, or a portal-issued
+/// token — and `--token-stdin` is exactly the login it supports.
+fn takes_identity(descriptor: &crate::registry::Descriptor) -> bool {
+    descriptor.auth.is_some() || descriptor.capabilities.publish == Some(PublishCapability::Api)
 }
 
 /// The configured registry called `name`.
@@ -297,7 +317,21 @@ pub fn open(row: &RegistryRow) -> Result<Box<dyn Registry>> {
 /// surface: paste a token however the registry's own portal issued one, and it is stored
 /// exactly where the device flow will store its own tokens later, so nothing above this
 /// (push, yank) needs to change when it lands.
-pub fn login(name: &str, token_stdin: bool) -> Result<RegistryLoginOutput> {
+///
+/// The registry is opened first, for two refusals that belong here rather than at the
+/// next `push`: a registry with no use for a token at all (registry-server.md §4 — "this
+/// registry is anonymous"), and a pasted token whose own claims say it was minted for a
+/// different party than the descriptor names.
+pub fn login(home: &Path, name: &str, token_stdin: bool) -> Result<RegistryLoginOutput> {
+    let row = find(home, name)?;
+    let registry = open(&row)?;
+    let descriptor = registry.descriptor();
+    if !takes_identity(descriptor) {
+        return Err(VaireError::Usage(format!(
+            "registry '{name}' is anonymous — it declares no identity provider and does \
+             not publish through the api tier, so there is nothing to sign in to"
+        )));
+    }
     if !token_stdin {
         return Err(VaireError::Usage(format!(
             "interactive sign-in is not available in this vaire yet — obtain a token from \
@@ -311,6 +345,14 @@ pub fn login(name: &str, token_stdin: bool) -> Result<RegistryLoginOutput> {
     let token = token.trim();
     if token.is_empty() {
         return Err(VaireError::Usage("no token was given on stdin".into()));
+    }
+    if let Some(auth) = &descriptor.auth
+        && let Err(mismatch) = crate::registry::token::matches(auth, token)
+    {
+        return Err(VaireError::Usage(format!(
+            "that token was issued with {} `{}`, and '{name}' expects `{}` — not stored",
+            mismatch.claim, mismatch.found, mismatch.expected
+        )));
     }
     userconfig::save_registry_token(name, token)?;
     Ok(RegistryLoginOutput {
@@ -372,5 +414,20 @@ mod tests {
         // Anonymous over http is the whole static-host story and stays allowed.
         assert!(insecure_identity("http://packages.example/kg", &descriptor(None)).is_none());
         assert!(insecure_identity("file:///srv/registry", &descriptor(identity())).is_none());
+    }
+
+    #[test]
+    fn a_registry_takes_identity_when_it_names_an_issuer_or_publishes_through_the_api() {
+        assert!(
+            !takes_identity(&descriptor(None)),
+            "a static host is anonymous"
+        );
+        assert!(takes_identity(&descriptor(identity())));
+        let mut api = descriptor(None);
+        api.capabilities.publish = Some(PublishCapability::Api);
+        assert!(
+            takes_identity(&api),
+            "api-tier writes are never anonymous, whoever issued the token"
+        );
     }
 }

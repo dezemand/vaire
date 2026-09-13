@@ -1619,10 +1619,30 @@ pub struct RegistryShowOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub declared_name: Option<String>,
     pub capabilities: crate::registry::Capabilities,
+    /// The identity provider the registry declares, when it declares one
+    /// (registry-server.md §2.3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<crate::registry::Auth>,
+    /// Whether a token for this registry is on file, and where it comes from —
+    /// `credentials.toml` or the environment variable that overrides it. Reported only
+    /// for a registry that takes identity at all (`publish: api` or an `auth` block); a
+    /// static host has nothing to be signed in to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<SignedIn>,
     /// `None` when the registry cannot enumerate — which is not the same as serving
     /// nothing, and is rendered differently for exactly that reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub packages: Option<Vec<crate::registry::PackageSummary>>,
+}
+
+/// The login state `vaire registry show` reports.
+#[derive(Debug, Serialize)]
+pub struct SignedIn {
+    pub signed_in: bool,
+    /// `credentials.toml`, `VAIRE_TOKEN`, or `VAIRE_TOKEN_<NAME>` — the same precedence
+    /// `push` resolves, so this says what will actually be sent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl Output for RegistryAddOutput {
@@ -1753,6 +1773,21 @@ impl Output for RegistryShowOutput {
                 }
             },
         );
+        if let Some(auth) = &self.auth {
+            kv(&mut out, "identity", w, &auth.issuer);
+        }
+        if let Some(login) = &self.signed_in {
+            kv(
+                &mut out,
+                "signed in",
+                w,
+                &match (&login.signed_in, &login.source) {
+                    (true, Some(source)) => format!("yes ({source})"),
+                    (true, None) => "yes".to_string(),
+                    (false, _) => format!("no — `vaire registry login {}`", self.name),
+                },
+            );
+        }
         match &self.packages {
             None => out.push_str(&dim("\n  this registry cannot enumerate its packages\n")),
             Some(packages) if packages.is_empty() => {

@@ -239,6 +239,25 @@ pub fn registry_token_from(registry: &str, home: &Path) -> Option<String> {
         .or_else(|| credential_from(&registry_token_key(registry), home))
 }
 
+/// Where the token [`registry_token`] would send comes from, for `vaire registry show`
+/// to report — `None` when there is none. The same precedence, so what `show` says is
+/// signed in is exactly what `push` will use.
+pub fn registry_token_source(registry: &str) -> Option<String> {
+    registry_token_source_from(registry, &config_home())
+}
+
+pub fn registry_token_source_from(registry: &str, home: &Path) -> Option<String> {
+    let set = |var: &str| std::env::var(var).is_ok_and(|v| !v.is_empty());
+    if set("VAIRE_TOKEN") {
+        return Some("VAIRE_TOKEN".into());
+    }
+    let per_registry = registry_token_env(registry);
+    if set(&per_registry) {
+        return Some(per_registry);
+    }
+    credential_from(&registry_token_key(registry), home).map(|_| "credentials.toml".into())
+}
+
 /// Store the token `vaire registry login` obtained for `registry`.
 pub fn save_registry_token(registry: &str, token: &str) -> Result<PathBuf> {
     save_credential(&registry_token_key(registry), token)
@@ -321,6 +340,25 @@ mod token_tests {
         );
         // Logging out twice is not an error, just a no-op.
         assert!(!forget_registry_token_from("central", dir.path()).unwrap());
+    }
+
+    #[test]
+    fn the_reported_token_source_follows_the_same_precedence() {
+        let _guard = VAIRE_TOKEN_ENV.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(registry_token_source_from("central", dir.path()), None);
+        save_registry_token_to(dir.path(), "central", "abc123").unwrap();
+        assert_eq!(
+            registry_token_source_from("central", dir.path()).as_deref(),
+            Some("credentials.toml")
+        );
+        // SAFETY: guarded by VAIRE_TOKEN_ENV above.
+        unsafe { std::env::set_var("VAIRE_TOKEN_CENTRAL", "from-env") };
+        assert_eq!(
+            registry_token_source_from("central", dir.path()).as_deref(),
+            Some("VAIRE_TOKEN_CENTRAL")
+        );
+        unsafe { std::env::remove_var("VAIRE_TOKEN_CENTRAL") };
     }
 
     /// [`save_registry_token`] against an explicit home (the DI seam these tests need).
