@@ -1017,10 +1017,15 @@ three "add"s, and the last one the grammar had to keep apart.
   static one. `add` is the one probe that runs unforced, so re-running it is how a registry
   that has since grown or lost `publish: api` gets noticed; `show` and `push` trust the
   stored kind.
-- **Identity over plain `http://` is refused at `add`** (registry-server.md §2.3). A
-  descriptor carrying an `auth` block over anything but `https://` — the loopback host
-  excepted, for `vaire serve` against a local issuer — is not recorded, because a bearer
-  token sent there would travel in clear. The one thing the probe can veto.
+- **A token over plain `http://` is refused at `add`** (registry-server.md §2.3). A
+  descriptor carrying an `auth` block, or declaring `publish: api` (whose writes are never
+  anonymous), over anything but `https://` — the loopback host excepted, for `vaire serve`
+  against a local issuer — is not recorded, because a bearer token sent there would travel
+  in clear. The one thing the probe can veto.
+- **Two names may not share a token variable.** `VAIRE_TOKEN_<NAME>` folds punctuation to
+  `_`, so `add` refuses a name that would read the same variable as a registry already
+  configured (`prod.eu` beside `prod-eu`): the alternative is one registry's token going
+  to the other.
 
 **`login` and `logout`** (registry-server.md §2.3, §4). `login` stores a token for a
 registry in `credentials.toml`, keyed by the registry's name; `logout` forgets it, and is
@@ -1094,7 +1099,9 @@ the server has checked length and digest against what was declared. Every call c
 registry's bearer token (§4.9), and only that registry's: a token whose claims name another
 issuer or audience is refused **before it is sent** (`TokenMismatch`), and a redirect is
 never followed with it — a 3xx is reported with its `Location` and the fix is to re-add the
-registry at its current address. A 401 exits `1` naming the exact `vaire registry login`
+registry at its current address. What `begin` says about the upload is checked the same
+way: the method must be `PUT` and the destination `https://` or the registry's own origin,
+or the response is malformed and nothing is uploaded. A 401 exits `1` naming the exact `vaire registry login`
 to run; a 403 exits `1` as `PermissionDenied`, which no retry or other registry will fix.
 The `--json` error `kind` for all three is `registry`.
 

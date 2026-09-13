@@ -31,10 +31,17 @@ use super::{
 /// share a budget with plain reads.
 const API_TIMEOUT_SECS: u64 = 30;
 
+/// The upload is the one call whose duration scales with the artifact rather than with
+/// the server, so it gets no overall deadline — only a per-write stall limit, which is
+/// what actually distinguishes a slow uplink from a dead one.
+const UPLOAD_STALL_SECS: u64 = 120;
+
 pub struct Api {
     name: String,
     reads: StaticHttp,
     agent: ureq::Agent,
+    /// [`Self::agent`]'s sibling for the artifact upload, with its own timeout policy.
+    upload_agent: ureq::Agent,
 }
 
 impl Api {
@@ -53,6 +60,12 @@ impl Api {
             // into on the strength of one response.
             agent: ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_secs(API_TIMEOUT_SECS))
+                .redirects(0)
+                .build(),
+            upload_agent: ureq::AgentBuilder::new()
+                .timeout_connect(std::time::Duration::from_secs(API_TIMEOUT_SECS))
+                .timeout_read(std::time::Duration::from_secs(UPLOAD_STALL_SECS))
+                .timeout_write(std::time::Duration::from_secs(UPLOAD_STALL_SECS))
                 .redirects(0)
                 .build(),
         })
@@ -101,6 +114,19 @@ impl Api {
         let Some(token) = userconfig::registry_token(&self.name) else {
             return Ok(None);
         };
+        // `registry add` already refuses to record an api-tier registry over plain
+        // http:// (cli.md §4.9); this is the same rule at the moment it matters, for a
+        // row recorded before the rule existed.
+        if super::token::cleartext(self.base()) {
+            return Err(RegistryError::Io {
+                registry: self.name.clone(),
+                detail: format!(
+                    "refusing to send a bearer token in clear to {} — re-add the registry \
+                     at its https:// address",
+                    self.base()
+                ),
+            });
+        }
         if let Some(auth) = &self.descriptor().auth
             && let Err(mismatch) = super::token::matches(auth, &token)
         {
@@ -150,16 +176,13 @@ impl Api {
     /// [`RegistryError::VersionExists`], which the body alone does not carry.
     fn translate(&self, e: ureq::Error, name: &str, version: Version) -> RegistryError {
         match e {
-            ureq::Error::Status(401, response) => {
-                let login_command = response
-                    .header("www-authenticate")
-                    .and_then(parse_bearer_realm)
-                    .unwrap_or_else(|| self.name.clone());
-                RegistryError::LoginRequired {
-                    registry: self.name.clone(),
-                    login_command: format!("vaire registry login {login_command}"),
-                }
-            }
+            // The command names *this* registry — the name the token is stored under —
+            // not the server's `WWW-Authenticate` realm, which is whatever the registry
+            // calls itself and would store the login where the next request never looks.
+            ureq::Error::Status(401, _) => RegistryError::LoginRequired {
+                registry: self.name.clone(),
+                login_command: format!("vaire registry login {} --token-stdin", self.name),
+            },
             ureq::Error::Status(403, response) => RegistryError::PermissionDenied {
                 registry: self.name.clone(),
                 action: error_detail(response, "this action"),
@@ -263,7 +286,35 @@ impl Registry for Api {
         //    its own authorization and would ignore this header, but a deployment that
         //    routes the upload through its own endpoint (as a directory-backed registry
         //    does) may well check it, and there is no way to know which from here.
-        let mut upload = self.agent.request(&begin.upload.method, &begin.upload.url);
+        //
+        //    What the response says about the upload is checked before a byte moves: the
+        //    method is the one the contract names, and the destination is either
+        //    encrypted or the registry's own origin. Anything else is a `begin` response
+        //    asking this client to send an artifact — and a token — somewhere it has no
+        //    standing to send them.
+        if !begin.upload.method.eq_ignore_ascii_case("PUT") {
+            return Err(RegistryError::Malformed {
+                registry: self.name.clone(),
+                doc: "publish/begin response".to_string(),
+                detail: format!("upload method is {:?}, not PUT", begin.upload.method),
+            });
+        }
+        if super::token::cleartext(&begin.upload.url)
+            && !super::token::same_origin(&begin.upload.url, self.base())
+        {
+            return Err(RegistryError::Malformed {
+                registry: self.name.clone(),
+                doc: "publish/begin response".to_string(),
+                detail: format!(
+                    "upload destination {} is neither https:// nor this registry's own \
+                     origin — not uploading there",
+                    begin.upload.url
+                ),
+            });
+        }
+        let mut upload = self
+            .upload_agent
+            .request(&begin.upload.method, &begin.upload.url);
         if let Some(token) = self.token()? {
             upload = upload.set("Authorization", &format!("Bearer {token}"));
         }
@@ -319,21 +370,6 @@ impl Registry for Api {
     }
 }
 
-/// The realm out of a `WWW-Authenticate: Bearer realm="<registry>", …` challenge
-/// (registry-server.md §2.3), so a `LoginRequired` error names the exact registry the
-/// login command should target rather than whatever this client happened to call it.
-fn parse_bearer_realm(header: &str) -> Option<String> {
-    // The scheme token is stripped once, up front — not per comma-separated parameter,
-    // which would leave it glued to the first one (`Bearer realm="central"`, not
-    // `realm="central"`) and never match.
-    let params = header.strip_prefix("Bearer").unwrap_or(header);
-    params
-        .split(',')
-        .map(str::trim)
-        .find_map(|part| part.strip_prefix("realm="))
-        .map(|realm| realm.trim_matches('"').to_string())
-}
-
 fn error_kind(response: ureq::Response) -> ApiErrorKind {
     response
         .into_string()
@@ -357,15 +393,6 @@ fn error_detail(response: ureq::Response, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_bearer_realm_is_extracted_from_a_challenge() {
-        assert_eq!(
-            parse_bearer_realm(r#"Bearer realm="central", scope="publish""#),
-            Some("central".to_string())
-        );
-        assert_eq!(parse_bearer_realm("Bearer"), None);
-    }
 
     use std::io::{Read, Write};
     use std::net::TcpListener;

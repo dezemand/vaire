@@ -57,11 +57,25 @@ release is the client half of tier 1 (publish) of that ladder. Search over regis
   to wherever one response pointed. Tokens are read only on `push` and `yank`, both of which
   run against exactly one registry, which is what keeps a bare `VAIRE_TOKEN` scoped to a
   single target.
-- **A registry that declares identity must be `https://`** (registry-server.md §2.3).
+- **A registry that takes a token must be `https://`** (registry-server.md §2.3).
   `vaire registry add` refuses a plain `http://` location whose descriptor carries an
-  `auth` block — a bearer token sent there would travel in clear — with the loopback host
-  as the one exception, for `vaire serve` against a local issuer. The row is withdrawn
-  again (or the previous row restored) rather than left for a later `push` to discover.
+  `auth` block or declares `publish: api` — a bearer token sent there would travel in
+  clear — with the loopback host as the one exception, for `vaire serve` against a local
+  issuer. The row is withdrawn again (or the previous row restored) rather than left for a
+  later `push` to discover; and the client refuses to attach a token in clear even for a
+  row recorded before the rule existed.
+- **What `begin` says about the upload is checked before a byte moves.** The method must
+  be `PUT`, and the destination either `https://` or the registry's own origin; anything
+  else is a malformed `begin` response, not an upload. The upload runs on its own agent
+  with a per-write stall limit instead of the api calls' overall deadline, so a large
+  artifact on a slow uplink is not cut off at thirty seconds.
+- **`registry add` refuses a name that would share `VAIRE_TOKEN_<NAME>` with a registry
+  already configured** (`prod.eu` and `prod-eu` both fold to `VAIRE_TOKEN_PROD_EU`), since
+  the alternative is one registry's token quietly going to the other. `login`/`logout`
+  trim the name the way `add` does, so the token lands under the key `push` reads.
+- **A 401's login command names the configured registry**, not the server's
+  `WWW-Authenticate` realm — the token is stored under the former, and a command built
+  from the latter would store it where the next request never looks.
 - **`registry login` refuses an anonymous registry** — one that declares no issuer and does
   not publish through the api tier has nothing to sign in to. `logout` stays permissive:
   forgetting a token is never the wrong thing to allow.

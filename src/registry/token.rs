@@ -53,6 +53,27 @@ pub fn matches(auth: &Auth, token: &str) -> Result<(), Mismatch> {
     Ok(())
 }
 
+/// Whether a bearer token sent to `url` would travel in clear: plain `http://` to anything
+/// but the loopback host (registry-server.md §2.3). The loopback exception is for `vaire
+/// serve` against a local issuer — nothing on that wire leaves the machine, and demanding
+/// TLS there would demand a certificate for a socket that never does either.
+pub fn cleartext(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    parsed.scheme() == "http"
+        && !matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+}
+
+/// Whether two URLs share scheme, host and port — the boundary a credential resolved for
+/// one of them may cross to reach the other.
+pub fn same_origin(a: &str, b: &str) -> bool {
+    match (url::Url::parse(a), url::Url::parse(b)) {
+        (Ok(a), Ok(b)) => a.origin() == b.origin() && a.origin().is_tuple(),
+        _ => false,
+    }
+}
+
 /// The payload of a JWT, unverified. `None` for anything that is not three base64url
 /// segments with a JSON object in the middle — which is what "opaque token" means here.
 fn jwt_claims(token: &str) -> Option<serde_json::Value> {
@@ -160,6 +181,36 @@ mod tests {
         assert_eq!(matches(&auth(None), "a.b"), Ok(()));
         // Three segments, but the middle is not JSON: still opaque, not an error.
         assert_eq!(matches(&auth(None), "a.b.c"), Ok(()));
+    }
+
+    #[test]
+    fn cleartext_is_plain_http_to_anything_but_loopback() {
+        assert!(cleartext("http://packages.example/kg"));
+        for local in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080/",
+            "http://[::1]:8080",
+            "https://packages.example/kg",
+            "file:///srv/registry",
+            "not a url",
+        ] {
+            assert!(!cleartext(local), "{local}");
+        }
+    }
+
+    #[test]
+    fn same_origin_is_scheme_host_and_port() {
+        assert!(same_origin(
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:8080/v1/api/publish/staging/x"
+        ));
+        assert!(!same_origin(
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:9090"
+        ));
+        assert!(!same_origin("https://a.example", "http://a.example"));
+        // Opaque origins (file://) never match, not even themselves.
+        assert!(!same_origin("file:///srv", "file:///srv"));
     }
 
     #[test]

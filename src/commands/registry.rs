@@ -56,7 +56,23 @@ pub fn add(
     // rather than deleting a row the user did not ask to lose.
     let previous = {
         let catalog = Catalog::open(home)?;
-        let previous = catalog.registries()?.into_iter().find(|r| r.name == name);
+        let registries = catalog.registries()?;
+        // `VAIRE_TOKEN_<NAME>` folds every non-alphanumeric to `_`, so `prod.eu` and
+        // `prod-eu` would read the same variable — and one registry's token would be
+        // sent to the other. Refused here, where the second name is chosen, rather
+        // than resolved by whichever row the lookup happens to hit first.
+        let env = userconfig::registry_token_env(name);
+        if let Some(other) = registries
+            .iter()
+            .find(|r| r.name != name && userconfig::registry_token_env(&r.name) == env)
+        {
+            return Err(VaireError::Usage(format!(
+                "'{name}' and the configured registry '{}' would both read their token \
+                 from {env} — pick a name that differs in more than punctuation",
+                other.name
+            )));
+        }
+        let previous = registries.into_iter().find(|r| r.name == name);
         catalog.add_registry(&row)?;
         previous
     };
@@ -133,26 +149,21 @@ pub fn add(
     })
 }
 
-/// Why `url` may not be recorded, when its descriptor carries an `auth` block and the
-/// scheme would carry a bearer token in clear — `None` when it may.
-///
-/// The exception is the loopback host (registry-server.md §2.3): `vaire serve` against a
-/// local test issuer has nothing on the wire to eavesdrop on, and demanding TLS there
-/// would demand a certificate for a socket that never leaves the machine.
+/// Why `url` may not be recorded, when it takes a bearer token (an `auth` block, or
+/// `publish: api`, whose writes are never anonymous) and the scheme would carry that
+/// token in clear — `None` when it may. The loopback exception is
+/// [`crate::registry::token::cleartext`]'s.
 fn insecure_identity(url: &str, descriptor: &crate::registry::Descriptor) -> Option<String> {
-    let auth = descriptor.auth.as_ref()?;
-    let parsed = url::Url::parse(url).ok()?;
-    if parsed.scheme() != "http" {
+    if !takes_identity(descriptor) || !crate::registry::token::cleartext(url) {
         return None;
     }
-    if matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")) {
-        return None;
-    }
+    let what = match &descriptor.auth {
+        Some(auth) => format!("declares an identity provider ({})", auth.issuer),
+        None => "publishes through the api tier, which never accepts an anonymous write".into(),
+    };
     Some(format!(
-        "{url} declares an identity provider ({}) but is served over plain http:// — a \
-         bearer token sent there would travel in clear, so this registry is not recorded; \
-         use its https:// address",
-        auth.issuer
+        "{url} {what} but is served over plain http:// — a bearer token sent there would \
+         travel in clear, so this registry is not recorded; use its https:// address"
     ))
 }
 
@@ -236,8 +247,10 @@ fn takes_identity(descriptor: &crate::registry::Descriptor) -> bool {
     descriptor.auth.is_some() || descriptor.capabilities.publish == Some(PublishCapability::Api)
 }
 
-/// The configured registry called `name`.
+/// The configured registry called `name`. Trimmed, as `add` trimmed it before storing:
+/// the name is the key, and `" central "` must find `central`.
 pub fn find(home: &Path, name: &str) -> Result<RegistryRow> {
+    let name = name.trim();
     let catalog = Catalog::open(home)?;
     let registries = catalog.registries()?;
     registries
@@ -323,7 +336,10 @@ pub fn open(row: &RegistryRow) -> Result<Box<dyn Registry>> {
 /// registry is anonymous"), and a pasted token whose own claims say it was minted for a
 /// different party than the descriptor names.
 pub fn login(home: &Path, name: &str, token_stdin: bool) -> Result<RegistryLoginOutput> {
+    // The row's own (trimmed) name keys the token, so a login for `" central "` is
+    // stored where `push --registry central` will look.
     let row = find(home, name)?;
+    let name = row.name.as_str();
     let registry = open(&row)?;
     let descriptor = registry.descriptor();
     if !takes_identity(descriptor) {
@@ -361,8 +377,13 @@ pub fn login(home: &Path, name: &str, token_stdin: bool) -> Result<RegistryLogin
 }
 
 /// `vaire registry logout <name>`. Not an error to log out of a registry you never
-/// logged in to.
+/// logged in to — nor of one no longer configured, which is why this does not `find`
+/// the row: forgetting a token is never the wrong thing to allow.
 pub fn logout(name: &str) -> Result<RegistryLogoutOutput> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(VaireError::Usage("a registry needs a name".into()));
+    }
     Ok(RegistryLogoutOutput {
         name: name.to_string(),
         forgotten: userconfig::forget_registry_token(name)?,
@@ -414,6 +435,26 @@ mod tests {
         // Anonymous over http is the whole static-host story and stays allowed.
         assert!(insecure_identity("http://packages.example/kg", &descriptor(None)).is_none());
         assert!(insecure_identity("file:///srv/registry", &descriptor(identity())).is_none());
+        // An api-tier registry takes a token on every write, issuer declared or not.
+        let mut api = descriptor(None);
+        api.capabilities.publish = Some(PublishCapability::Api);
+        assert!(insecure_identity("http://packages.example/kg", &api).is_some());
+        assert!(insecure_identity("http://127.0.0.1:8080", &api).is_none());
+    }
+
+    #[test]
+    fn two_names_that_share_a_token_variable_cannot_both_be_configured() {
+        let home = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let url = format!("file://{}", store.path().display());
+        add(home.path(), "prod.eu", &url, 0, true).expect("first name records");
+        let err = add(home.path(), "prod-eu", &url, 0, true).unwrap_err();
+        assert!(
+            err.to_string().contains("VAIRE_TOKEN_PROD_EU"),
+            "names the colliding variable: {err}"
+        );
+        // Re-adding the same name is an update, not a collision with itself.
+        add(home.path(), "prod.eu", &url, 5, true).expect("same name re-adds");
     }
 
     #[test]

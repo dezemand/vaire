@@ -204,7 +204,12 @@ fn registry_token_key(registry: &str) -> String {
 /// The environment variable a per-registry token override reads — `VAIRE_TOKEN_<NAME>`,
 /// uppercased and with anything that is not an ASCII letter/digit turned into `_`, so a
 /// registry name with a `.` or `-` in it still yields a shell-legal variable name.
-fn registry_token_env(registry: &str) -> String {
+///
+/// The folding is not injective — `prod.eu` and `prod-eu` both read `VAIRE_TOKEN_PROD_EU`
+/// — which is why `vaire registry add` refuses a name that would share its variable with
+/// a registry already configured: the alternative is one registry's token quietly going
+/// to the other.
+pub fn registry_token_env(registry: &str) -> String {
     let upper: String = registry
         .chars()
         .map(|c| {
@@ -272,8 +277,13 @@ pub fn forget_registry_token(registry: &str) -> Result<bool> {
 /// [`forget_registry_token`] against an explicit config home (the DI seam for tests).
 pub fn forget_registry_token_from(registry: &str, home: &Path) -> Result<bool> {
     let path = home.join("credentials.toml");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok(false);
+    // Only an absent file is "nothing to forget". A file that exists and cannot be read
+    // is a fault, and reporting it as "not signed in" would leave the token in place
+    // while saying it was gone.
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
     };
     let mut table: toml::Table = toml::from_str(&text)
         .map_err(|e| VaireError::Config(format!("{}: {e}", path.display())))?;
