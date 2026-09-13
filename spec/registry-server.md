@@ -292,12 +292,17 @@ OIDC-issued JWT, checked against the issuer's published signing keys (fetched fr
 issuer's discovery document and cached per process), the issuer as `iss`, and the
 registry's declared audience as `aud`.
 
-**HTTPS is mandatory for any registry whose descriptor carries an `auth` block**, with
-one documented exception: `http://127.0.0.1` and `http://localhost`, for `vaire serve`
-run against a local test issuer with nothing to eavesdrop on. A bearer token is a bare
-credential — anyone who reads the wire reads the identity it names — so a registry that
-declares identity over plain `http://` is refused at `registry add`, the same boundary
-that already validates a URL before storing it.
+**HTTPS is mandatory for any registry that takes a token** — one whose descriptor
+carries an `auth` block, or declares `publish: api`, whose writes are never anonymous
+(§2.2) whether or not an issuer is advertised — with one documented exception:
+`http://127.0.0.1` and `http://localhost`, for `vaire serve` run against a local test
+issuer with nothing to eavesdrop on. A bearer token is a bare credential — anyone who
+reads the wire reads the identity it names — so such a registry over plain `http://` is
+refused at `registry add`, the same boundary that already validates a URL before storing
+it; and the client refuses to attach a token in clear even for a row recorded before the
+rule existed. The same standard applies to where `begin` sends the upload (§2.2.2): the
+client accepts an `https://` destination, or one on the registry's own origin, and
+nothing else — a `begin` response pointing elsewhere is malformed, not followed.
 
 #### Discovery: the descriptor names the party
 
