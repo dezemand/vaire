@@ -41,6 +41,7 @@ index = [
     "dep:directories",
     "dep:sha2",
     "dep:inquire",
+    "dep:toon-format",
 ]
 
 # `vaire pack` — the package artifact. Gated and off by default while the format was
@@ -54,9 +55,14 @@ pack = ["index", "dep:tar", "dep:flate2"]
 # CLI surface (cli.md §2)
 clap = { version = "4", features = ["derive", "env"], optional = true }
 
-# Output shapes — JSON is the canonical machine shape, mirrored by MCP (cli.md §2.3)
+# Output shapes — JSON is the canonical machine shape, mirrored by MCP (cli.md §2.3).
+# TOON (`-o toon`) is a token-cheaper encoding of that same shape, derived from it —
+# no bespoke per-type work, just `serde_json::Value` in, TOON text out. Default features
+# off: the crate's defaults ship its own CLI/TUI (ratatui, syntect, tiktoken, a clipboard
+# crate with platform bindings — ~60 crates), and the encoder needs none of it.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
+toon-format = { version = "0.5", default-features = false, optional = true }
 
 # Frontmatter is YAML
 serde_yaml = "0.9"

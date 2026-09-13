@@ -38,6 +38,14 @@ pub trait Output: Serialize {
     fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).expect("output serializes")
     }
+
+    /// TOON (Token-Oriented Object Notation) encoding of the same canonical shape as
+    /// [`Output::to_json`] — a compact, indentation-based format that costs meaningfully
+    /// fewer tokens than JSON in an LLM context, at no cost to us: it is derived from the
+    /// same `serde_json::Value`, so there is nothing per-type to keep in sync.
+    fn to_toon(&self) -> String {
+        toon_format::encode_default(&self.to_json()).expect("output encodes as toon")
+    }
 }
 
 // ---- human-rendering helpers ----------------------------------------------

@@ -3,6 +3,25 @@
 The format loosely follows [Keep a Changelog](https://keepachangelog.com); this project
 uses [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+- **`-o <fmt>` / `--output <fmt>` and `VAIRE_OUTPUT`** (cli.md §2.2, §2.3) — pick the
+  output format once: `human` (default), `json`, or the new **`toon`**. TOON
+  (Token-Oriented Object Notation) is a compact, indentation-based encoding of the *same*
+  canonical JSON value every command already produces — derived from it, never authored
+  separately, so the two cannot drift — and costs an LLM meaningfully fewer tokens than
+  JSON for the list-heavy results `search`, `backlinks`, `refs`, and `deps` return. The
+  environment variable is the hook for an agent harness: set it once and every `vaire`
+  invocation answers in the format the caller reads. Errors follow the format too (§7),
+  so a TOON consumer never has to switch parsers to read a failure. Precedence: the flag,
+  then `VAIRE_OUTPUT`, then `--json`, then `human`.
+
+### Changed
+- **`--json` is now shorthand for `-o json`.** It keeps working exactly as before — every
+  script and skill that passes it is unaffected — but `-o`/`VAIRE_OUTPUT` win if both are
+  given, and new callers should prefer them.
+
 ## [0.3.0] — 2026-08-18
 
 **0.3 is the distribution release.** A package can now be released, published, and pulled

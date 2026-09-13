@@ -166,7 +166,8 @@ impl VaireError {
         }
     }
 
-    /// The `{"error": {...}}` payload emitted on stdout under `--json` (cli.md §7).
+    /// The `{"error": {...}}` payload emitted on stdout under `--json` / `-o json`
+    /// (cli.md §7).
     #[cfg(feature = "index")]
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
@@ -176,6 +177,14 @@ impl VaireError {
                 "message": self.to_string(),
             }
         })
+    }
+
+    /// The same payload as [`VaireError::to_json`], TOON-encoded — what `-o toon` emits
+    /// on stdout, so a caller reading results in TOON never has to switch parsers to
+    /// read a failure.
+    #[cfg(feature = "index")]
+    pub fn to_toon(&self) -> String {
+        toon_format::encode_default(&self.to_json()).expect("error encodes as toon")
     }
 }
 

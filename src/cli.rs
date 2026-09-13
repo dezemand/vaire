@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -21,9 +21,16 @@ pub struct Cli {
     #[arg(long, global = true, env = "VAIRE_REPO")]
     pub repo: Option<PathBuf>,
 
-    /// Emit JSON instead of human-readable text. Read commands only.
+    /// Deprecated shorthand for `-o json` / `--output json`. Kept so existing scripts
+    /// keep working; if both are given, `--output`/`-o` wins.
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Output format: `human` (default), `json`, or `toon` (Token-Oriented Object
+    /// Notation — a compact, LLM-friendly encoding of the same JSON shape). Also settable
+    /// via `VAIRE_OUTPUT`; this flag wins over the environment, which wins over `--json`.
+    #[arg(short = 'o', long = "output", global = true, env = "VAIRE_OUTPUT")]
+    pub output: Option<OutputFormat>,
 
     /// Path to the manifest (default: <root>/knowledge.toml).
     #[arg(long, global = true)]
@@ -49,6 +56,28 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Command,
+}
+
+/// How a command's result is rendered (cli.md §2.3): human text for a terminal, or one
+/// of the two machine shapes — JSON, the canonical one, and TOON, a token-cheaper
+/// encoding of that same shape for feeding results into an LLM context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum OutputFormat {
+    Human,
+    Json,
+    Toon,
+}
+
+impl Cli {
+    /// Resolve the effective output format: `-o`/`--output` (directly, or via
+    /// `VAIRE_OUTPUT`) if given, else `--json` for backward compatibility, else `human`.
+    pub fn output_format(&self) -> OutputFormat {
+        self.output.unwrap_or(match self.json {
+            true => OutputFormat::Json,
+            false => OutputFormat::Human,
+        })
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -390,9 +419,9 @@ impl Command {
         )
     }
 
-    /// Whether `--json` is meaningful for this command (read commands + index/check/
-    /// status emit JSON; `mcp` does not).
-    pub fn supports_json(&self) -> bool {
+    /// Whether a machine format (`--json`, `-o json`, `-o toon`) is meaningful for this
+    /// command (read commands + index/check/status all emit one; `mcp` does not).
+    pub fn supports_machine_format(&self) -> bool {
         !matches!(self, Command::Mcp)
     }
 }
@@ -477,4 +506,75 @@ pub enum ConfigureSection {
         #[arg(long = "api-url")]
         api_url: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, OutputFormat};
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("vaire").chain(args.iter().copied()))
+            .expect("args parse")
+    }
+
+    // `VAIRE_OUTPUT` is deliberately not exercised here: clap reads it at parse time from
+    // the process environment, which unit tests share, so setting it would race the other
+    // cases. Its precedence over `--json` follows from it populating the same `output`
+    // field the flag does.
+    #[test]
+    fn output_format_defaults_to_human() {
+        assert_eq!(parse(&["status"]).output_format(), OutputFormat::Human);
+    }
+
+    #[test]
+    fn json_flag_still_selects_json() {
+        assert_eq!(
+            parse(&["status", "--json"]).output_format(),
+            OutputFormat::Json
+        );
+    }
+
+    #[test]
+    fn output_flag_selects_each_format_in_either_spelling() {
+        assert_eq!(
+            parse(&["status", "-o", "json"]).output_format(),
+            OutputFormat::Json
+        );
+        assert_eq!(
+            parse(&["status", "-o", "toon"]).output_format(),
+            OutputFormat::Toon
+        );
+        assert_eq!(
+            parse(&["status", "--output", "human"]).output_format(),
+            OutputFormat::Human
+        );
+    }
+
+    #[test]
+    fn output_flag_wins_over_json_flag() {
+        assert_eq!(
+            parse(&["status", "--json", "-o", "toon"]).output_format(),
+            OutputFormat::Toon
+        );
+        // Even when it names the human format: an explicit `-o` is the decision.
+        assert_eq!(
+            parse(&["status", "--json", "-o", "human"]).output_format(),
+            OutputFormat::Human
+        );
+    }
+
+    #[test]
+    fn output_flag_is_global() {
+        // Accepted after the subcommand, like the other global flags.
+        assert_eq!(
+            parse(&["resolve", "person:x", "-o", "toon"]).output_format(),
+            OutputFormat::Toon
+        );
+    }
+
+    #[test]
+    fn an_unknown_format_is_a_parse_error() {
+        assert!(Cli::try_parse_from(["vaire", "status", "-o", "yaml"]).is_err());
+    }
 }
