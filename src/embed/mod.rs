@@ -110,12 +110,7 @@ fn feature_hash(text: &str, dims: usize) -> Vec<f32> {
         let bucket = (h.finish() as usize) % v.len();
         v[bucket] += 1.0;
     }
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for x in &mut v {
-            *x /= norm;
-        }
-    }
+    l2_normalize(&mut v);
     v
 }
 
@@ -236,17 +231,42 @@ impl Embedder for OpenAiEmbedder {
             return Ok(Vec::new());
         }
         // The API rejects empty strings, and section bodies can be empty (e.g. a heading
-        // with no content). Send only the non-empty inputs; empty slots are filled with
-        // zero vectors afterwards (cosine treats them as non-matching).
-        let inputs: Vec<&str> = texts
+        // with no content). A blank text yields no pieces and gets a zero vector afterwards
+        // (cosine treats it as non-matching).
+        //
+        // It also rejects any single input over 8192 tokens, which an oversized section (a
+        // large table, a document with no subheadings) hits in practice. Rather than
+        // truncating and losing the tail, a text over the cap is split into pieces that fit,
+        // every piece is embedded, and the pieces are pooled back into one vector per text.
+        let plan: Vec<Vec<&str>> = texts
             .iter()
-            .map(String::as_str)
-            .filter(|s| !s.trim().is_empty())
+            .map(|text| split_for_embedding(text, MAX_INPUT_BYTES))
             .collect();
-        if inputs.is_empty() {
+        let pieces: Vec<&str> = plan.iter().flatten().copied().collect();
+        if pieces.is_empty() {
             return Ok(vec![vec![0.0; self.dims]; texts.len()]);
         }
 
+        let mut vectors = Vec::with_capacity(pieces.len());
+        for request in request_batches(&pieces, MAX_REQUEST_INPUTS, MAX_REQUEST_BYTES) {
+            vectors.extend(self.request(request)?);
+        }
+        pool_pieces(&plan, vectors, self.dims)
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dims
+    }
+
+    fn identity(&self) -> String {
+        format!("openai:{}:{}", self.model, self.dims)
+    }
+}
+
+impl OpenAiEmbedder {
+    /// One embeddings API call. `inputs` must be non-blank and within the per-input and
+    /// per-request limits — [`OpenAiEmbedder::embed`] arranges both.
+    fn request(&self, inputs: &[&str]) -> Result<Vec<Vec<f32>>> {
         let mut body = serde_json::json!({ "model": self.model, "input": inputs });
         // v3 models support dimension reduction; older models (e.g. ada-002) don't accept
         // the parameter, so only send it for those that do.
@@ -275,20 +295,139 @@ impl Embedder for OpenAiEmbedder {
             })?;
         let text = read_response_limited(response.into_reader())
             .map_err(|e| VaireError::Config(format!("openai embeddings: reading response: {e}")))?;
-        let embedded = parse_embedding_response(&text, inputs.len())?;
-        expand_with_empty_slots(texts, embedded, self.dims)
-    }
-
-    fn dimensions(&self) -> usize {
-        self.dims
-    }
-
-    fn identity(&self) -> String {
-        format!("openai:{}:{}", self.model, self.dims)
+        parse_embedding_response(&text, inputs.len())
     }
 }
 
 const MAX_EMBEDDING_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// A single OpenAI embeddings input may not exceed 8192 tokens. The embeddings models use
+/// byte-level BPE, where every token consumes at least one raw UTF-8 byte, so a piece of at
+/// most this many bytes is under the token limit for any language or content, with no
+/// tokenizer needed. The bound is conservative (English averages ~4 bytes per token), but
+/// because oversized text is split rather than truncated, that costs an extra piece, never
+/// content.
+const MAX_INPUT_BYTES: usize = 8000;
+/// The API also caps one request at 300,000 tokens summed across its inputs (bounded via
+/// bytes, as above) and at 2048 inputs.
+const MAX_REQUEST_BYTES: usize = 290_000;
+const MAX_REQUEST_INPUTS: usize = 2048;
+
+/// Split `text` into consecutive pieces of at most `max_bytes` bytes each. A cut prefers a
+/// paragraph break, then a line break, then a space, and never lands inside a UTF-8
+/// character. Blank pieces are dropped (the API rejects them), so a blank text yields none.
+fn split_for_embedding(text: &str, max_bytes: usize) -> Vec<&str> {
+    debug_assert!(
+        max_bytes >= 4,
+        "a piece must fit any single UTF-8 character"
+    );
+    let mut pieces = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let end = if rest.len() <= max_bytes {
+            rest.len()
+        } else {
+            cut_point(rest, max_bytes)
+        };
+        let (piece, tail) = rest.split_at(end);
+        if !piece.trim().is_empty() {
+            pieces.push(piece);
+        }
+        rest = tail;
+    }
+    pieces
+}
+
+/// Where to end the next piece of `s` (longer than `max_bytes`). A natural break only counts
+/// in the back half of the window, so a stray early newline can't shrink pieces to slivers.
+fn cut_point(s: &str, max_bytes: usize) -> usize {
+    let mut limit = max_bytes;
+    while !s.is_char_boundary(limit) {
+        limit -= 1;
+    }
+    let window = &s[..limit];
+    for separator in ["\n\n", "\n", " "] {
+        if let Some(at) = window.rfind(separator).filter(|&at| at >= limit / 2) {
+            return at + separator.len();
+        }
+    }
+    limit
+}
+
+/// Group pieces into consecutive requests of at most `max_inputs` inputs and `max_bytes`
+/// bytes summed. Each piece is already within the per-input cap, which is far below
+/// `max_bytes`, so every request holds at least one piece.
+fn request_batches<'a>(
+    pieces: &'a [&'a str],
+    max_inputs: usize,
+    max_bytes: usize,
+) -> Vec<&'a [&'a str]> {
+    let mut batches = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0;
+    for (i, piece) in pieces.iter().enumerate() {
+        if i > start && (i - start == max_inputs || bytes + piece.len() > max_bytes) {
+            batches.push(&pieces[start..i]);
+            start = i;
+            bytes = 0;
+        }
+        bytes += piece.len();
+    }
+    if start < pieces.len() {
+        batches.push(&pieces[start..]);
+    }
+    batches
+}
+
+/// Pool per-piece vectors back into one vector per original text. `plan` holds each text's
+/// pieces, in the order their vectors arrive. A text that fit whole keeps its vector as-is.
+/// A split text gets the length-weighted mean of its pieces' vectors, re-normalized, which is
+/// the approach OpenAI recommends for text longer than a model's context. A blank text has
+/// no pieces and gets a zero vector, sized to match (falling back to `dim_fallback` if every
+/// text was blank).
+fn pool_pieces(
+    plan: &[Vec<&str>],
+    vectors: Vec<Vec<f32>>,
+    dim_fallback: usize,
+) -> Result<Vec<Vec<f32>>> {
+    let dim = vectors.first().map(Vec::len).unwrap_or(dim_fallback);
+    let mut vectors = vectors.into_iter();
+    let mut next = || {
+        vectors.next().ok_or_else(|| {
+            VaireError::Config("openai embeddings: fewer vectors than input pieces".into())
+        })
+    };
+    let mut out = Vec::with_capacity(plan.len());
+    for pieces in plan {
+        let vector = match pieces.as_slice() {
+            [] => vec![0.0; dim],
+            [_] => next()?,
+            _ => {
+                let mut pooled = vec![0.0f32; dim];
+                for piece in pieces {
+                    let weight = piece.len() as f32;
+                    for (sum, x) in pooled.iter_mut().zip(next()?) {
+                        *sum += weight * x;
+                    }
+                }
+                l2_normalize(&mut pooled);
+                pooled
+            }
+        };
+        out.push(vector);
+    }
+    Ok(out)
+}
+
+/// Scale `v` to unit length in place; a zero vector is left as-is.
+fn l2_normalize(v: &mut [f32]) {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in v {
+            *x /= norm;
+        }
+    }
+}
 
 /// Only HTTPS endpoints are accepted, except explicit loopback development endpoints. This
 /// prevents accidentally sending a bearer key and corpus text in cleartext to a proxy.
@@ -339,29 +478,6 @@ struct EmbeddingDatum {
     embedding: Vec<f32>,
     #[serde(default)]
     index: usize,
-}
-
-/// Re-expand a result to one vector per original input: `embedded` holds a vector for
-/// each non-empty text (in order); each empty text gets a zero vector sized to match
-/// (falling back to `dim_fallback` if every text was empty).
-fn expand_with_empty_slots(
-    texts: &[String],
-    embedded: Vec<Vec<f32>>,
-    dim_fallback: usize,
-) -> Result<Vec<Vec<f32>>> {
-    let dim = embedded.first().map(Vec::len).unwrap_or(dim_fallback);
-    let mut filled = embedded.into_iter();
-    let mut out = Vec::with_capacity(texts.len());
-    for text in texts {
-        if text.trim().is_empty() {
-            out.push(vec![0.0; dim]);
-        } else {
-            out.push(filled.next().ok_or_else(|| {
-                VaireError::Config("openai embeddings: fewer vectors than non-empty inputs".into())
-            })?);
-        }
-    }
-    Ok(out)
 }
 
 /// Parse an OpenAI embeddings response body into vectors, ordered by `index`.
@@ -443,15 +559,14 @@ mod tests {
 
     #[test]
     fn empty_inputs_get_zero_vectors_and_keep_alignment() {
-        let texts = vec![
-            "a".to_string(),
-            "".to_string(),
-            "b".to_string(),
-            "   ".to_string(),
-        ];
+        let texts = ["a", "", "b", "   "];
+        let plan: Vec<Vec<&str>> = texts
+            .iter()
+            .map(|t| split_for_embedding(t, MAX_INPUT_BYTES))
+            .collect();
         // Embedder returns vectors only for the two non-empty inputs.
         let embedded = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
-        let out = expand_with_empty_slots(&texts, embedded, 2).unwrap();
+        let out = pool_pieces(&plan, embedded, 2).unwrap();
         assert_eq!(
             out,
             vec![
@@ -501,5 +616,160 @@ mod tests {
             dims: 384,
         };
         assert_eq!(a.identity(), a2.identity());
+    }
+
+    #[test]
+    fn split_for_embedding_keeps_a_fitting_text_whole_and_drops_blank_ones() {
+        assert_eq!(split_for_embedding("hello", 8000), vec!["hello"]);
+        assert!(split_for_embedding("", 8000).is_empty());
+        assert!(split_for_embedding(" \n ", 8000).is_empty());
+    }
+
+    #[test]
+    fn split_for_embedding_covers_the_text_within_the_cap() {
+        let text = format!("a\n{}", "b".repeat(50));
+        let pieces = split_for_embedding(&text, 20);
+        assert!(pieces.iter().all(|p| p.len() <= 20), "{pieces:?}");
+        assert_eq!(pieces.concat(), text, "no content lost at the cuts");
+        // The newline sits in the front half of the window, so it isn't taken as a cut.
+        assert_eq!(pieces[0].len(), 20);
+    }
+
+    #[test]
+    fn split_for_embedding_prefers_a_paragraph_break() {
+        let text = format!("{}\n\n{}", "a".repeat(30), "b".repeat(30));
+        let pieces = split_for_embedding(&text, 40);
+        assert_eq!(
+            pieces,
+            vec![format!("{}\n\n", "a".repeat(30)), "b".repeat(30)]
+        );
+    }
+
+    #[test]
+    fn split_for_embedding_never_splits_a_multibyte_codepoint() {
+        // Each "é" is 2 UTF-8 bytes; a cap landing mid-codepoint backs off to the boundary.
+        let text = "é".repeat(10);
+        let pieces = split_for_embedding(&text, 15);
+        assert_eq!(pieces, vec!["é".repeat(7), "é".repeat(3)]);
+    }
+
+    #[test]
+    fn request_batches_respect_input_and_byte_limits() {
+        let pieces = ["aaaa", "bbbb", "cc", "d", "e", "f"];
+        let batches = request_batches(&pieces, 3, 10);
+        assert_eq!(
+            batches,
+            vec![&["aaaa", "bbbb", "cc"][..], &["d", "e", "f"][..]]
+        );
+        let batches = request_batches(&pieces, 10, 8);
+        assert_eq!(
+            batches,
+            vec![&["aaaa", "bbbb"][..], &["cc", "d", "e", "f"][..]]
+        );
+    }
+
+    #[test]
+    fn pool_pieces_takes_the_length_weighted_mean_of_a_split_text() {
+        // Weights 3 and 1 over orthogonal unit vectors → (3, 1) normalized.
+        let plan = vec![vec!["aaa", "b"], vec!["whole"]];
+        let vectors = vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![0.6, 0.8]];
+        let out = pool_pieces(&plan, vectors, 2).unwrap();
+        let norm = 10f32.sqrt();
+        assert!((out[0][0] - 3.0 / norm).abs() < 1e-6 && (out[0][1] - 1.0 / norm).abs() < 1e-6);
+        assert_eq!(
+            out[1],
+            vec![0.6, 0.8],
+            "a text that fit whole keeps its vector"
+        );
+        assert!(pool_pieces(&plan, vec![vec![1.0, 0.0]], 2).is_err());
+    }
+
+    /// Serve OpenAI-shaped embeddings responses on loopback for `requests` calls, returning
+    /// the inputs each call carried. An input starting with "b" embeds to `[0, 1]`, anything
+    /// else to `[1, 0]`.
+    fn mock_openai(requests: usize) -> (String, std::thread::JoinHandle<Vec<Vec<String>>>) {
+        use std::io::{BufRead, BufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for stream in listener.incoming().take(requests) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let inputs: Vec<String> = serde_json::from_value(request["input"].clone()).unwrap();
+                let data: Vec<_> = inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, input)| {
+                        let embedding = if input.starts_with('b') {
+                            [0.0, 1.0]
+                        } else {
+                            [1.0, 0.0]
+                        };
+                        serde_json::json!({ "embedding": embedding, "index": index })
+                    })
+                    .collect();
+                let response = serde_json::json!({ "data": data }).to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                    response.len()
+                )
+                .unwrap();
+                seen.push(inputs);
+            }
+            seen
+        });
+        (base_url, server)
+    }
+
+    #[test]
+    fn openai_embed_splits_an_oversized_section_and_pools_it_to_one_vector() {
+        // Regression for HTTP 400 "maximum input length is 8192 tokens": a section past the
+        // per-input cap must reach the wire as pieces within the cap, and come back as one
+        // vector carrying all of them rather than a truncated head.
+        let (base_url, server) = mock_openai(1);
+        let embedder = OpenAiEmbedder {
+            api_key: "test".into(),
+            base_url,
+            model: "text-embedding-3-small".into(),
+            dims: 2,
+            agent: ureq::AgentBuilder::new().build(),
+        };
+        let oversized = format!("{}\n\n{}", "a".repeat(6000), "b".repeat(6000));
+        let texts = vec!["short".to_string(), String::new(), oversized];
+
+        let vectors = embedder.embed(&texts).unwrap();
+        let requests = server.join().unwrap();
+
+        let lengths: Vec<usize> = requests[0].iter().map(String::len).collect();
+        assert_eq!(
+            lengths,
+            vec![5, 6002, 6000],
+            "blank dropped, oversized split in two"
+        );
+        assert_eq!(vectors.len(), 3, "one vector per section, aligned");
+        assert_eq!(vectors[0], vec![1.0, 0.0]);
+        assert_eq!(vectors[1], vec![0.0, 0.0]);
+        // Near-equal halves embedding to orthogonal vectors pool to their bisector.
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((vectors[2][0] - half).abs() < 1e-3 && (vectors[2][1] - half).abs() < 1e-3);
     }
 }
