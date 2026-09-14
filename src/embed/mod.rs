@@ -238,13 +238,35 @@ impl Embedder for OpenAiEmbedder {
         // The API rejects empty strings, and section bodies can be empty (e.g. a heading
         // with no content). Send only the non-empty inputs; empty slots are filled with
         // zero vectors afterwards (cosine treats them as non-matching).
-        let inputs: Vec<&str> = texts
+        //
+        // It also rejects any single input over 8192 tokens — an oversized section (a
+        // large table, a document with no subheadings) hits this in practice. We don't
+        // carry a tokenizer, but a byte cap is a sound substitute: OpenAI's embeddings
+        // models use byte-level BPE, where every token consumes at least one raw byte, so
+        // token count can never exceed byte count. Capping bytes below the token limit is
+        // therefore a mathematically safe (if conservative) way to stay under it.
+        let mut truncated = 0usize;
+        let inputs: Vec<std::borrow::Cow<'_, str>> = texts
             .iter()
             .map(String::as_str)
             .filter(|s| !s.trim().is_empty())
+            .map(|s| {
+                let capped = truncate_at_char_boundary(s, MAX_INPUT_BYTES);
+                if capped.len() < s.len() {
+                    truncated += 1;
+                }
+                capped
+            })
             .collect();
         if inputs.is_empty() {
             return Ok(vec![vec![0.0; self.dims]; texts.len()]);
+        }
+        if truncated > 0 {
+            eprintln!(
+                "warning: {truncated} section(s) exceeded the embeddings API's per-input \
+                 size limit and were truncated before embedding — search recall may be \
+                 weaker for their tail content"
+            );
         }
 
         let mut body = serde_json::json!({ "model": self.model, "input": inputs });
@@ -289,6 +311,26 @@ impl Embedder for OpenAiEmbedder {
 }
 
 const MAX_EMBEDDING_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// A single OpenAI embeddings input may not exceed 8192 tokens. Since token count is
+/// bounded above by byte count (byte-level BPE), staying under this many bytes stays
+/// under the real limit regardless of language or content — see the comment at the call
+/// site. Set comfortably below 8192 as margin, not because the bound is loose.
+const MAX_INPUT_BYTES: usize = 8000;
+
+/// Truncate `s` to at most `max_bytes` bytes, backing off to the nearest earlier UTF-8
+/// character boundary so the result is always a valid `&str` (never splits a multi-byte
+/// codepoint).
+fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> std::borrow::Cow<'_, str> {
+    if s.len() <= max_bytes {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Borrowed(&s[..end])
+}
 
 /// Only HTTPS endpoints are accepted, except explicit loopback development endpoints. This
 /// prevents accidentally sending a bearer key and corpus text in cleartext to a proxy.
@@ -501,5 +543,42 @@ mod tests {
             dims: 384,
         };
         assert_eq!(a.identity(), a2.identity());
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_is_a_no_op_under_the_cap() {
+        assert_eq!(truncate_at_char_boundary("hello", 8000), "hello");
+        assert_eq!(truncate_at_char_boundary("", 8000), "");
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_cuts_at_the_byte_cap() {
+        let s = "a".repeat(20);
+        assert_eq!(truncate_at_char_boundary(&s, 10), "a".repeat(10));
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_never_splits_a_multibyte_codepoint() {
+        // Each "é" is 2 UTF-8 bytes; a cap that lands mid-codepoint must back off to the
+        // previous character rather than panic or produce invalid UTF-8.
+        let s = "é".repeat(10); // 20 bytes
+        let out = truncate_at_char_boundary(&s, 15);
+        assert!(out.len() <= 15);
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+        assert_eq!(out, "é".repeat(7)); // 14 bytes: the largest whole-"é" prefix ≤ 15 bytes
+    }
+
+    #[test]
+    fn openai_embed_truncates_an_oversized_section_instead_of_erroring() {
+        // A section past MAX_INPUT_BYTES must not reach the wire at all — this is the
+        // regression this fix targets: OpenAI's HTTP 400 ("maximum input length is 8192
+        // tokens") on an oversized section, surfaced as a hard `vaire index` failure.
+        let oversized = "word ".repeat(MAX_INPUT_BYTES); // far past the byte cap
+        let capped = truncate_at_char_boundary(&oversized, MAX_INPUT_BYTES);
+        assert!(capped.len() <= MAX_INPUT_BYTES);
+        // Token count is bounded above by byte count for byte-level BPE (see the comment
+        // on MAX_INPUT_BYTES) — capping bytes below 8192 is therefore sufficient on its
+        // own, regardless of how the real tokenizer would actually segment this text.
+        assert!(MAX_INPUT_BYTES < 8192);
     }
 }

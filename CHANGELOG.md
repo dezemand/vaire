@@ -3,6 +3,18 @@
 The format loosely follows [Keep a Changelog](https://keepachangelog.com); this project
 uses [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Fixed
+- **`vaire index`/`vaire pull` no longer fail on an oversized section with the OpenAI
+  provider.** A single embeddings input over 8192 tokens (a large table, a long document
+  with no subheadings) was sent to the API as-is and rejected with `HTTP 400: maximum
+  input length is 8192 tokens`, aborting the whole run. Oversized sections are now
+  truncated to a safe byte cap before the request — OpenAI's embeddings models use
+  byte-level BPE, where every token consumes at least one byte, so a byte cap below 8192
+  is a sound (if conservative) substitute for carrying a tokenizer. A `warning:` on stderr
+  reports how many sections were truncated.
+
 ## [0.3.1] — 2026-09-13
 
 ### Added
