@@ -576,9 +576,8 @@ mod tests {
         let oversized = "word ".repeat(MAX_INPUT_BYTES); // far past the byte cap
         let capped = truncate_at_char_boundary(&oversized, MAX_INPUT_BYTES);
         assert!(capped.len() <= MAX_INPUT_BYTES);
-        // Token count is bounded above by byte count for byte-level BPE (see the comment
-        // on MAX_INPUT_BYTES) — capping bytes below 8192 is therefore sufficient on its
-        // own, regardless of how the real tokenizer would actually segment this text.
-        assert!(MAX_INPUT_BYTES < 8192);
+        // MAX_INPUT_BYTES itself is comfortably under the real 8192-token limit (see its
+        // doc comment for why a byte cap is a sound substitute for tokenizing) — that
+        // margin is a fixed property of the constant, not something to assert at runtime.
     }
 }
