@@ -10,9 +10,12 @@
 //! - **lexical** ([`lexical_candidates`]) — Tantivy's `fts_score` triages candidate
 //!   sections cheaply, then [`section_bm25`] re-scores them in Rust (corpus IDF, a heading
 //!   boost, section-length normalisation, whole-token frequency) and
-//!   [`aggregate_sections`] (MAX) turns a file's matching sections into one score.
-//!   Deliberately the one function that knows how section matches become a file score +
-//!   ranked anchor sections, so a different lexical scorer drops in by replacing it alone.
+//!   [`aggregate_sections`] (MAX) turns a file's matching sections into one score. The
+//!   lexical query itself ([`build_match_query`]) drops stopwords and adds each token's
+//!   inflection variants at a down-weighted boost, since the index tokenizer does no
+//!   stemming. Deliberately the one function that knows how section matches become a file
+//!   score + ranked anchor sections, so a different lexical scorer drops in by replacing
+//!   it alone.
 //! - **name** ([`name_pass`]) — graded name/alias/id-slug tiers (design.md §8), the same
 //!   precision `suggest` already has.
 //! - **vector** ([`vector_pass`]) — brute-force cosine top-K, a noise floor rather than a
@@ -28,6 +31,7 @@
 //! (Reference resolution, design.md §8, is the *same* machinery used in the other
 //! direction — alias + FTS first, embeddings as backup — and will live alongside this.)
 
+mod inflect;
 mod text;
 pub mod vector;
 
@@ -122,6 +126,121 @@ const NAME_GATE_TIER: u8 = 3;
 const BM25_K1: f32 = 1.2;
 const BM25_B: f32 = 0.75;
 const W_HEADING: f32 = 2.0;
+
+/// Common English stopwords, dropped from the lexical query and from [`section_bm25`]'s
+/// re-score when at least one non-stopword token remains. With a stopword left in, a long
+/// document that merely contains "the" or "a" many times can occupy candidate slots (and
+/// re-score points) a more topically relevant short section would otherwise take.
+const STOPWORDS: &[&str] = &[
+    "a", "an", "the", "and", "or", "but", "if", "of", "in", "on", "at", "to", "for", "with", "by",
+    "from", "as", "is", "are", "was", "were", "be", "been", "being", "this", "that", "these",
+    "those", "it", "its", "we", "you", "your", "our", "i", "do", "does", "did", "have", "has",
+    "had", "not", "no", "so", "than", "then", "there", "their", "them", "he", "she", "his", "her",
+    "will", "would", "can", "could", "should", "about", "into", "up", "down", "out", "over",
+    "under", "again", "what", "which", "who", "whom", "how", "when", "where", "why",
+];
+
+/// Weight applied to a token's inflection variants, both as a Tantivy `term^boost` in the
+/// lexical query and as [`ScoredTerm::weight`] in the Rust re-score: real tokens compete
+/// at full strength, a plausible variant (e.g. "entities" for query token "entity") only
+/// recovers a match the index's non-stemming tokenizer would otherwise miss entirely,
+/// without letting a wrong guess outrank an exact hit. Chosen on the search benchmark.
+const INFLECTION_BOOST: f32 = 0.5;
+
+/// Drop [`STOPWORDS`] from `tokens`, unless doing so would leave nothing (an all-stopword
+/// query must still search on *something*).
+fn drop_stopwords(tokens: &[String]) -> Vec<String> {
+    let filtered: Vec<String> = tokens
+        .iter()
+        .filter(|t| !STOPWORDS.contains(&t.as_str()))
+        .cloned()
+        .collect();
+    if filtered.is_empty() {
+        tokens.to_vec()
+    } else {
+        filtered
+    }
+}
+
+/// Expand `tokens` with each token's [`inflect::variants`], at `boost` (Tantivy
+/// `term^boost` syntax). A variant already present among the real tokens (or a duplicate
+/// across two tokens' variant sets) is skipped rather than emitted twice: Tantivy's parser
+/// turns repeated terms into separate clauses that would silently stack a term's effective
+/// weight past what `boost` intends.
+fn add_inflection_variants(tokens: &[String], boost: f32) -> Vec<String> {
+    let mut seen: HashSet<String> = tokens.iter().cloned().collect();
+    let mut parts: Vec<String> = tokens.to_vec();
+    for t in tokens {
+        for v in inflect::variants(t) {
+            if seen.insert(v.clone()) {
+                parts.push(format!("{v}^{boost}"));
+            }
+        }
+    }
+    parts
+}
+
+/// Build the lexical match query bound to both `fts_match` and `fts_score` (the same `?1`
+/// must reach both): stopwords dropped ([`drop_stopwords`]), then each remaining token's
+/// inflection variants added at [`INFLECTION_BOOST`] ([`add_inflection_variants`]).
+fn build_match_query(tokens: &[String]) -> String {
+    add_inflection_variants(&drop_stopwords(tokens), INFLECTION_BOOST).join(" ")
+}
+
+/// Words a matched snippet should highlight around: `tokens` plus their plain inflection
+/// variants (no Tantivy boost suffix — [`snippet`] compares whole words, not query
+/// syntax). A section whose only lexical hit is "entities" for query token "entity"
+/// should still get a snippet centred on that occurrence, not the first-12-words
+/// fallback.
+fn snippet_words(tokens: &[String]) -> Vec<String> {
+    let mut words = tokens.to_vec();
+    for t in tokens {
+        for v in inflect::variants(t) {
+            if !words.contains(&v) {
+                words.push(v);
+            }
+        }
+    }
+    words
+}
+
+/// One literal token counted during the Rust BM25 re-score ([`section_bm25`]): either a
+/// real (non-stopword) query token at full weight, or one of its inflection variants at
+/// [`INFLECTION_BOOST`] — the same down-weighting [`build_match_query`] gives that variant
+/// in the Tantivy candidate query, applied again here since `fts_score` never becomes the
+/// final ranking (see the module doc comment).
+struct ScoredTerm {
+    text: String,
+    weight: f32,
+}
+
+/// The terms [`section_bm25`] scores a section against: [`STOPWORDS`] dropped the same way
+/// as [`build_match_query`] (a dropped stopword is not scored at all), plus each surviving
+/// token's inflection variants, each counted separately with its own corpus IDF — a
+/// variant is a different literal token from its base form, so it has its own document
+/// frequency.
+fn scored_terms(tokens: &[String]) -> Vec<ScoredTerm> {
+    let base = drop_stopwords(tokens);
+    let mut seen: HashSet<String> = base.iter().cloned().collect();
+    let mut terms: Vec<ScoredTerm> = base
+        .iter()
+        .map(|t| ScoredTerm {
+            text: t.clone(),
+            weight: 1.0,
+        })
+        .collect();
+    for t in &base {
+        for v in inflect::variants(t) {
+            if seen.insert(v.clone()) {
+                terms.push(ScoredTerm {
+                    text: v,
+                    weight: INFLECTION_BOOST,
+                });
+            }
+        }
+    }
+    terms
+}
 
 /// Separator between the display name and each alias in `nodes.alias_text`.
 ///
@@ -293,7 +412,7 @@ struct LexicalMatch {
 /// `0.0` for every row with no error, so `node_type`/`path` are fetched by a separate query
 /// ([`node_meta`]) instead of being joined into this one.
 fn lexical_candidates(index: &Index, tokens: &[String]) -> Result<BTreeMap<String, LexicalMatch>> {
-    let match_query = tokens.join(" ");
+    let match_query = build_match_query(tokens);
     let mut candidates = fts_candidates(index, &match_query, FTS_CANDIDATE_CAP)?;
     if !candidates.is_empty() && candidates.iter().all(|c| c.tantivy_score == 0.0) {
         // Every fts_match'd row scored exactly 0.0: the ranked statement's optimizer
@@ -316,11 +435,13 @@ fn lexical_candidates(index: &Index, tokens: &[String]) -> Result<BTreeMap<Strin
 
     // Corpus statistics for this query: total section count, the average section length
     // (a character proxy, computed the same way per section in `section_bm25`), and each
-    // query token's document frequency for the classic BM25 IDF. N and avgdl in one round
-    // trip (both are whole-corpus aggregates, independent of the query and of the
-    // candidate cap above) rather than two, and every token's df likewise in one round
-    // trip: a `SELECT` of N scalar subqueries, each the exact single-token `fts_match`
-    // shape already known to hit the FTS index, rather than N separate statements.
+    // scored term's document frequency for the classic BM25 IDF — including inflection
+    // variants, each a distinct literal token with its own document frequency. N and
+    // avgdl in one round trip (both are whole-corpus aggregates, independent of the query
+    // and of the candidate cap above) rather than two, and every term's df likewise in one
+    // round trip: a `SELECT` of N scalar subqueries, each the exact single-token
+    // `fts_match` shape already known to hit the FTS index, rather than N separate
+    // statements.
     let (n, avgdl) = index
         .query_opt(
             "SELECT count(*), avg(length(heading) + length(body)) FROM sections",
@@ -328,28 +449,29 @@ fn lexical_candidates(index: &Index, tokens: &[String]) -> Result<BTreeMap<Strin
             |r| Ok((col_i64(r, 0)? as f32, col_f64(r, 1)?.max(1.0) as f32)),
         )?
         .unwrap_or((0.0, 1.0));
+    let terms = scored_terms(tokens);
     let df_sql = format!(
         "SELECT {}",
-        (1..=tokens.len())
+        (1..=terms.len())
             .map(|i| format!(
                 "(SELECT count(*) FROM sections WHERE fts_match(heading, body, ?{i}))"
             ))
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let df_params: Vec<turso::Value> = tokens
+    let df_params: Vec<turso::Value> = terms
         .iter()
-        .map(|t| turso::Value::from(t.clone()))
+        .map(|t| turso::Value::from(t.text.clone()))
         .collect();
     let dfs: Vec<i64> = index
         .query_opt(&df_sql, df_params, |r| {
-            (0..tokens.len()).map(|i| col_i64(r, i)).collect()
+            (0..terms.len()).map(|i| col_i64(r, i)).collect()
         })?
-        .unwrap_or_else(|| vec![0; tokens.len()]);
-    let mut idf: HashMap<String, f32> = HashMap::with_capacity(tokens.len());
-    for (t, df) in tokens.iter().zip(dfs) {
+        .unwrap_or_else(|| vec![0; terms.len()]);
+    let mut idf: HashMap<String, f32> = HashMap::with_capacity(terms.len());
+    for (t, df) in terms.iter().zip(dfs) {
         let df = df as f32;
-        idf.insert(t.clone(), (1.0 + (n - df + 0.5) / (df + 0.5)).ln());
+        idf.insert(t.text.clone(), (1.0 + (n - df + 0.5) / (df + 0.5)).ln());
     }
 
     // Bodies for exactly the surviving candidates, fetched by primary key — never for
@@ -384,7 +506,7 @@ fn lexical_candidates(index: &Index, tokens: &[String]) -> Result<BTreeMap<Strin
         let mut scored: Vec<(f32, u32, String)> = sections
             .into_iter()
             .filter_map(|(heading, line, body)| {
-                let score = section_bm25(&heading, &body, tokens, &idf, avgdl);
+                let score = section_bm25(&heading, &body, &terms, &idf, avgdl);
                 (score > 0.0).then_some((score, line, heading))
             })
             .collect();
@@ -493,14 +615,18 @@ fn aggregate_sections(scores: &[f32]) -> f32 {
     scores.first().copied().unwrap_or(0.0)
 }
 
-/// BM25F-lite score for one section against the query `tokens`: combined term frequency
-/// `tf_body + W_HEADING * tf_heading`, corpus `idf` (from `lexical_candidates`), and length
-/// normalisation against `avgdl` using the section's own character length — the exact
-/// character proxy `avgdl` was computed with, so the two stay comparable.
+/// BM25F-lite score for one section against `terms` (each already carrying its own
+/// `weight` — see [`scored_terms`]): combined term frequency `tf_body + W_HEADING *
+/// tf_heading`, corpus `idf` (from `lexical_candidates`), and length normalisation against
+/// `avgdl` using the section's own character length — the exact character proxy `avgdl`
+/// was computed with, so the two stay comparable. A term's full BM25 contribution (its own
+/// idf and tf-saturation curve) is scaled by its `weight`, mirroring how the Tantivy
+/// candidate query's `term^boost` syntax scales a boosted term's contribution rather than
+/// its raw frequency.
 fn section_bm25(
     heading: &str,
     body: &str,
-    tokens: &[String],
+    terms: &[ScoredTerm],
     idf: &HashMap<String, f32>,
     avgdl: f32,
 ) -> f32 {
@@ -523,14 +649,14 @@ fn section_bm25(
     let norm = 1.0 - BM25_B + BM25_B * (l / avgdl);
 
     let mut score = 0.0f32;
-    for t in tokens {
-        let tf = body_counts.get(t).copied().unwrap_or(0) as f32
-            + W_HEADING * heading_counts.get(t).copied().unwrap_or(0) as f32;
+    for term in terms {
+        let tf = body_counts.get(&term.text).copied().unwrap_or(0) as f32
+            + W_HEADING * heading_counts.get(&term.text).copied().unwrap_or(0) as f32;
         if tf <= 0.0 {
             continue;
         }
-        let idf_t = idf.get(t).copied().unwrap_or(0.0);
-        score += idf_t * (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * norm);
+        let idf_t = idf.get(&term.text).copied().unwrap_or(0.0);
+        score += term.weight * idf_t * (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * norm);
     }
     score
 }
@@ -850,6 +976,9 @@ fn resolve_anchors(index: &Index, tokens: &[String], selected: &mut [(String, Ac
         pairs.extend(a.vector_line.map(|line| (id.clone(), line)));
     }
     let sections = anchor_sections(index, &pairs)?;
+    // A section whose only lexical hit is an inflection variant (e.g. "entities" for
+    // query token "entity") should still get its snippet centred on that occurrence.
+    let snippet_words = snippet_words(tokens);
 
     let mut need_fallback: Vec<String> = Vec::new();
 
@@ -862,7 +991,7 @@ fn resolve_anchors(index: &Index, tokens: &[String], selected: &mut [(String, Ac
             Anchor {
                 heading: heading.clone(),
                 line: *line,
-                snippet: snippet(body, tokens),
+                snippet: snippet(body, &snippet_words),
             }
         });
 
@@ -872,7 +1001,7 @@ fn resolve_anchors(index: &Index, tokens: &[String], selected: &mut [(String, Ac
                 .map(|(heading, body)| Anchor {
                     heading: heading.clone(),
                     line,
-                    snippet: snippet(body, tokens),
+                    snippet: snippet(body, &snippet_words),
                 })
         });
 
@@ -904,7 +1033,7 @@ fn resolve_anchors(index: &Index, tokens: &[String], selected: &mut [(String, Ac
                     Anchor {
                         heading,
                         line,
-                        snippet: snippet(&body, tokens),
+                        snippet: snippet(&body, &snippet_words),
                     },
                 )
             })
@@ -1533,6 +1662,73 @@ mod tests {
         assert_eq!(
             heavy_hitters, 4,
             "the cap must keep the highest-fts_score rows, not an arbitrary subset: {capped:?}"
+        );
+    }
+
+    /// Does Turso's ranked `fts_score`/`fts_match` path accept Tantivy's `term^boost`
+    /// query syntax? `turso_core`'s FTS layer passes the bound `?1` string verbatim to
+    /// Tantivy's own query parser, which documents `^boostfactor` — this confirms it
+    /// empirically against the production statement. A down-weighted variant-only match
+    /// must still score non-zero (not silently dropped or erroring) and must rank below
+    /// the exact-term match.
+    #[test]
+    fn fts_boost_syntax_is_accepted_and_downweights() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index =
+            Index::create_for_bulk_load(&dir.path().join("index.db")).expect("create index");
+        index
+            .execute(
+                "INSERT INTO sections (node_id, heading, line, body) VALUES (?1, ?2, ?3, ?4)",
+                turso::params![
+                    "doc-exact",
+                    "Overview",
+                    1i64,
+                    "We rename the field before publishing."
+                ],
+            )
+            .expect("insert doc-exact");
+        index
+            .execute(
+                "INSERT INTO sections (node_id, heading, line, body) VALUES (?1, ?2, ?3, ?4)",
+                turso::params![
+                    "doc-variant",
+                    "Overview",
+                    1i64,
+                    "The renaming happened after publishing."
+                ],
+            )
+            .expect("insert doc-variant");
+        index.ensure_fts_index().expect("build fts index");
+
+        // Mirrors what the real query builder produces for token "rename": the exact
+        // token at full weight, a plausible variant down-weighted.
+        let candidates = fts_candidates(&index, "rename renaming^0.5", Some(10))
+            .expect("boosted query must parse, not hard-error");
+
+        assert_eq!(
+            candidates.len(),
+            2,
+            "both the exact-term doc and the variant-only doc must match: {candidates:?}"
+        );
+        assert!(
+            candidates.iter().all(|c| c.tantivy_score > 0.0),
+            "a boosted variant-only match must still score non-zero, not the silent \
+             all-0.0 fallback shape: {candidates:?}"
+        );
+        let exact = candidates
+            .iter()
+            .find(|c| c.node_id == "doc-exact")
+            .unwrap()
+            .tantivy_score;
+        let variant = candidates
+            .iter()
+            .find(|c| c.node_id == "doc-variant")
+            .unwrap()
+            .tantivy_score;
+        assert!(
+            exact > variant,
+            "the exact-term match ({exact}) must outrank the down-weighted variant-only \
+             match ({variant})"
         );
     }
 
