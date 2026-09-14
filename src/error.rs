@@ -48,6 +48,7 @@ pub enum ErrorKind {
     Generic,
     Usage,
     IndexCorrupt,
+    IndexLocked,
     NoRepo,
     IndexNotBuilt,
     IdNotFound,
@@ -79,6 +80,14 @@ pub enum VaireError {
 
     #[error("index is corrupt and cannot be opened ({0}); rebuild with `vaire index --full`")]
     IndexCorrupt(String),
+
+    /// The index is held by another process — past `VAIRE_LOCK_TIMEOUT`, or by one that
+    /// does not take vaire's lock at all. Deliberately **not** [`VaireError::IndexCorrupt`]:
+    /// the file is healthy, and exit `3`'s advice to rebuild it is exactly the wrong
+    /// response. Exit `1`, with a `kind` of its own so a caller can tell "try again" from
+    /// "broken".
+    #[error("index is in use: {0}")]
+    IndexLocked(String),
 
     #[error("no node with id '{0}'")]
     IdNotFound(String),
@@ -155,6 +164,7 @@ impl VaireError {
             VaireError::LegacyConfig(_) => ErrorKind::NoRepo,
             VaireError::IndexNotBuilt(_) => ErrorKind::IndexNotBuilt,
             VaireError::IndexCorrupt(_) => ErrorKind::IndexCorrupt,
+            VaireError::IndexLocked(_) => ErrorKind::IndexLocked,
             VaireError::IdNotFound(_) => ErrorKind::IdNotFound,
             VaireError::CheckViolations(_) => ErrorKind::CheckViolations,
             VaireError::Dependency(_) => ErrorKind::Dependency,

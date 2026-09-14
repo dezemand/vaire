@@ -49,7 +49,7 @@ pub enum Mode {
 }
 
 /// Parsed content ready for insertion. Parsing and embedding happen before the write
-/// transaction so a remote embedding provider never holds the index lock.
+/// transaction so a remote embedding provider never holds a transaction open.
 struct PreparedNode {
     node: Node,
     prose_start: u32,
@@ -75,6 +75,12 @@ pub fn run(
     let started = Instant::now();
     let root = repo.root();
     let db_path = Repo::prepare_derived_dir(root)?.join("index.db");
+    // Held for the whole run, through the promote at the end. It is what makes a second
+    // `vaire index` on this package queue behind the first rather than rebuild into the
+    // same staging file, and what a read started meanwhile waits on — so the read answers
+    // from the finished index and never sees the instant between the old file leaving and
+    // the new one arriving. Declared first, so every handle below closes before it goes.
+    let _lock = Index::lock(&db_path)?;
     let scanner = Scanner::from_config(config)?;
 
     // `--working-tree` forces the on-disk source regardless of Git state.

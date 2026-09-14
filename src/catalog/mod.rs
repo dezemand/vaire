@@ -34,15 +34,19 @@
 //! multi-process test proved it before any of this was relied upon
 //! (`tests/catalog_concurrency.rs`).
 //!
-//! That turns out to be workable, because the lock *is* the mutex we would otherwise have
-//! had to build. Two rules follow, and both are load-bearing:
+//! That turns out to be workable, because an exclusive lock *is* the mutex we would
+//! otherwise have had to build — it only has to be one a process can wait on, which
+//! Turso's is not. Two rules follow, and both are load-bearing:
 //!
 //! * **Connections are short-lived.** Open, do the one thing, drop. A handle held across
 //!   anything slow — a corpus walk, an index build, an HTTP request — locks every other
 //!   vaire process on the machine out of the catalog for that whole time.
-//! * **Contention is retried, never failed** ([`Catalog::open`]). Waiting is correct here:
-//!   the holder is milliseconds away from finishing, and an OS file lock is released when
-//!   its process dies, so there is no such thing as a stale catalog lock.
+//! * **Contention waits, never fails** ([`Catalog::open`]). Every open first takes
+//!   `catalog.lock` beside the database ([`crate::db::DbLock`]) — an OS file lock, so a
+//!   second process is parked by the kernel until the first lets go rather than polling
+//!   for it. Waiting is correct here: the holder is milliseconds away from finishing, and
+//!   an OS file lock is released when its process dies, so there is no such thing as a
+//!   stale catalog lock.
 //!
 //! Writes stay idempotent upserts regardless, so the worst case of a race remains that two
 //! processes record the same observation twice.
@@ -51,7 +55,7 @@ pub mod scan;
 
 use std::path::{Path, PathBuf};
 
-use crate::db::{Db, col_i64, col_opt_i64, col_opt_text, col_text};
+use crate::db::{Db, DbLock, LockError, col_i64, col_opt_i64, col_opt_text, col_text};
 use crate::error::{Result, VaireError};
 
 /// The catalog's schema version, stamped in its own `schema_version` table — the same
@@ -247,6 +251,8 @@ pub struct Sighting {
 pub struct Catalog {
     db: Db,
     path: PathBuf,
+    // Declared after `db`, so the connection closes before the next process is let in.
+    _lock: DbLock,
 }
 
 impl Catalog {
@@ -255,9 +261,11 @@ impl Catalog {
     ///
     /// Two failure modes, and telling them apart is the whole job here:
     ///
-    /// * **Locked** — another vaire process has it open. Retried on a short poll up to
-    ///   [`LOCK_WAIT`], because the holder is milliseconds from finishing and an OS lock
-    ///   cannot outlive its process.
+    /// * **Locked** — another vaire process has it open. Waited out in the OS's own queue
+    ///   for `catalog.lock` ([`DbLock`]), because the holder is milliseconds from finishing
+    ///   and an OS lock cannot outlive its process. Only a process that does not take that
+    ///   lock — an older vaire — can still leave Turso refusing the open, and that is an
+    ///   error that deletes nothing.
     /// * **Unreadable** — the bytes themselves are not a database. Then the file is
     ///   **rebuilt rather than repaired**: most rows are observations a rescan can produce
     ///   again, which is what lets this state be a cache.
@@ -284,13 +292,20 @@ impl Catalog {
     pub fn open(home: &Path) -> Result<Catalog> {
         std::fs::create_dir_all(home)?;
         let path = home.join("catalog.db");
-        let started = std::time::Instant::now();
-        let mut attempt = 0u32;
-        loop {
+        let what = format!("the catalog at {}", path.display());
+        let lock = DbLock::acquire(&home.join(LOCK_FILE), &what).map_err(|e| match e {
+            LockError::TimedOut(waited) => VaireError::Config(format!(
+                "{what} is held by another vaire process and was not released within {}s",
+                waited.as_secs()
+            )),
+            LockError::Io(e) => e.into(),
+        })?;
+        {
             // Whether the file was already there decides what a version mismatch *means*,
-            // so it must be answered before connecting creates one.
+            // so it must be answered before connecting creates one — and under the lock, so
+            // that no other process is creating it at the same moment.
             let existed = path.exists();
-            match Catalog::connect(&path) {
+            match Catalog::connect(&path, &lock) {
                 Ok(catalog) => {
                     if !existed {
                         catalog.install_schema()?;
@@ -330,26 +345,22 @@ impl Catalog {
                     // statements no-op against the old tables, the version row is then
                     // stamped as current, and every later query fails against columns that
                     // were never migrated. Start again — dropping the handle first, because
-                    // the file is still locked by it.
+                    // the file is still open by it. The lock outlives that drop: it is this
+                    // process's own, and `lock` still holds it.
                     drop(catalog);
                     displace_db_files(&path, "its schema is one this vaire cannot read")?;
-                    let catalog = Catalog::connect(&path)?;
+                    let catalog = Catalog::connect(&path, &lock)?;
                     catalog.install_schema()?;
-                    return Ok(catalog);
+                    Ok(catalog)
                 }
-                Err(e) if is_locked(&e) && started.elapsed() < LOCK_WAIT => {
-                    attempt += 1;
-                    std::thread::sleep(backoff(attempt));
-                }
-                Err(e) if is_locked(&e) => {
-                    return Err(VaireError::Config(format!(
-                        "the catalog at {} is held by another vaire process and did not \
-                         free up within {}s — if nothing else is running, remove it and it \
-                         will be rebuilt by `vaire catalog scan`",
-                        path.display(),
-                        LOCK_WAIT.as_secs()
-                    )));
-                }
+                // Locked despite the lock above, so the holder never took it: an older
+                // vaire, or another tool with the file open. There is nothing to wait for
+                // and nothing wrong with the file — which is why this deletes nothing.
+                Err(e) if looks_locked(&e) => Err(VaireError::Config(format!(
+                    "{what} is open in a process that does not take vaire's catalog lock — \
+                     an older vaire, or another tool reading the file directly — and has \
+                     been left untouched; close that process and try again ({e})"
+                ))),
                 Err(e) => {
                     // Not busy — but "the engine did not get a database" is not yet
                     // evidence that the bytes are at fault. Ask the filesystem directly: a
@@ -372,10 +383,10 @@ impl Catalog {
                         )));
                     }
                     displace_db_files(&path, "it is not a readable database")?;
-                    let catalog = Catalog::connect(&path)?;
+                    let catalog = Catalog::connect(&path, &lock)?;
                     catalog.install_schema()?;
-                    return Ok(catalog);
-                } // no other arms: `is_locked` splits every remaining error above.
+                    Ok(catalog)
+                } // no other arms: `looks_locked` splits every remaining error above.
             }
         }
     }
@@ -385,10 +396,11 @@ impl Catalog {
         Catalog::open(&crate::userconfig::vaire_home())
     }
 
-    fn connect(path: &Path) -> Result<Catalog> {
+    fn connect(path: &Path, lock: &DbLock) -> Result<Catalog> {
         Ok(Catalog {
             db: Db::connect(path)?,
             path: path.to_path_buf(),
+            _lock: lock.clone(),
         })
     }
 
@@ -816,30 +828,19 @@ fn row_to_sighting(row: &turso::Row) -> Result<Sighting> {
     })
 }
 
-/// How long to wait for another process to release the catalog. Generously above any real
-/// hold time — every operation here is an upsert or a small query — so reaching it means
-/// something is genuinely wrong rather than merely busy.
-const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The lock every catalog open takes before Turso's own ([`Catalog::open`]).
+const LOCK_FILE: &str = "catalog.lock";
 
-/// Whether an open failure means "someone else has it" rather than "it is broken".
+/// Whether an open failure could be someone else having it, rather than it being broken.
 ///
-/// Matched on the message because that is what the engine gives us: Turso reports the
-/// exclusive-open conflict as a generic error whose text names the locked file. The
-/// consequence of guessing wrong is asymmetric — a missed lock error deletes a healthy
-/// catalog — so this errs toward treating anything lock-shaped as contention, and lets the
-/// [`LOCK_WAIT`] timeout be the thing that eventually gives up.
-fn is_locked(error: &VaireError) -> bool {
-    let text = error.to_string().to_ascii_lowercase();
-    text.contains("lock")
-}
-
-/// How long to wait before the next open attempt. Ramps to keep a crowd from re-colliding
-/// in lockstep, and is offset by the process id so two processes that started together do
-/// not stay in step with each other.
-fn backoff(attempt: u32) -> std::time::Duration {
-    let base = 2u64.saturating_pow(attempt.min(6)); // 2…64ms
-    let jitter = u64::from(std::process::id() % 7);
-    std::time::Duration::from_millis(base + jitter)
+/// Deliberately broader than [`crate::db::is_locked`], which matches the one message Turso
+/// actually produces. The consequence of guessing wrong here is asymmetric: the next step
+/// moves an unreadable catalog aside, and doing that to a healthy one — because the engine
+/// phrased a lock error differently than expected — forgets every pin on the machine. A
+/// wrong "yes" only declines to rebuild a file that really was garbage, which its owner can
+/// then remove.
+fn looks_locked(error: &VaireError) -> bool {
+    crate::db::is_locked(error) || error.to_string().to_ascii_lowercase().contains("lock")
 }
 
 /// The stored form of a path. Forward slashes are *not* imposed: this is machine-local

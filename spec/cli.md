@@ -485,6 +485,15 @@ vaire index [--full] [--working-tree] [--re-embed] [--no-deps]
 - An index whose **schema version** doesn't match this binary is rebuilt from scratch (the
   version is bumped on any schema change); a plain `vaire index` therefore self-migrates.
 - Exit `3` if the index is structurally corrupt and cannot be opened (suggests `--full`).
+- **One process at a time, queued.** Every open of a package's index — by this command or
+  by any read — first takes `.vaire/index.lock`, an OS file lock (`flock`/`LockFileEx`).
+  `vaire index` holds it for its whole run, so a second `vaire index` queues behind the
+  first, and a read started meanwhile waits and then answers from the finished index. A
+  command still waiting after a second says so on stderr. On the command line the wait
+  lasts as long as it takes; `VAIRE_LOCK_TIMEOUT=<seconds>` bounds it, and running out is
+  `index_locked` (exit `1`) — never exit `3`: a locked index is healthy, and rebuilding it
+  is the wrong fix. The same error without any wait means the file is open in a process
+  that does not take the lock (an older vaire, or another tool).
 
 ### 4.2 `vaire check`
 
@@ -965,8 +974,8 @@ declares a dependency, `catalog add` records a package on this machine, `registr
   depth and skip rules): it runs once, on request, over a tree you already have.
 
 > **Cross-process cost.** Turso takes an exclusive lock when a database is opened, so
-> catalog access is serialized machine-wide: a second vaire process waits (briefly, with
-> backoff) rather than failing. Commands therefore open the catalog, do one thing, and
+> catalog access is serialized machine-wide: a second vaire process queues for
+> `catalog.lock`, an OS file lock taken before Turso's, rather than failing. Commands therefore open the catalog, do one thing, and
 > close it — nothing holds a handle across an index build, and nothing may hold one
 > resident.
 
@@ -1317,6 +1326,11 @@ MCP tools, one-to-one:
 - The server operates against the already-built index and never builds or writes it. If the
   index is missing, tool calls return an MCP error pointing at `vaire index` (mirroring exit
   `4`); the agent is not allowed to trigger a build.
+- The server holds an index only for the request that opened it, so a resident server never
+  locks `vaire index` out. A tool call that finds the index held by another process
+  (usually a running `vaire index`) waits at most 30 s — `VAIRE_LOCK_TIMEOUT` overrides —
+  and then returns an `index_locked` tool error rather than leaving the agent hanging
+  (§4.1).
 - One server instance serves one repo, resolved at startup via the same discovery as the CLI
   (§2.1).
 
@@ -1668,7 +1682,7 @@ answering source labelled.
 | Code | Meaning |
 | --- | --- |
 | `0` | Success. For `check`: no violations. |
-| `1` | Generic/unexpected error. |
+| `1` | Generic/unexpected error — including `index_locked`: the index is held by another process past `VAIRE_LOCK_TIMEOUT`, or by one that does not take vaire's lock (§4.1). Deliberately not `3`: the index is fine. |
 | `2` | Usage error — bad flags or arguments (also what `--help` paths use). |
 | `3` | Index unreadable/corrupt, or its schema version doesn't match — rebuild with `vaire index --full`. |
 | `4` | No corpus repo found, or index not built yet (read commands). |
