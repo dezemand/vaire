@@ -7,10 +7,12 @@
 //!
 //! Three signals feed the final ranking, each scored by its own pass and kept
 //! architecturally separate from how they combine:
-//! - **lexical** ([`lexical_candidates`]) — native Tantivy BM25 per section (`fts_score`),
-//!   MAX-aggregated per file. Deliberately the one function that knows how section matches
-//!   become a file score + ranked anchor sections, so a different lexical scorer drops in
-//!   by replacing it alone.
+//! - **lexical** ([`lexical_candidates`]) — Tantivy's `fts_score` triages candidate
+//!   sections cheaply, then [`section_bm25`] re-scores them in Rust (corpus IDF, a heading
+//!   boost, section-length normalisation, whole-token frequency) and
+//!   [`aggregate_sections`] (MAX) turns a file's matching sections into one score.
+//!   Deliberately the one function that knows how section matches become a file score +
+//!   ranked anchor sections, so a different lexical scorer drops in by replacing it alone.
 //! - **name** ([`name_pass`]) — graded name/alias/id-slug tiers (design.md §8), the same
 //!   precision `suggest` already has.
 //! - **vector** ([`vector_pass`]) — brute-force cosine top-K, a noise floor rather than a
@@ -26,13 +28,14 @@
 //! (Reference resolution, design.md §8, is the *same* machinery used in the other
 //! direction — alias + FTS first, embeddings as backup — and will live alongside this.)
 
+mod text;
 pub mod vector;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::embed::Embedder;
 use crate::error::Result;
-use crate::index::db::{Index, col_f64, col_text, col_u32};
+use crate::index::db::{Index, col_f64, col_i64, col_text, col_u32};
 use crate::model::id::{NodeId, NodeType};
 
 /// One search hit: a file plus the section anchors that matched (cli.md §3.4).
@@ -105,6 +108,20 @@ const RRF_W_NAME: f32 = 2.0;
 /// better `document`/`question` matches. Tiers 1-2 still feed the fused score via
 /// [`RRF_W_NAME`], just without the hard gate.
 const NAME_GATE_TIER: u8 = 3;
+
+// BM25F-lite constants for `section_bm25`, the score that actually orders lexical
+// results. `BM25_K1`/`BM25_B` mirror Tantivy's own fixed BM25 constants, even though this
+// score is computed independently in Rust: `fts_candidates` also calls Turso's native
+// `fts_score`, but only to triage which candidates are worth a body fetch — the ranked
+// statement cannot JOIN `nodes` or aggregate per file, and `fts_score`'s own field weights
+// apply before this module's heading boost, so `section_bm25` is what actually orders
+// results. `W_HEADING` implements that heading boost: a heading token — or, for the
+// preamble, a token from its `# Title` line (see [`text::split_title_line`]) — counts
+// double before the saturation curve, so a heading/title match is no longer scored the
+// same as an ordinary body word.
+const BM25_K1: f32 = 1.2;
+const BM25_B: f32 = 0.75;
+const W_HEADING: f32 = 2.0;
 
 /// Separator between the display name and each alias in `nodes.alias_text`.
 ///
@@ -256,118 +273,180 @@ struct LexicalMatch {
     sections: Vec<(u32, String)>,
 }
 
-/// The lexical signal: native Tantivy BM25 scoring per section (`fts_score`), MAX
-/// aggregation per file — a long document no longer wins just by having more matching
-/// sections, over a bounded candidate set, with anchors picked by score rather than line
-/// position.
+/// The lexical signal: Tantivy's own `fts_score` triages candidate sections cheaply (its
+/// field weights apply before this module's heading boost and it can't aggregate per
+/// file, so it never becomes the final ranking — only which sections are worth a body
+/// fetch and a proper re-score), then [`section_bm25`] scores each candidate in Rust with
+/// corpus IDF, section-length normalisation, a heading boost, and whole-token frequency
+/// instead of substring counts. A file's matching sections are combined into one per-file
+/// score by [`aggregate_sections`] (MAX): a long document no longer wins just by having
+/// more matching sections.
 ///
 /// Deliberately the ONE function that knows how section-level matches become a file-level
 /// lexical score plus ranked anchor sections: everything downstream ([`fuse`],
-/// `resolve_anchors`) only ever reads a [`LexicalMatch`], so a different lexical scorer
-/// (e.g. these same candidate sections re-scored in Rust) drops in by replacing this one
-/// function.
+/// `resolve_anchors`) only ever reads a [`LexicalMatch`].
 ///
-/// The ranked candidate statement ([`fts_pass_candidates`]) is one of the two patterns
-/// Tantivy's ranked optimizer path actually matches: no JOIN, the same `?1` bound to both
+/// The ranked candidate statement ([`fts_candidates`]) is one of the two patterns Turso's
+/// ranked optimizer path actually matches: no JOIN, the same `?1` bound to both
 /// `fts_match` and `fts_score`, and — when capped, as here — a plain integer `LIMIT`. A
 /// JOIN or an extra `ORDER BY` key silently drops to the *fallback* pattern, which returns
 /// `0.0` for every row with no error, so `node_type`/`path` are fetched by a separate query
-/// ([`node_meta`]) instead of being joined into this one, and section bodies are deferred
-/// further still, to `resolve_anchors` — only for the anchors of nodes that actually
-/// survive to the final hit list, never this pass's whole (already capped) candidate set.
-///
-/// `heading` already carries the index's `weights='heading=2.0,body=1.0'` boost inside
-/// `fts_score`, so a heading-only match scores instead of being skipped entirely.
+/// ([`node_meta`]) instead of being joined into this one.
 fn lexical_candidates(index: &Index, tokens: &[String]) -> Result<BTreeMap<String, LexicalMatch>> {
     let match_query = tokens.join(" ");
-    let mut rows = fts_pass_candidates(index, &match_query, FTS_CANDIDATE_CAP)?;
-    if !rows.is_empty() && rows.iter().all(|(.., score)| *score == 0.0) {
+    let mut candidates = fts_candidates(index, &match_query, FTS_CANDIDATE_CAP)?;
+    if !candidates.is_empty() && candidates.iter().all(|c| c.tantivy_score == 0.0) {
         // Every fts_match'd row scored exactly 0.0: the ranked statement's optimizer
-        // pattern did not match and Turso silently fell back to its ranking-blind path.
-        // Loud in debug/test builds; degrade gracefully in release rather than silently
-        // serve unranked results with no indication anything is wrong.
+        // pattern did not match and Turso silently fell back to its ranking-blind path. A
+        // capped LIMIT chosen from that untrustworthy ORDER BY could silently drop real
+        // matches, so fall back to every fts_match'd candidate uncapped rather than serve
+        // results silently missing whatever the broken ranking pushed out. Loud in
+        // debug/test builds; degrades gracefully in release rather than serve unranked (or
+        // wrongly capped) results with no indication anything is wrong.
         debug_assert!(
             false,
             "fts_score returned 0.0 for every fts_match row — the ranked Tantivy query \
-             pattern likely stopped matching; falling back to a plain token-overlap score"
+             pattern likely stopped matching; falling back to the uncapped candidate set"
         );
-        rows = fts_pass_fallback(index, &match_query, tokens)?;
+        candidates = fts_candidates(index, &match_query, None)?;
     }
-    // Deterministic order for both the per-file aggregation and anchor selection: score
-    // descending, ties by line ascending — resolved in Rust so it holds whether or not the
-    // SQL itself applied an ORDER BY (an uncapped `FTS_CANDIDATE_CAP` would omit one).
-    rows.sort_by(|a, b| {
-        b.3.partial_cmp(&a.3)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.2.cmp(&b.2))
-    });
-
-    let mut per_node: BTreeMap<String, RawLexicalMatch> = BTreeMap::new();
-    for (id, heading, line, score) in rows {
-        let raw = per_node.entry(id).or_default();
-        raw.scores.push(score);
-        // `rows` is already sorted best-first, so the first `MAX_ANCHORS` sections seen
-        // for a node are its best-matching ones — not, as before, whichever happened to
-        // come first by line position.
-        if raw.sections.len() < MAX_ANCHORS {
-            raw.sections.push((line, heading));
-        }
-    }
-    if per_node.is_empty() {
+    if candidates.is_empty() {
         return Ok(BTreeMap::new());
     }
 
-    // type/path for every matched node in one query — never JOINed into the ranked
-    // statement above (that disables `fts_score`).
-    let ids: Vec<String> = per_node.keys().cloned().collect();
+    // Corpus statistics for this query: total section count, the average section length
+    // (a character proxy, computed the same way per section in `section_bm25`), and each
+    // query token's document frequency for the classic BM25 IDF. N and avgdl in one round
+    // trip (both are whole-corpus aggregates, independent of the query and of the
+    // candidate cap above) rather than two, and every token's df likewise in one round
+    // trip: a `SELECT` of N scalar subqueries, each the exact single-token `fts_match`
+    // shape already known to hit the FTS index, rather than N separate statements.
+    let (n, avgdl) = index
+        .query_opt(
+            "SELECT count(*), avg(length(heading) + length(body)) FROM sections",
+            (),
+            |r| Ok((col_i64(r, 0)? as f32, col_f64(r, 1)?.max(1.0) as f32)),
+        )?
+        .unwrap_or((0.0, 1.0));
+    let df_sql = format!(
+        "SELECT {}",
+        (1..=tokens.len())
+            .map(|i| format!(
+                "(SELECT count(*) FROM sections WHERE fts_match(heading, body, ?{i}))"
+            ))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let df_params: Vec<turso::Value> = tokens
+        .iter()
+        .map(|t| turso::Value::from(t.clone()))
+        .collect();
+    let dfs: Vec<i64> = index
+        .query_opt(&df_sql, df_params, |r| {
+            (0..tokens.len()).map(|i| col_i64(r, i)).collect()
+        })?
+        .unwrap_or_else(|| vec![0; tokens.len()]);
+    let mut idf: HashMap<String, f32> = HashMap::with_capacity(tokens.len());
+    for (t, df) in tokens.iter().zip(dfs) {
+        let df = df as f32;
+        idf.insert(t.clone(), (1.0 + (n - df + 0.5) / (df + 0.5)).ln());
+    }
+
+    // Bodies for exactly the surviving candidates, fetched by primary key — never for
+    // every fts_match'd section, however many a long document contributes.
+    let rowids: Vec<i64> = candidates.iter().map(|c| c.rowid).collect();
+    let mut bodies = candidate_bodies(index, &rowids)?;
+
+    // Group surviving candidates by file, pairing each with its body (`remove` rather
+    // than `get().clone()`: each rowid is a distinct physical row, so it appears at most
+    // once across `candidates` and its body is never needed a second time).
+    let mut by_node: HashMap<String, Vec<(String, u32, String)>> = HashMap::new();
+    for c in candidates {
+        let Some(body) = bodies.remove(&c.rowid) else {
+            continue; // defensive: rowid vanished between the two queries (shouldn't happen on a read-only index)
+        };
+        by_node
+            .entry(c.node_id)
+            .or_default()
+            .push((c.heading, c.line, body));
+    }
+    if by_node.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let ids: Vec<String> = by_node.keys().cloned().collect();
     let meta = node_meta(index, &ids)?;
 
-    Ok(per_node
-        .into_iter()
-        .filter_map(|(id, raw)| {
-            let (node_type, path) = meta.get(&id)?.clone();
-            Some((
-                id,
-                LexicalMatch {
-                    node_type,
-                    path,
-                    // MAX aggregation: the single best-matching section's score, not the
-                    // sum over every one — `scores` is sorted best-first.
-                    score: raw.scores.first().copied().unwrap_or(0.0),
-                    sections: raw.sections,
-                },
-            ))
-        })
-        .collect())
+    let mut out: BTreeMap<String, LexicalMatch> = BTreeMap::new();
+    for (id, sections) in by_node {
+        let Some((node_type, path)) = meta.get(&id) else {
+            continue; // defensive: a matched section with no owning node (should not happen)
+        };
+        let mut scored: Vec<(f32, u32, String)> = sections
+            .into_iter()
+            .filter_map(|(heading, line, body)| {
+                let score = section_bm25(&heading, &body, tokens, &idf, avgdl);
+                (score > 0.0).then_some((score, line, heading))
+            })
+            .collect();
+        if scored.is_empty() {
+            continue;
+        }
+        // Best sections first (score desc, ties by line asc) — anchor selection reads off
+        // this same order, keeping the best-matching sections rather than whichever
+        // happened to come first by line position.
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        let section_scores: Vec<f32> = scored.iter().map(|(s, ..)| *s).collect();
+        let sections: Vec<(u32, String)> = scored
+            .into_iter()
+            .take(MAX_ANCHORS)
+            .map(|(_, line, heading)| (line, heading))
+            .collect();
+        out.insert(
+            id,
+            LexicalMatch {
+                node_type: node_type.clone(),
+                path: path.clone(),
+                score: aggregate_sections(&section_scores),
+                sections,
+            },
+        );
+    }
+    Ok(out)
 }
 
-/// [`lexical_candidates`]'s per-node accumulator while section rows are still being
-/// folded in: raw matched-section scores (for MAX aggregation) and best-scoring sections
-/// (for anchors), before node metadata ([`node_meta`]) is known.
-#[derive(Default)]
-struct RawLexicalMatch {
-    scores: Vec<f32>,
-    sections: Vec<(u32, String)>,
+/// One ranked FTS candidate section — [`fts_candidates`]'s row shape. `tantivy_score` is
+/// used only to decide which candidates survive [`FTS_CANDIDATE_CAP`] and to guard against
+/// the silent-fallback hazard; the score that actually ranks results is [`section_bm25`],
+/// computed later from the fetched `body`.
+#[derive(Debug)]
+struct Candidate {
+    rowid: i64,
+    node_id: String,
+    heading: String,
+    line: u32,
+    tantivy_score: f32,
 }
 
 /// The ranked candidate statement: no JOIN, the same `?1` bound to both `fts_match` and
 /// `fts_score`, a plain integer `LIMIT` when capped. `cap = None` uses the other verified
-/// shape (no `ORDER BY`/`LIMIT` at all — sorted client-side by the caller).
-fn fts_pass_candidates(
-    index: &Index,
-    match_query: &str,
-    cap: Option<i64>,
-) -> Result<Vec<(String, String, u32, f32)>> {
+/// shape (no `ORDER BY`/`LIMIT` at all — used as this module's uncapped fallback).
+/// `rowid` rides along for free: the optimizer's structural match on this statement
+/// compares FROM/WHERE/ORDER BY/LIMIT, never the projection list.
+fn fts_candidates(index: &Index, match_query: &str, cap: Option<i64>) -> Result<Vec<Candidate>> {
     match cap {
         Some(limit) => index.query_rows(
-            "SELECT node_id, heading, line, fts_score(heading, body, ?1) AS score
+            "SELECT rowid, node_id, heading, line, fts_score(heading, body, ?1) AS score
              FROM sections WHERE fts_match(heading, body, ?1)
              ORDER BY score DESC LIMIT ?2",
             turso::params![match_query, limit],
             candidate_row,
         ),
         None => index.query_rows(
-            "SELECT node_id, heading, line, fts_score(heading, body, ?1) AS score
+            "SELECT rowid, node_id, heading, line, fts_score(heading, body, ?1) AS score
              FROM sections WHERE fts_match(heading, body, ?1)",
             [match_query],
             candidate_row,
@@ -375,57 +454,85 @@ fn fts_pass_candidates(
     }
 }
 
-/// Row mapper shared by both [`fts_pass_candidates`] statement shapes.
-fn candidate_row(r: &turso::Row) -> Result<(String, String, u32, f32)> {
-    Ok((
-        col_text(r, 0)?,
-        col_text(r, 1)?,
-        col_u32(r, 2)?,
-        col_f64(r, 3)? as f32,
-    ))
+/// Row mapper shared by both [`fts_candidates`] statement shapes.
+fn candidate_row(r: &turso::Row) -> Result<Candidate> {
+    Ok(Candidate {
+        rowid: col_i64(r, 0)?,
+        node_id: col_text(r, 1)?,
+        heading: col_text(r, 2)?,
+        line: col_u32(r, 3)?,
+        tantivy_score: col_f64(r, 4)? as f32,
+    })
 }
 
-/// Safety net for the silent-fallback hazard [`lexical_candidates`] guards against: a plain
-/// whole-token overlap count per section (never a substring match — "end" must not match
-/// "endpoint"), so a release build still serves *some* ranked results instead of the
-/// ranking-blind order Turso's own fallback would otherwise leave in place with no
-/// indication anything is wrong. Proven not to be needed against the production statement
-/// by the `fts_score_returns_real_varying_scores` test below; not expected to ever run
-/// against production Turso/Tantivy.
-fn fts_pass_fallback(
-    index: &Index,
-    match_query: &str,
+/// `body` for exactly the candidate rows [`lexical_candidates`] decided to re-score,
+/// fetched by primary key rather than by the `(node_id, line)` pair the rest of this
+/// module otherwise keys on — `sections` is an ordinary rowid table, so the `rowid` the
+/// ranked statement above projects addresses the same row here (confirmed by
+/// `fts_candidates_returns_real_scores_and_correct_rowids`). A flat `IN (...)` rather than
+/// a `rowid = ? OR ...` chain: enough distinct matched rows can otherwise hit Turso's
+/// "Expression tree is too large" parser guard.
+fn candidate_bodies(index: &Index, rowids: &[i64]) -> Result<HashMap<i64, String>> {
+    if rowids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let (placeholders, params) = in_list_params(rowids, 1);
+    let sql = format!("SELECT rowid, body FROM sections WHERE rowid IN ({placeholders})");
+    let rows = index.query_rows(&sql, params, |r| Ok((col_i64(r, 0)?, col_text(r, 1)?)))?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Combine one file's matching-section BM25 scores into its per-file score, given already
+/// sorted descending by the caller (anchor selection reads off the same order): the single
+/// best-matching section. A long file no longer earns score merely for having more
+/// matching sections.
+///
+/// Chosen on the search benchmark over summing every section, the best plus a discounted
+/// second-best, and a geometric decay over all of them.
+fn aggregate_sections(scores: &[f32]) -> f32 {
+    scores.first().copied().unwrap_or(0.0)
+}
+
+/// BM25F-lite score for one section against the query `tokens`: combined term frequency
+/// `tf_body + W_HEADING * tf_heading`, corpus `idf` (from `lexical_candidates`), and length
+/// normalisation against `avgdl` using the section's own character length — the exact
+/// character proxy `avgdl` was computed with, so the two stay comparable.
+fn section_bm25(
+    heading: &str,
+    body: &str,
     tokens: &[String],
-) -> Result<Vec<(String, String, u32, f32)>> {
-    let rows = index.query_rows(
-        "SELECT node_id, heading, line, body FROM sections WHERE fts_match(heading, body, ?1)",
-        [match_query],
-        |r| {
-            Ok((
-                col_text(r, 0)?,
-                col_text(r, 1)?,
-                col_u32(r, 2)?,
-                col_text(r, 3)?,
-            ))
-        },
-    )?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(id, heading, line, body)| {
-            // Mirror the index's heading=2.0/body=1.0 field weights so the fallback's
-            // ordering at least loosely resembles the BM25 shape it stands in for.
-            let score =
-                token_overlap(&heading, tokens) as f32 * 2.0 + token_overlap(&body, tokens) as f32;
-            (score > 0.0).then_some((id, heading, line, score))
-        })
-        .collect())
-}
+    idf: &HashMap<String, f32>,
+    avgdl: f32,
+) -> f32 {
+    // The preamble's `# Title` line lives in `body` (its `heading` column is empty); pull
+    // it out and weight it like a real heading so a document's title counts for more than
+    // ordinary prose.
+    let (title, body_rest) = if heading.is_empty() {
+        text::split_title_line(body)
+    } else {
+        (None, body)
+    };
+    let body_counts = text::term_counts(body_rest);
+    let heading_counts = match title {
+        Some(t) => text::term_counts(t),
+        None => text::term_counts(heading),
+    };
+    // Length normalisation uses the section's real stored size, not the title-split text,
+    // so it stays the exact character proxy `avgdl` was computed with.
+    let l = (heading.chars().count() + body.chars().count()) as f32;
+    let norm = 1.0 - BM25_B + BM25_B * (l / avgdl);
 
-/// How many distinct query tokens occur as a *whole* token in `text` (never a substring —
-/// "end" must not match "endpoint").
-fn token_overlap(text: &str, tokens: &[String]) -> usize {
-    let text_tokens = tokenize(text);
-    tokens.iter().filter(|t| text_tokens.contains(t)).count()
+    let mut score = 0.0f32;
+    for t in tokens {
+        let tf = body_counts.get(t).copied().unwrap_or(0) as f32
+            + W_HEADING * heading_counts.get(t).copied().unwrap_or(0) as f32;
+        if tf <= 0.0 {
+            continue;
+        }
+        let idf_t = idf.get(t).copied().unwrap_or(0.0);
+        score += idf_t * (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * norm);
+    }
+    score
 }
 
 /// `(type, path)` for each of `ids`, in one query — the ranked candidate statement above
@@ -1285,13 +1392,12 @@ mod tests {
     use super::*;
     use crate::index::db::Index;
 
-    /// Proves the production ranked statement in [`fts_pass_candidates`] gets real,
-    /// non-zero, varying BM25 scores from Turso/Tantivy — not the silent all-`0.0`
-    /// fallback the `fts_score` hazard would otherwise leave undetected. A repeated,
-    /// heading-boosted term ranks above a single mention, which in turn ranks above no
-    /// mention at all.
+    /// Proves the production ranked statement in [`fts_candidates`] gets real, non-zero,
+    /// varying BM25 scores from Turso/Tantivy — not the silent all-`0.0` fallback the
+    /// `fts_score` hazard would otherwise leave undetected — and that its `rowid`
+    /// addresses the same row a direct lookup does, which [`candidate_bodies`] depends on.
     #[test]
-    fn fts_score_returns_real_varying_scores() {
+    fn fts_candidates_returns_real_scores_and_correct_rowids() {
         let dir = tempfile::tempdir().expect("tempdir");
         let index =
             Index::create_for_bulk_load(&dir.path().join("index.db")).expect("create index");
@@ -1330,24 +1436,103 @@ mod tests {
             .expect("insert doc-c");
         index.ensure_fts_index().expect("build fts index");
 
-        let rows = fts_pass_candidates(&index, "ingest", Some(10)).expect("query candidates");
+        let candidates = fts_candidates(&index, "ingest", Some(10)).expect("query candidates");
 
         assert_eq!(
-            rows.len(),
+            candidates.len(),
             2,
-            "doc-c has no match and must not be returned: {rows:?}"
+            "doc-c has no match and must not be returned: {candidates:?}"
         );
         assert!(
-            rows.iter().all(|(_, _, _, score)| *score > 0.0),
-            "every matched row must carry a real, non-zero BM25 score: {rows:?}"
+            candidates.iter().all(|c| c.tantivy_score > 0.0),
+            "every matched row must carry a real, non-zero BM25 score: {candidates:?}"
         );
         assert_ne!(
-            rows[0].3, rows[1].3,
-            "scores must vary by relevance, not be a flat fallback value: {rows:?}"
+            candidates[0].tantivy_score, candidates[1].tantivy_score,
+            "scores must vary by relevance, not be a flat fallback value: {candidates:?}"
         );
         assert_eq!(
-            rows[0].0, "doc-a",
-            "the heading + repeated-body match must outrank the single mention: {rows:?}"
+            candidates[0].node_id, "doc-a",
+            "the heading + repeated-body match must outrank the single mention: {candidates:?}"
+        );
+
+        // rowid must address the same row a direct lookup does — candidate_bodies depends
+        // on this.
+        let rowids: Vec<i64> = candidates.iter().map(|c| c.rowid).collect();
+        let bodies = candidate_bodies(&index, &rowids).expect("fetch bodies by rowid");
+        for c in &candidates {
+            let body = bodies
+                .get(&c.rowid)
+                .unwrap_or_else(|| panic!("body present for candidate rowid {}", c.rowid));
+            assert!(
+                body.contains("ingest"),
+                "rowid {} must address {}'s own row, not some other section: {body:?}",
+                c.rowid,
+                c.node_id
+            );
+        }
+    }
+
+    /// The uncapped shape (no `ORDER BY`/`LIMIT`) is the other verified `fts_score`
+    /// pattern — [`lexical_candidates`]'s release fallback if the capped shape ever
+    /// returns all-zero scores. Proves it also returns real, non-zero scores, and every
+    /// match (not just a capped top-N).
+    #[test]
+    fn fts_candidates_uncapped_returns_every_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index =
+            Index::create_for_bulk_load(&dir.path().join("index.db")).expect("create index");
+        for i in 0..5 {
+            index
+                .execute(
+                    "INSERT INTO sections (node_id, heading, line, body) VALUES (?1, ?2, ?3, ?4)",
+                    turso::params![format!("doc-{i}"), "", i as i64, "ingest pipeline volume"],
+                )
+                .expect("insert section");
+        }
+        index.ensure_fts_index().expect("build fts index");
+
+        let candidates = fts_candidates(&index, "ingest", None).expect("query candidates");
+        assert_eq!(
+            candidates.len(),
+            5,
+            "uncapped must return every match: {candidates:?}"
+        );
+        assert!(candidates.iter().all(|c| c.tantivy_score > 0.0));
+    }
+
+    /// A capped query must return at most the cap, ranked so the cap keeps the
+    /// highest-`fts_score` candidates first — what makes truncating to the cap safe.
+    #[test]
+    fn fts_candidates_cap_keeps_top_scoring_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index =
+            Index::create_for_bulk_load(&dir.path().join("index.db")).expect("create index");
+        for i in 0..20 {
+            // Every 5th section repeats "ingest" many times, so it must outscore the rest.
+            let body = if i % 5 == 0 {
+                "ingest ingest ingest ingest ingest".to_string()
+            } else {
+                "ingest appears once here".to_string()
+            };
+            index
+                .execute(
+                    "INSERT INTO sections (node_id, heading, line, body) VALUES (?1, ?2, ?3, ?4)",
+                    turso::params![format!("doc-{i}"), "", i as i64, body],
+                )
+                .expect("insert section");
+        }
+        index.ensure_fts_index().expect("build fts index");
+
+        let capped = fts_candidates(&index, "ingest", Some(4)).expect("query candidates");
+        assert_eq!(capped.len(), 4, "must respect the cap: {capped:?}");
+        let heavy_hitters = capped
+            .iter()
+            .filter(|c| c.node_id.trim_start_matches("doc-").parse::<i64>().unwrap() % 5 == 0)
+            .count();
+        assert_eq!(
+            heavy_hitters, 4,
+            "the cap must keep the highest-fts_score rows, not an arbitrary subset: {capped:?}"
         );
     }
 
