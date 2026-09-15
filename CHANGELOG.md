@@ -38,6 +38,16 @@ uses [Semantic Versioning](https://semver.org).
 - **`vaire mcp` held every index it read for the life of the server**, locking
   `vaire index` out for as long as an agent session stayed open. Indexes are now released
   after each request.
+- **`vaire index`/`vaire pull` no longer fail on an oversized section with the OpenAI
+  provider.** A section over the API's 8192-token per-input limit (a large table, a long
+  document with no subheadings) was sent as-is and rejected with `HTTP 400: maximum input
+  length is 8192 tokens`, which aborted the whole run. Such a section is now split into pieces
+  that fit, cut at paragraph or line breaks. Each piece is embedded and the pieces are pooled
+  (a length-weighted mean) back into the section's single vector, so the whole section stays
+  searchable, not just its opening. OpenAI's embeddings models use byte-level BPE, where every
+  token takes at least one byte, so capping piece bytes guarantees the token limit without
+  shipping a tokenizer. Requests are also bounded by total size, keeping a batch of large
+  sections under the 300,000-token per-request limit.
 
 ## [0.3.1] — 2026-09-13
 
