@@ -256,16 +256,20 @@ vaire search <query> [--type <T>] [--scope <container-id>] [--limit <N>]
   scoring by its best section so that length alone earns nothing; **name**, the query graded
   against each node's `name:`, `aliases:` and id, where an exact match ranks first and a
   partial one adds weight; and **vector** similarity of the nearest sections. Sorted by
-  descending score; ties broken by (qualified) `id` ascending for determinism.
+  descending score; ties go to this package's results before a dependency's, then by
+  (qualified) `id` ascending, for determinism.
 - **Cross-package** (§6.5): the query runs over this package **and its linked dependency
   closure** — that is the selective-consumption payoff: what you depend on is part of
-  your knowledge. The query is embedded once and reused per member; a dependency indexed
-  with different embedding dimensions contributes FTS/alias hits only (vector recall
+  your knowledge. The query is embedded once, and the closure is ranked as **one** search:
+  each member gathers its own candidates, but the word statistics behind the lexical score
+  and every signal's ranking are computed over all members together (§6.8). A dependency
+  indexed with different embedding dimensions contributes FTS/alias hits only (vector recall
   silently absent for it — `status` surfaces the mismatch). `--local` restricts to this
   package and `--all` widens to every catalogued package (§6.8, implied outside a
   package); `--scope @pkg/container` searches inside a dependency's container.
   Cross-package hits carry `package` in JSON; unavailable dependencies are listed in
-  `skipped`.
+  `skipped` — except the one a `--scope @pkg/container` names: that search asks for that
+  package alone, so an unavailable index fails the command instead, as the run-root's does.
 
 JSON:
 
@@ -1679,13 +1683,17 @@ The rules:
   with none it behaves as `--all-packages` over the catalog. `--scope` is refused, since a
   scope is a container id relative to a package.
 
-Ranking across packages is deliberately unclever: results are merged and ranked by score.
-A score is derived from how high a hit ranks in its own member's lexical, name and vector
-rankings, so results from different members compare by position, not by absolute match
-strength — which is only meaningful because every member index is built and ranked by the
-same code. When registries join the fan-out, remote scores will *not* be comparable — that
-is where grouping by source and refusing to normalize arrives, with the answering source
-labelled.
+Ranking across packages treats the members as **one** search. Each member's index gathers
+its own candidates — FTS sections, name matches, nearest sections — but the corpus
+statistics behind the lexical score (section count, total length, each word's document
+frequency) are summed over every member, and each signal is ranked once over all of their
+candidates before the ranks are fused. A score therefore places a hit among everything the
+search found, not only among its own package's hits: ranked member by member, each
+dependency's best match scored like the best match overall, however weakly it matched. Ties
+go to the package the search runs in. That is only possible because every member index is
+built by the same code and read in place. When registries join the fan-out, remote scores
+will *not* be comparable — that is where grouping by source and refusing to normalize
+arrives, with the answering source labelled.
 
 ## 7. Exit codes
 

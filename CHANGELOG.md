@@ -23,6 +23,13 @@ uses [Semantic Versioning](https://semver.org).
   On the new search benchmark's public corpus MRR@10 rises from 0.23 to 0.69 (0.72 with
   OpenAI embeddings), and queries whose top hit is an unrelated long document drop from 87%
   to about 7%. `score` stays an opaque relative rank, now derived from rank positions.
+- **A search with linked dependencies ranks every package as one search.** Each package's
+  results were ranked on their own and then merged by score — and since a score says where a
+  hit placed within its own package, every dependency's best match scored like the best match
+  overall, however weakly it matched. The word statistics behind the lexical score and each
+  signal's ranking are now computed over all packages together, so a hit is ranked against
+  everything the search found; exact ties go to the package you search from (cli.md §3.4,
+  §6.8). A search within a single package ranks exactly as before.
 - **The catalog queues on the same kind of lock** (`catalog.lock`) instead of polling
   Turso with backoff and giving up after 5 s.
 
