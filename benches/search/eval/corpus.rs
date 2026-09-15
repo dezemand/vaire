@@ -1,0 +1,862 @@
+//! Corpus materialization for the search benchmark: `public`, `external`, `scale`.
+//!
+//! Every corpus is written into a fresh tempdir (never a git repo — `vaire::index::build::run`
+//! with `Mode::Full` reads the working tree straight from disk when the corpus root has no
+//! `.git`, which is exactly what discovery + a plain `knowledge.toml` give us here) and is
+//! indexed by the caller via the same `vaire::index::build::run(&repo, &config, embedder,
+//! Mode::Full)` call regardless of which corpus produced it.
+
+use std::collections::{BTreeMap, HashSet};
+use std::io;
+use std::path::{Path, PathBuf};
+
+use super::queries::Query;
+
+/// A materialized corpus: a tempdir (kept alive for the caller's lifetime) plus whatever
+/// human-readable notices its construction produced (e.g. "no authored nodes yet").
+pub struct CorpusBuild {
+    pub root: PathBuf,
+    pub notices: Vec<String>,
+    _tempdir: tempfile::TempDir,
+}
+
+impl CorpusBuild {
+    fn new(tempdir: tempfile::TempDir, notices: Vec<String>) -> Self {
+        let root = tempdir.path().to_path_buf();
+        CorpusBuild {
+            root,
+            notices,
+            _tempdir: tempdir,
+        }
+    }
+
+    pub fn repo(&self) -> vaire::corpus::Repo {
+        vaire::corpus::Repo::discover(Some(&self.root), &self.root)
+            .expect("freshly-written corpus root carries its own knowledge.toml")
+    }
+
+    pub fn config(&self) -> vaire::config::Config {
+        vaire::config::Config::load(&self.root.join("knowledge.toml"))
+            .expect("freshly-written knowledge.toml parses")
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// public
+// ---------------------------------------------------------------------------------
+
+/// `(source path relative to the vaire repo root, node id, display name, dest path
+/// relative to the corpus root)` for every generated `document` node.
+const DOCUMENT_SOURCES: &[(&str, &str, &str, &str)] = &[
+    (
+        "spec/design.md",
+        "design-spec",
+        "Design spec",
+        "generated/documents/design-spec.md",
+    ),
+    (
+        "spec/cli.md",
+        "cli-spec",
+        "CLI spec",
+        "generated/documents/cli-spec.md",
+    ),
+    (
+        "spec/registry.md",
+        "registry-spec",
+        "Registry spec",
+        "generated/documents/registry-spec.md",
+    ),
+    (
+        "spec/manifest.md",
+        "manifest-spec",
+        "Manifest spec",
+        "generated/documents/manifest-spec.md",
+    ),
+    (
+        "README.md",
+        "readme",
+        "README",
+        "generated/documents/readme.md",
+    ),
+    (
+        "CHANGELOG.md",
+        "changelog",
+        "Changelog",
+        "generated/documents/changelog.md",
+    ),
+];
+
+const PUBLIC_MANIFEST: &str = r#"name = "search-bench"
+version = "0.1.0"
+include = ["**/*.md"]
+types = ["cli", "command", "concept", "principle", "decision", "component", "finding", "skill", "document", "guide", "roadmap"]
+scoped_types_whitelist = ["command"]
+"#;
+
+/// Build the `public` corpus: authored fixture nodes (if the data dir has any yet) plus
+/// generated `document` nodes from this repo's own long-form docs and `skill` nodes from
+/// `skills/*/SKILL.md` — the adversarial mix issue #52 is about (long specs vs. short
+/// concepts/skills).
+///
+/// `nodes_dir_override` lets a caller (the smoke-test acceptance path) point `nodes/` at an
+/// arbitrary directory instead of `benches/search/data/public/nodes`; `main.rs` never uses
+/// it for a real run.
+pub fn build_public(
+    vaire_repo_root: &Path,
+    nodes_dir_override: Option<&Path>,
+) -> Result<CorpusBuild, String> {
+    let tempdir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    let root = tempdir.path().to_path_buf();
+    let mut notices = Vec::new();
+
+    let nodes_src = nodes_dir_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| vaire_repo_root.join("benches/search/data/public/nodes"));
+    let authored = if nodes_src.is_dir() {
+        copy_md_tree(&nodes_src, &root.join("nodes"))?
+    } else {
+        0
+    };
+    if authored == 0 {
+        notices.push(
+            "public corpus: benches/search/data/public/nodes has no authored .md files yet — \
+             building from generated documents/skills only"
+                .to_string(),
+        );
+    }
+
+    let mut generated_docs = 0usize;
+    for (src_rel, id, name, dest_rel) in DOCUMENT_SOURCES {
+        let src_path = vaire_repo_root.join(src_rel);
+        let Ok(text) = std::fs::read_to_string(&src_path) else {
+            notices.push(format!(
+                "public corpus: source file {src_rel} not found, skipping document:{id}"
+            ));
+            continue;
+        };
+        let body = strip_leading_frontmatter(&text);
+        write_frontmatter_node(&root, dest_rel, id, "document", name, body)
+            .map_err(|e| format!("writing generated document:{id}: {e}"))?;
+        generated_docs += 1;
+    }
+
+    let mut generated_skills = 0usize;
+    let skills_root = vaire_repo_root.join("skills");
+    if let Ok(entries) = std::fs::read_dir(&skills_root) {
+        let mut dirs: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        dirs.sort(); // deterministic corpus regardless of readdir order
+        for dir in dirs {
+            let skill_md = skills_root.join(&dir).join("SKILL.md");
+            let Ok(text) = std::fs::read_to_string(&skill_md) else {
+                continue;
+            };
+            let body = strip_leading_frontmatter(&text);
+            write_frontmatter_node(
+                &root,
+                &format!("generated/skills/{dir}.md"),
+                &dir,
+                "skill",
+                &dir,
+                body,
+            )
+            .map_err(|e| format!("writing generated skill:{dir}: {e}"))?;
+            generated_skills += 1;
+        }
+    }
+
+    notices.push(format!(
+        "public corpus: {authored} authored node(s), {generated_docs} generated document(s), \
+         {generated_skills} generated skill(s)"
+    ));
+
+    std::fs::write(root.join("knowledge.toml"), PUBLIC_MANIFEST)
+        .map_err(|e| format!("writing knowledge.toml: {e}"))?;
+
+    Ok(CorpusBuild::new(tempdir, notices))
+}
+
+/// Strip a single leading `---`-fenced YAML block (a generic doc frontmatter, e.g.
+/// `spec/design.md`'s `title:`/`status:`/`date:` block — not a vaire node frontmatter),
+/// returning the remainder verbatim. Files with no leading fence (or an unterminated one)
+/// are returned unchanged.
+fn strip_leading_frontmatter(content: &str) -> &str {
+    let content_no_bom = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let Some(after_open) = content_no_bom
+        .strip_prefix("---\r\n")
+        .or_else(|| content_no_bom.strip_prefix("---\n"))
+    else {
+        return content_no_bom;
+    };
+    let mut offset = 0usize;
+    for line in after_open.split_inclusive('\n') {
+        offset += line.len();
+        if line.trim_end_matches(['\n', '\r']) == "---" {
+            return &after_open[offset..];
+        }
+    }
+    // No closing fence — not actually a frontmatter block; return the original.
+    content_no_bom
+}
+
+/// Write `<root>/<rel>` with vaire frontmatter (`id`, `type`, `name`) followed by `body`.
+fn write_frontmatter_node(
+    root: &Path,
+    rel: &str,
+    id: &str,
+    node_type: &str,
+    name: &str,
+    body: &str,
+) -> io::Result<()> {
+    let path = root.join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let name_escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    let content =
+        format!("---\nid: {id}\ntype: {node_type}\nname: \"{name_escaped}\"\n---\n{body}");
+    std::fs::write(path, content)
+}
+
+/// Copy every `.md` file under `src` into `dest`, preserving relative paths. Returns how
+/// many files were copied (`0` if `src` has none).
+fn copy_md_tree(src: &Path, dest: &Path) -> Result<usize, String> {
+    let files = walk_files(src).map_err(|e| format!("walking {}: {e}", src.display()))?;
+    let mut count = 0;
+    for path in files {
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let rel = path.strip_prefix(src).expect("walked under src");
+        let dest_path = dest.join(rel);
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(&path, &dest_path)
+            .map_err(|e| format!("copying {} -> {}: {e}", path.display(), dest_path.display()))?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Every regular file under `dir`, recursively, sorted (symlinks are skipped — a corpus
+/// fixture has no business containing one, and this avoids any cycle risk).
+fn walk_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                out.push(entry.path());
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------------
+// external — your own corpus, never checked in (`--external-dir` / `--external-queries`)
+// ---------------------------------------------------------------------------------
+
+/// Build the `external` corpus from a directory you provide: your own Vairë package, with
+/// its own `knowledge.toml`, copied into a tempdir (excluding `.git/`, `.vaire/`,
+/// `node_modules/`) and never written to. Use this for any corpus you don't want checked
+/// into this repo — a private/internal knowledge base, a client corpus, anything with its
+/// own judgments file you keep outside version control.
+pub fn build_external(source_dir: &Path) -> Result<CorpusBuild, String> {
+    if !source_dir.is_dir() {
+        return Err(format!(
+            "--external-dir {} is not a directory",
+            source_dir.display()
+        ));
+    }
+    let tempdir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    let root = tempdir.path().to_path_buf();
+    copy_tree_excluding(source_dir, &root, &[".git", ".vaire", "node_modules"])
+        .map_err(|e| format!("copying --external-dir into a tempdir: {e}"))?;
+    if !root.join("knowledge.toml").is_file() {
+        return Err(
+            "--external-dir has no knowledge.toml at its root (not a vaire package)".to_string(),
+        );
+    }
+    Ok(CorpusBuild::new(tempdir, Vec::new()))
+}
+
+fn copy_tree_excluding(src: &Path, dest: &Path, exclude_dirnames: &[&str]) -> io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if exclude_dirnames
+                .iter()
+                .any(|ex| entry.file_name().to_str() == Some(ex))
+            {
+                continue;
+            }
+            copy_tree_excluding(&entry.path(), &dest.join(&name), exclude_dirnames)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), dest.join(&name))?;
+        }
+        // Symlinks are deliberately skipped: never follow a link out of the source package.
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------
+// scale — deterministic synthetic corpus for latency (and the issue #52 adversarial case)
+// ---------------------------------------------------------------------------------
+
+/// Fixed seed: every `scale` run (any machine, any branch) generates byte-identical text.
+pub const SCALE_SEED: u64 = 0x5EED_1E5A_11A5_5CA1;
+
+const VOCAB_SIZE: usize = 20_000;
+const ZIPF_EXPONENT: f64 = 1.0;
+const STOPWORD_PROB: f64 = 0.35;
+const N_NEEDLES: usize = 30;
+const NEEDLE_DOCS_PER_NEEDLE: usize = 3;
+const N_LATENCY_QUERIES: usize = 30;
+
+const STOPWORDS: &[&str] = &[
+    "the", "of", "and", "a", "to", "in", "is", "you", "that", "it", "he", "was", "for", "on",
+    "are", "as", "with", "his", "they", "i", "at", "be", "this", "have", "from", "or", "one",
+    "had", "by", "word", "but", "not", "what", "all", "were", "we", "when", "your", "can", "said",
+];
+
+const ONSETS: &[&str] = &[
+    "b", "c", "d", "f", "g", "h", "j", "k", "l", "m", "n", "p", "r", "s", "t", "v", "w", "z", "th",
+    "sh", "ch", "br", "cr", "dr", "fr", "gr", "pr", "tr", "st", "sl", "sp", "gl", "pl", "cl", "bl",
+];
+const VOWELS: &[&str] = &["a", "e", "i", "o", "u", "ai", "ea", "oo", "ou", "ie"];
+const CODAS: &[&str] = &["", "n", "r", "s", "t", "d", "m", "l", "ng", "k"];
+
+/// A small, fully deterministic PRNG: SplitMix64 derives the seed state, xorshift64* is the
+/// stream generator. No external `rand` dependency — this benchmark is std-only.
+pub struct Rng {
+    state: u64,
+}
+
+impl Rng {
+    pub fn new(seed: u64) -> Self {
+        let mut sm = seed;
+        let mut splitmix_next = move || {
+            sm = sm.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = sm;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        let mut state = splitmix_next();
+        if state == 0 {
+            state = 0x9E37_79B9_7F4A_7C15; // xorshift's one forbidden state
+        }
+        Rng { state }
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.state = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn next_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+    }
+
+    /// A uniform value in `0..n` (`0` when `n == 0`, so callers on possibly-empty
+    /// collections never panic).
+    pub fn gen_range(&mut self, n: usize) -> usize {
+        if n == 0 {
+            0
+        } else {
+            (self.next_u64() % n as u64) as usize
+        }
+    }
+}
+
+/// A cumulative-weight table for Zipf-like sampling over `0..n` by rank (rank 0 is most
+/// frequent).
+struct ZipfSampler {
+    cumulative: Vec<f64>,
+    total: f64,
+}
+
+impl ZipfSampler {
+    fn new(n: usize, exponent: f64) -> Self {
+        let mut cumulative = Vec::with_capacity(n);
+        let mut acc = 0.0;
+        for rank in 1..=n.max(1) {
+            acc += 1.0 / (rank as f64).powf(exponent);
+            cumulative.push(acc);
+        }
+        ZipfSampler {
+            cumulative,
+            total: acc,
+        }
+    }
+
+    fn sample(&self, rng: &mut Rng) -> usize {
+        let target = rng.next_f64() * self.total;
+        match self
+            .cumulative
+            .binary_search_by(|c| c.partial_cmp(&target).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            Ok(i) => i,
+            Err(i) => i.min(self.cumulative.len() - 1),
+        }
+    }
+}
+
+/// The synthetic vocabulary: pronounceable words, Zipf-sampled by rank.
+struct Vocab {
+    words: Vec<String>,
+    zipf: ZipfSampler,
+}
+
+impl Vocab {
+    fn generate(rng: &mut Rng, size: usize) -> Self {
+        let mut seen = HashSet::with_capacity(size * 2);
+        let mut words = Vec::with_capacity(size);
+        let mut attempts = 0usize;
+        while words.len() < size && attempts < size * 50 {
+            attempts += 1;
+            let w = gen_pronounceable_word(rng);
+            if w.len() >= 3 && seen.insert(w.clone()) {
+                words.push(w);
+            }
+        }
+        let zipf = ZipfSampler::new(words.len(), ZIPF_EXPONENT);
+        Vocab { words, zipf }
+    }
+
+    /// One Zipf-weighted word.
+    fn sample<'a>(&'a self, rng: &mut Rng) -> &'a str {
+        &self.words[self.zipf.sample(rng)]
+    }
+
+    /// A uniformly-chosen word from the *mid-frequency* rank band — common enough to read
+    /// as ordinary vocabulary, not so common it collides with filler noise. Used for needle
+    /// phrases, which must stay distinctive.
+    fn sample_mid_frequency(&self, rng: &mut Rng) -> &str {
+        let lo = 200.min(self.words.len().saturating_sub(1));
+        let hi = 3000.min(self.words.len()).max(lo + 1);
+        &self.words[lo + rng.gen_range(hi - lo)]
+    }
+}
+
+fn gen_pronounceable_word(rng: &mut Rng) -> String {
+    let syllables = 1 + rng.gen_range(3); // 1..=3
+    let mut w = String::new();
+    for i in 0..syllables {
+        w.push_str(ONSETS[rng.gen_range(ONSETS.len())]);
+        w.push_str(VOWELS[rng.gen_range(VOWELS.len())]);
+        if i + 1 == syllables || rng.gen_range(4) == 0 {
+            w.push_str(CODAS[rng.gen_range(CODAS.len())]);
+        }
+    }
+    w
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// A run of Zipf/stopword-mixed words, formatted as sentences of ~6-14 words.
+fn gen_body_words(rng: &mut Rng, vocab: &Vocab, n_words: usize) -> Vec<String> {
+    (0..n_words)
+        .map(|_| {
+            if rng.next_f64() < STOPWORD_PROB {
+                STOPWORDS[rng.gen_range(STOPWORDS.len())].to_string()
+            } else {
+                vocab.sample(rng).to_string()
+            }
+        })
+        .collect()
+}
+
+fn words_to_prose(rng: &mut Rng, words: &[String]) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while i < words.len() {
+        let len = 6 + rng.gen_range(9); // 6..=14
+        let end = (i + len).min(words.len());
+        let mut sentence = words[i..end].join(" ");
+        if let Some(first_byte_len) = sentence.chars().next().map(char::len_utf8) {
+            let (head, tail) = sentence.split_at(first_byte_len);
+            sentence = head.to_uppercase() + tail;
+        }
+        out.push_str(&sentence);
+        out.push_str(". ");
+        i = end;
+    }
+    out.trim_end().to_string()
+}
+
+struct GeneratedNode {
+    id: String,
+    node_type: &'static str,
+    name: String,
+    rel_path: String,
+    /// `(heading, body)` per `##` section.
+    sections: Vec<(String, String)>,
+}
+
+fn write_generated_node(root: &Path, node: &GeneratedNode) -> io::Result<()> {
+    let mut body = String::new();
+    for (heading, text) in &node.sections {
+        body.push_str("## ");
+        body.push_str(heading);
+        body.push_str("\n\n");
+        body.push_str(text);
+        body.push_str("\n\n");
+    }
+    write_frontmatter_node(
+        root,
+        &node.rel_path,
+        &node.id,
+        node.node_type,
+        &node.name,
+        &body,
+    )
+}
+
+/// A short concept node: 1-3 sections, ~50-300 words total.
+fn gen_concept(rng: &mut Rng, vocab: &Vocab, idx: usize) -> GeneratedNode {
+    let n_sections = 1 + rng.gen_range(3);
+    let total_words = 50 + rng.gen_range(251);
+    let words_per_section = (total_words / n_sections).max(5);
+    let name = (0..2 + rng.gen_range(2))
+        .map(|_| capitalize(vocab.sample(rng)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let sections = (0..n_sections)
+        .map(|_| {
+            let heading = capitalize(vocab.sample(rng));
+            let words = gen_body_words(rng, vocab, words_per_section);
+            (heading, words_to_prose(rng, &words))
+        })
+        .collect();
+    GeneratedNode {
+        id: format!("c-{idx:06}"),
+        node_type: "concept",
+        name,
+        rel_path: format!("generated/scale/concepts/c-{idx:06}.md"),
+        sections,
+    }
+}
+
+/// A long document node: 15-40 sections, each independently ~200-600 words — the "long
+/// spec document" side of issue #52.
+fn gen_document(rng: &mut Rng, vocab: &Vocab, idx: usize) -> GeneratedNode {
+    let n_sections = 15 + rng.gen_range(26);
+    let name = (0..2 + rng.gen_range(3))
+        .map(|_| capitalize(vocab.sample(rng)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let sections = (0..n_sections)
+        .map(|_| {
+            let heading = capitalize(vocab.sample(rng));
+            let word_count = 200 + rng.gen_range(401);
+            let words = gen_body_words(rng, vocab, word_count);
+            (heading, words_to_prose(rng, &words))
+        })
+        .collect();
+    GeneratedNode {
+        id: format!("d-{idx:04}"),
+        node_type: "document",
+        name,
+        rel_path: format!("generated/scale/documents/d-{idx:04}.md"),
+        sections,
+    }
+}
+
+/// A planted "needle": a short concept node whose `name` is a distinctive 2-3 word
+/// mid-frequency phrase, repeated several times in its own (short) body. Returns the node
+/// plus the phrase's words (lowercase, as generated) for query text + adversarial injection.
+fn gen_needle(
+    rng: &mut Rng,
+    vocab: &Vocab,
+    idx: usize,
+    used_phrases: &mut HashSet<String>,
+) -> (GeneratedNode, Vec<String>) {
+    let phrase_words = loop {
+        let n = 2 + rng.gen_range(2); // 2..=3
+        let words: Vec<String> = (0..n)
+            .map(|_| vocab.sample_mid_frequency(rng).to_string())
+            .collect();
+        let key = words.join(" ");
+        if used_phrases.insert(key) {
+            break words;
+        }
+    };
+    let name = phrase_words
+        .iter()
+        .map(|w| capitalize(w))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let n_sections = 1 + rng.gen_range(3);
+    let total_words = 50 + rng.gen_range(251);
+    let words_per_section = (total_words / n_sections).max(20);
+    let sections = (0..n_sections)
+        .map(|s| {
+            let mut words = gen_body_words(rng, vocab, words_per_section);
+            // Repeat the phrase several times within the section — the needle signal a
+            // short, relevant node should win on, once ranking stops just summing raw term
+            // counts over a whole (possibly huge) file.
+            let repeats = 4 + rng.gen_range(5); // 4..=8
+            for _ in 0..repeats {
+                let pos = rng.gen_range(words.len() + 1);
+                for (k, w) in phrase_words.iter().enumerate() {
+                    let at = (pos + k).min(words.len());
+                    words.insert(at, w.clone());
+                }
+            }
+            let heading = if s == 0 {
+                name.clone()
+            } else {
+                capitalize(vocab.sample(rng))
+            };
+            (heading, words_to_prose(rng, &words))
+        })
+        .collect();
+
+    (
+        GeneratedNode {
+            id: format!("needle-{idx:02}"),
+            node_type: "concept",
+            name,
+            rel_path: format!("generated/scale/needles/needle-{idx:02}.md"),
+            sections,
+        },
+        phrase_words,
+    )
+}
+
+/// Inject a needle's phrase words many times, spread across a few randomly-chosen long
+/// documents — the adversarial half of issue #52: raw term-count summed over every section
+/// of a (large) file can dwarf a short, genuinely relevant concept's score.
+fn inject_needle_into_documents(
+    rng: &mut Rng,
+    documents: &mut [GeneratedNode],
+    phrase_words: &[String],
+) {
+    if documents.is_empty() {
+        return;
+    }
+    let mut chosen: HashSet<usize> = HashSet::new();
+    let target = NEEDLE_DOCS_PER_NEEDLE.min(documents.len());
+    while chosen.len() < target {
+        chosen.insert(rng.gen_range(documents.len()));
+    }
+    // `HashSet`'s iteration order is randomized per-instance (not just per-process) — every
+    // build must be deterministic, and the loop below both mutates by index *and* advances
+    // `rng`, so the order visited has to be fixed independent of hashing.
+    let mut chosen: Vec<usize> = chosen.into_iter().collect();
+    chosen.sort_unstable();
+    let phrase = phrase_words.join(" ");
+    for di in chosen {
+        let doc = &mut documents[di];
+        if doc.sections.is_empty() {
+            continue;
+        }
+        let occurrences = 15 + rng.gen_range(16); // 15..=30
+        for _ in 0..occurrences {
+            let si = rng.gen_range(doc.sections.len());
+            let body = &mut doc.sections[si].1;
+            body.push(' ');
+            body.push_str(&phrase);
+            body.push('.');
+        }
+    }
+}
+
+const SCALE_MANIFEST: &str = "name = \"search-bench-scale\"\nversion = \"0.1.0\"\ninclude = [\"**/*.md\"]\ntypes = [\"concept\", \"document\"]\n";
+
+/// Build the `scale` corpus: `n_nodes` synthetic nodes (~85% short concepts including 30
+/// planted needles, ~15% long documents), plus the queries the plant implies (one `name`
+/// query per needle, and `N_LATENCY_QUERIES` unjudged random-text queries).
+pub fn build_scale(n_nodes: usize, seed: u64) -> Result<(CorpusBuild, Vec<Query>), String> {
+    let n_nodes = n_nodes.max(1);
+    let tempdir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    let root = tempdir.path().to_path_buf();
+    let mut rng = Rng::new(seed);
+
+    let vocab = Vocab::generate(&mut rng, VOCAB_SIZE);
+
+    let n_needles = N_NEEDLES.min(n_nodes);
+    let n_documents = ((n_nodes * 15) / 100).clamp(1, n_nodes.saturating_sub(n_needles).max(1));
+    let n_concepts_total = n_nodes.saturating_sub(n_documents).max(n_needles);
+    let n_filler_concepts = n_concepts_total.saturating_sub(n_needles);
+
+    let mut documents: Vec<GeneratedNode> = (0..n_documents)
+        .map(|i| gen_document(&mut rng, &vocab, i))
+        .collect();
+
+    let mut used_phrases = HashSet::new();
+    let mut needles = Vec::with_capacity(n_needles);
+    let mut needle_phrases = Vec::with_capacity(n_needles);
+    for i in 0..n_needles {
+        let (node, phrase) = gen_needle(&mut rng, &vocab, i, &mut used_phrases);
+        needles.push(node);
+        needle_phrases.push(phrase);
+    }
+    for phrase in &needle_phrases {
+        inject_needle_into_documents(&mut rng, &mut documents, phrase);
+    }
+
+    let filler: Vec<GeneratedNode> = (0..n_filler_concepts)
+        .map(|i| gen_concept(&mut rng, &vocab, i))
+        .collect();
+
+    for node in documents.iter().chain(needles.iter()).chain(filler.iter()) {
+        write_generated_node(&root, node).map_err(|e| format!("writing {}: {e}", node.id))?;
+    }
+
+    std::fs::write(root.join("knowledge.toml"), SCALE_MANIFEST)
+        .map_err(|e| format!("writing knowledge.toml: {e}"))?;
+
+    let mut queries = Vec::with_capacity(n_needles + N_LATENCY_QUERIES);
+    for (node, phrase) in needles.iter().zip(&needle_phrases) {
+        let mut relevant = BTreeMap::new();
+        relevant.insert(format!("concept:{}", node.id), 2u8);
+        queries.push(Query {
+            id: format!("scale-needle-{}", node.id),
+            text: phrase.join(" "),
+            category: "name".to_string(),
+            type_filter: None,
+            note: Some("planted needle (issue #52: short concept vs. long document)".to_string()),
+            relevant,
+        });
+    }
+    for i in 0..N_LATENCY_QUERIES {
+        let n_words = 1 + rng.gen_range(6);
+        let text = (0..n_words)
+            .map(|_| vocab.sample(&mut rng).to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        queries.push(Query {
+            id: format!("scale-latency-{i:02}"),
+            text,
+            category: "latency".to_string(),
+            type_filter: None,
+            note: None,
+            relevant: BTreeMap::new(),
+        });
+    }
+
+    let notices = vec![format!(
+        "scale corpus: {n_documents} document node(s), {} concept node(s) \
+         ({n_needles} needle(s) + {n_filler_concepts} filler), seed={seed:#x}",
+        n_needles + n_filler_concepts
+    )];
+
+    Ok((CorpusBuild::new(tempdir, notices), queries))
+}
+
+// `benches/search/main.rs` builds this file into a `harness = false` bench target, where
+// `#[test]` items are compiled (cfg(test) is set for bench targets regardless of `harness`)
+// but are not wired up as usage roots the way a real `--test` binary treats them — only
+// `cargo test --test search_relevance` (which also includes this file) actually runs these.
+// That harmless asymmetry makes rustc see some test-only helpers as unused in the bench
+// build; allow it here rather than fight it.
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_leading_frontmatter_removes_a_generic_yaml_block() {
+        let src = "---\ntitle: X\nstatus: draft\n---\n\n# Heading\n\nBody.\n";
+        assert_eq!(strip_leading_frontmatter(src), "\n# Heading\n\nBody.\n");
+    }
+
+    #[test]
+    fn strip_leading_frontmatter_is_a_noop_without_a_fence() {
+        let src = "# Heading\n\nBody.\n";
+        assert_eq!(strip_leading_frontmatter(src), src);
+    }
+
+    #[test]
+    fn strip_leading_frontmatter_is_a_noop_without_a_closing_fence() {
+        let src = "---\ntitle: X\nno closing fence\n";
+        assert_eq!(strip_leading_frontmatter(src), src);
+    }
+
+    #[test]
+    fn rng_is_deterministic_for_a_fixed_seed() {
+        let mut a = Rng::new(42);
+        let mut b = Rng::new(42);
+        let seq_a: Vec<u64> = (0..20).map(|_| a.next_u64()).collect();
+        let seq_b: Vec<u64> = (0..20).map(|_| b.next_u64()).collect();
+        assert_eq!(seq_a, seq_b);
+    }
+
+    #[test]
+    fn gen_range_never_panics_on_zero() {
+        let mut rng = Rng::new(1);
+        assert_eq!(rng.gen_range(0), 0);
+    }
+
+    #[test]
+    fn vocab_generates_the_requested_size_and_is_deterministic() {
+        let mut r1 = Rng::new(SCALE_SEED);
+        let v1 = Vocab::generate(&mut r1, 500);
+        let mut r2 = Rng::new(SCALE_SEED);
+        let v2 = Vocab::generate(&mut r2, 500);
+        assert_eq!(v1.words.len(), 500);
+        assert_eq!(v1.words, v2.words);
+    }
+
+    #[test]
+    fn build_scale_is_deterministic_across_two_runs() {
+        let (b1, q1) = build_scale(120, SCALE_SEED).unwrap();
+        let (b2, q2) = build_scale(120, SCALE_SEED).unwrap();
+        let f1 = walk_files(&b1.root).unwrap();
+        let f2 = walk_files(&b2.root).unwrap();
+        assert_eq!(f1.len(), f2.len());
+        for (p1, p2) in f1.iter().zip(&f2) {
+            let rel1 = p1.strip_prefix(&b1.root).unwrap();
+            let rel2 = p2.strip_prefix(&b2.root).unwrap();
+            assert_eq!(rel1, rel2);
+            assert_eq!(
+                std::fs::read_to_string(p1).unwrap(),
+                std::fs::read_to_string(p2).unwrap()
+            );
+        }
+        assert_eq!(q1.len(), q2.len());
+        assert_eq!(q1[0].text, q2[0].text);
+        // 30 needle (`name`) queries + 30 unjudged `latency` queries.
+        assert_eq!(q1.iter().filter(|q| q.is_judged()).count(), N_NEEDLES);
+        assert_eq!(q1.len(), N_NEEDLES + N_LATENCY_QUERIES);
+    }
+
+    #[test]
+    fn build_scale_plants_every_needle_as_a_real_file() {
+        let (build, queries) = build_scale(100, SCALE_SEED).unwrap();
+        for q in queries.iter().filter(|q| q.is_judged()) {
+            let id = q.primary_expected_id().unwrap();
+            let (_, slug) = id.split_once(':').unwrap();
+            let path = build
+                .root
+                .join(format!("generated/scale/needles/{slug}.md"));
+            assert!(path.is_file(), "expected {} to exist", path.display());
+        }
+    }
+}

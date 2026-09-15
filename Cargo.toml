@@ -21,6 +21,12 @@ required-features = ["index"]
 name = "vaire"
 path = "src/lib.rs"
 
+[[bench]]
+name = "search"
+path = "benches/search/main.rs"
+harness = false
+required-features = ["index"]
+
 [features]
 default = ["index", "pack"]
 
