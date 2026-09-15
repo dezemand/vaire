@@ -251,8 +251,12 @@ vaire search <query> [--type <T>] [--scope <container-id>] [--limit <N>]
   prefix omitted. Without `--scope`, scoped nodes show their full `<scope>/type:id`. (`path`
   is always the full package-root-relative path.)
 - `--limit <N>` — max results (default: `10`).
-- Ranking: FTS + aliases first, vectors for recall (design.md §9). Sorted by descending
-  score; ties broken by (qualified) `id` ascending for determinism.
+- Ranking: three signals, each ranked on its own and then fused by rank (design.md §9) —
+  **lexical** BM25 over each `##` section, headings weighted above body text, with a file
+  scoring by its best section so that length alone earns nothing; **name**, the query graded
+  against each node's `name:`, `aliases:` and id, where an exact match ranks first and a
+  partial one adds weight; and **vector** similarity of the nearest sections. Sorted by
+  descending score; ties broken by (qualified) `id` ascending for determinism.
 - **Cross-package** (§6.5): the query runs over this package **and its linked dependency
   closure** — that is the selective-consumption payoff: what you depend on is part of
   your knowledge. The query is embedded once and reused per member; a dependency indexed
@@ -283,8 +287,10 @@ JSON:
 }
 ```
 
-`anchors` point the caller at the relevant section(s); the caller opens the file at `line`
-for depth. `score` is an opaque relative rank, not a calibrated probability.
+`anchors` point the caller at the relevant section(s), best-matching first; the caller opens
+the file at `line` for depth. `score` is an opaque relative rank, not a calibrated
+probability: it is derived from rank positions, so compare scores within one result list,
+not across queries.
 
 ### 3.5 `vaire unresolved`
 
@@ -1673,11 +1679,13 @@ The rules:
   with none it behaves as `--all-packages` over the catalog. `--scope` is refused, since a
   scope is a container id relative to a package.
 
-Ranking across packages is deliberately unclever: results are merged and ranked by score,
-and scores are only comparable because every member index is built by the same code with
-the same scoring. When registries join the fan-out, remote scores will *not* be
-comparable — that is where grouping by source and refusing to normalize arrives, with the
-answering source labelled.
+Ranking across packages is deliberately unclever: results are merged and ranked by score.
+A score is derived from how high a hit ranks in its own member's lexical, name and vector
+rankings, so results from different members compare by position, not by absolute match
+strength — which is only meaningful because every member index is built and ranked by the
+same code. When registries join the fan-out, remote scores will *not* be comparable — that
+is where grouping by source and refusing to normalize arrives, with the answering source
+labelled.
 
 ## 7. Exit codes
 

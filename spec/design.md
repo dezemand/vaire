@@ -468,14 +468,20 @@ rebuilds from scratch (the index is disposable), and a read against a mismatched
 rejected (exit `3`, "rebuild with `vaire index --full`") rather than querying an unexpected
 shape. `vaire status` reports the version.
 
-**Search — FTS first, vectors for recall.** Three retrieval jobs want different things.
+**Search — three signals, fused by rank.** Three retrieval jobs want different things.
 *Backlinks and traversal* are pure graph — no vectors. *Reference resolution* (§8) matches
 short descriptors to entities, where the `aliases:` list and FTS are high-precision and
 bare embeddings are weak ("the broker thing" embeds to mush) — so resolution is **alias +
 FTS first, embeddings as backup.** *Open-ended retrieval* is where vectors earn their
-place, because the caller's phrasing will not lexically match the records. So vectors are
-the recall layer behind FTS-and-aliases, primary only for open search — not the headline
-mechanism.
+place, because the caller's phrasing will not lexically match the records. So open search
+ranks three signals separately — **lexical** (BM25 per section; a file scores by its best
+section), **name** (the query graded against `name:`, `aliases:` and the id; an exact match
+ranks first) and **vector** (the nearest sections, with only a low similarity floor) — and
+**fuses them by rank** instead of adding raw scores. Adding scores let whichever signal
+produced the biggest numbers decide: a term count summed over every section made long
+documents outrank the node a query was about, and a high cosine threshold meant vectors never
+moved a result (issue #52). Fused by rank, each signal's vote is bounded, so the precision of
+names and FTS and the recall of vectors both count.
 
 **Embeddings — per section, local, cached.** Sections split on headings (`##`); each chunk
 is embedded; the **file is the returned unit**. Vectors live in the *same* `.vaire/index.db`
@@ -636,9 +642,10 @@ Kept with their reasons, because decisions without reasons get undone.
   entity-vs-record. Forces two integrity checks at index time: ID uniqueness and reference
   resolvability. Trade-off accepted: `project:` and the `type:` field become the
   authoritative sources of scope and type (no longer inferable from path).
-- **Hybrid search; embeddings local + cached.** Native FTS + the `aliases:` list carry
-  precision (and most of resolution); vectors are the recall layer, primary only for open
-  retrieval. Vectors live in the same Turso db (no separate store). Embedding is pluggable and local
+- **Hybrid search, fused by rank; embeddings local + cached.** Open search ranks lexical
+  (native FTS, BM25 per section), name/alias and vector signals separately and fuses them by
+  rank, so no signal's raw scale can drown another; resolution stays alias + FTS first.
+  Vectors live in the same Turso db (no separate store). Embedding is pluggable and local
   by default (data egress, offline, re-embed-on-reindex), with a content-hash cache so
   rebuilds stay cheap.
 - **Typed IDs — `type:id`** (`person:`, `department:`, `method:`, `system:`, `event:`,
