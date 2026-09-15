@@ -19,6 +19,14 @@ uses [Semantic Versioning](https://semver.org).
   OpenAI embeddings), and queries whose top hit is an unrelated long document drop from 87%
   to about 7%. `score` stays an opaque relative rank, now derived from rank positions.
 
+### Added
+- **`cargo bench --bench search`** — a search quality and latency benchmark: graded
+  relevance judgments (MRR@10, nDCG@10, Recall@10, Success@1/3, DocIntrusion@1), a public
+  corpus built from this repository's specs and skills, a deterministic 3000-node scale
+  corpus, optional corpora of your own with your own judgments, and cached provider vectors
+  so runs stay offline (`benches/search/README.md`). `tests/search_relevance.rs` holds CI to
+  relevance floors on the public corpus.
+
 ## [0.3.1] — 2026-09-13
 
 ### Added
