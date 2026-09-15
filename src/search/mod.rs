@@ -1593,6 +1593,99 @@ mod tests {
         }
     }
 
+    /// Insert a node and its sections directly, for tests that exercise the whole ranking
+    /// pipeline without a corpus on disk.
+    fn insert_node(
+        index: &Index,
+        id: &str,
+        node_type: &str,
+        alias_text: &str,
+        sections: &[(String, String)],
+    ) {
+        index
+            .execute(
+                "INSERT INTO nodes (id, type, path, frontmatter, package, alias_text)
+                 VALUES (?1, ?2, ?3, '{}', 'test', ?4)",
+                turso::params![id, node_type, format!("{id}.md"), alias_text],
+            )
+            .expect("insert node");
+        for (i, (heading, body)) in sections.iter().enumerate() {
+            index
+                .execute(
+                    "INSERT INTO sections (node_id, heading, line, body) VALUES (?1, ?2, ?3, ?4)",
+                    turso::params![id, heading.as_str(), (i as i64) * 10 + 1, body.as_str()],
+                )
+                .expect("insert section");
+        }
+    }
+
+    /// Issue #52's failure mode, end to end: a short node that is exactly what the query is
+    /// about must outrank a long, unrelated document that merely mentions the query's words
+    /// across many of its sections. Scoring by a sum of term hits over every section of a
+    /// file made the long document win both queries below.
+    #[test]
+    fn a_relevant_short_node_outranks_a_long_unrelated_document() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index =
+            Index::create_for_bulk_load(&dir.path().join("index.db")).expect("create index");
+        insert_node(
+            &index,
+            "principle:gate-the-rare-act",
+            "principle",
+            "gate the rare act",
+            &[(
+                String::new(),
+                "# Gate the rare act\n\nMinting a new entity is irreversible, so entity creation \
+                 is gated; everyday additive writes are not."
+                    .to_string(),
+            )],
+        );
+        let filler = "Flags, exit codes and output formats are listed with an example \
+                      invocation, the expected JSON shape and the human-readable rendering.";
+        let sections: Vec<(String, String)> = (0..40)
+            .map(|i| {
+                let body = if i % 2 == 0 {
+                    format!(
+                        "{filler} An entity can appear in an example here. Index creation \
+                         happens on demand. Nothing in this command is irreversible. A gate, \
+                         a rare case or an act of configuration is described once. {filler}"
+                    )
+                } else {
+                    format!("{filler} {filler}")
+                };
+                (format!("Command {i}"), body)
+            })
+            .collect();
+        insert_node(
+            &index,
+            "document:cli-spec",
+            "document",
+            "cli spec",
+            &sections,
+        );
+        index.ensure_fts_index().expect("build fts index");
+
+        let opts = SearchOpts {
+            limit: Some(10),
+            ..Default::default()
+        };
+        // The first query has no name match, so only lexical ranking can decide it; the
+        // second is the issue's own example, decided by the exact name match.
+        for query in ["irreversible entity creation", "gate the rare act"] {
+            let hits = search_prepared(&index, None, query, &opts).expect("search");
+            let ids: Vec<String> = hits.iter().map(|h| h.id.to_string()).collect();
+            assert!(
+                ids.iter().any(|id| id == "document:cli-spec"),
+                "{query:?}: the long document matches too, so this checks ranking, not recall: {ids:?}"
+            );
+            assert_eq!(
+                ids.first().map(String::as_str),
+                Some("principle:gate-the-rare-act"),
+                "{query:?}: the short node the query is about must rank first: {ids:?}"
+            );
+        }
+    }
+
     /// The uncapped shape (no `ORDER BY`/`LIMIT`) is the other verified `fts_score`
     /// pattern — [`lexical_candidates`]'s release fallback if the capped shape ever
     /// returns all-zero scores. Proves it also returns real, non-zero scores, and every
