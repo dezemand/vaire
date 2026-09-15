@@ -30,6 +30,14 @@ struct Cli {
     packages: usize,
     verbose: bool,
     compare: Option<(PathBuf, PathBuf)>,
+    corpus_task: Option<CorpusTask>,
+}
+
+/// `--unpack-corpus` / `--pack-corpus`: move the public corpus's authored nodes out of their
+/// archive into a directory to edit, and back.
+enum CorpusTask {
+    Unpack(PathBuf),
+    Pack(PathBuf),
 }
 
 const HELP: &str = "\
@@ -50,6 +58,8 @@ cargo bench --bench search -- [flags]
   --label <string>         report label (default: <branch>-<shortsha>, else unlabeled)
   --verbose                print the per-query Markdown table too
   --compare <base> <new>   print base -> new deltas from two JSON reports; builds nothing
+  --unpack-corpus <dir>    extract the public corpus's authored nodes into <dir> to edit them
+  --pack-corpus <dir>      pack <dir>'s .md files back into the public corpus archive
   -h, --help               print this message
 ";
 
@@ -66,6 +76,17 @@ fn main() {
     if let Some((base, new)) = &cli.compare {
         match run_compare(base, new) {
             Ok(md) => println!("{md}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if let Some(task) = &cli.corpus_task {
+        match run_corpus_task(task) {
+            Ok(done) => println!("{done}"),
             Err(e) => {
                 eprintln!("error: {e}");
                 std::process::exit(1);
@@ -95,6 +116,7 @@ fn parse_args(args: Vec<String>) -> Result<Cli, String> {
     let mut packages = 1usize;
     let mut verbose = false;
     let mut compare = None;
+    let mut corpus_task = None;
 
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
@@ -137,6 +159,14 @@ fn parse_args(args: Vec<String>) -> Result<Cli, String> {
                 let base = next_val(&mut it, "--compare")?;
                 let new = next_val(&mut it, "--compare")?;
                 compare = Some((PathBuf::from(base), PathBuf::from(new)));
+            }
+            "--unpack-corpus" => {
+                let dir = next_val(&mut it, "--unpack-corpus")?;
+                corpus_task = Some(CorpusTask::Unpack(PathBuf::from(dir)));
+            }
+            "--pack-corpus" => {
+                let dir = next_val(&mut it, "--pack-corpus")?;
+                corpus_task = Some(CorpusTask::Pack(PathBuf::from(dir)));
             }
             "-h" | "--help" => {
                 print!("{HELP}");
@@ -187,6 +217,7 @@ fn parse_args(args: Vec<String>) -> Result<Cli, String> {
         packages: packages.max(1),
         verbose,
         compare,
+        corpus_task,
     })
 }
 
@@ -225,6 +256,41 @@ fn run_compare(base_path: &std::path::Path, new_path: &std::path::Path) -> Resul
     let base = eval::report::read_json(base_path)?;
     let new = eval::report::read_json(new_path)?;
     Ok(eval::report::render_compare_markdown(&base, &new))
+}
+
+/// `--unpack-corpus` / `--pack-corpus` against the checked-in archive
+/// ([`eval::corpus::PUBLIC_NODES_ARCHIVE`]). Builds nothing.
+fn run_corpus_task(task: &CorpusTask) -> Result<String, String> {
+    let archive =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(eval::corpus::PUBLIC_NODES_ARCHIVE);
+    match task {
+        CorpusTask::Unpack(dir) => {
+            let occupied = std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some());
+            if occupied {
+                return Err(format!(
+                    "{} is not empty — unpack into a new or empty directory",
+                    dir.display()
+                ));
+            }
+            let count = eval::corpus::unpack_md_archive(&archive, dir)?;
+            Ok(format!(
+                "unpacked {count} node(s) from {} into {}",
+                archive.display(),
+                dir.display()
+            ))
+        }
+        CorpusTask::Pack(dir) => {
+            if !dir.is_dir() {
+                return Err(format!("{} is not a directory", dir.display()));
+            }
+            let count = eval::corpus::pack_md_tree(dir, &archive)?;
+            Ok(format!(
+                "packed {count} node(s) from {} into {}",
+                dir.display(),
+                archive.display()
+            ))
+        }
+    }
 }
 
 fn run(cli: &Cli) -> Result<(), String> {

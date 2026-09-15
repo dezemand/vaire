@@ -93,14 +93,19 @@ types = ["cli", "command", "concept", "principle", "decision", "component", "fin
 scoped_types_whitelist = ["command"]
 "#;
 
-/// Build the `public` corpus: authored fixture nodes (if the data dir has any yet) plus
-/// generated `document` nodes from this repo's own long-form docs and `skill` nodes from
-/// `skills/*/SKILL.md` — the adversarial mix issue #52 is about (long specs vs. short
-/// concepts/skills).
+/// The `public` corpus's hand-authored nodes, relative to the vaire repo root: one archive
+/// written by [`pack_md_tree`] instead of a directory of Markdown files, so the fixture is a
+/// single file in version control rather than ~90 diffs. `--unpack-corpus`/`--pack-corpus`
+/// move it to a directory to edit and back (README, "Editing the public corpus").
+pub const PUBLIC_NODES_ARCHIVE: &str = "benches/search/data/public/nodes.tar.gz";
+
+/// Build the `public` corpus: authored fixture nodes (unpacked from
+/// [`PUBLIC_NODES_ARCHIVE`]) plus generated `document` nodes from this repo's own long-form
+/// docs and `skill` nodes from `skills/*/SKILL.md` — the adversarial mix issue #52 is about
+/// (long specs vs. short concepts/skills).
 ///
 /// `nodes_dir_override` lets a caller (the smoke-test acceptance path) point `nodes/` at an
-/// arbitrary directory instead of `benches/search/data/public/nodes`; `main.rs` never uses
-/// it for a real run.
+/// arbitrary directory instead of the archive; `main.rs` never uses it for a real run.
 pub fn build_public(
     vaire_repo_root: &Path,
     nodes_dir_override: Option<&Path>,
@@ -109,18 +114,23 @@ pub fn build_public(
     let root = tempdir.path().to_path_buf();
     let mut notices = Vec::new();
 
-    let nodes_src = nodes_dir_override
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| vaire_repo_root.join("benches/search/data/public/nodes"));
-    let authored = if nodes_src.is_dir() {
-        copy_md_tree(&nodes_src, &root.join("nodes"))?
-    } else {
-        0
+    let nodes_dest = root.join("nodes");
+    let authored = match nodes_dir_override {
+        Some(dir) if dir.is_dir() => copy_md_tree(dir, &nodes_dest)?,
+        Some(_) => 0,
+        None => {
+            let archive = vaire_repo_root.join(PUBLIC_NODES_ARCHIVE);
+            if archive.is_file() {
+                unpack_md_archive(&archive, &nodes_dest)?
+            } else {
+                0
+            }
+        }
     };
     if authored == 0 {
         notices.push(
-            "public corpus: benches/search/data/public/nodes has no authored .md files yet — \
-             building from generated documents/skills only"
+            "public corpus: no authored .md nodes found — building from generated \
+             documents/skills only"
                 .to_string(),
         );
     }
@@ -260,6 +270,121 @@ fn walk_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     }
     out.sort();
     Ok(out)
+}
+
+/// Pack every `.md` file under `src` into a gzipped tar at `archive`, each entry named by its
+/// `/`-separated path relative to `src`. Deterministic, like `vaire pack`: entries in sorted
+/// order with pinned metadata (mode 0644, uid/gid 0, mtime 0) under a gzip stream with no
+/// timestamp and a pinned level — the same files always give the same bytes, so packing an
+/// unchanged tree leaves no diff. Returns how many files were packed; refuses a tree with
+/// none, which is far more likely a wrong path than an intentionally empty corpus.
+pub fn pack_md_tree(src: &Path, archive: &Path) -> Result<usize, String> {
+    let files = walk_files(src).map_err(|e| format!("walking {}: {e}", src.display()))?;
+    let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for path in files {
+        if !is_packable_md(&path) {
+            continue;
+        }
+        let rel = path.strip_prefix(src).expect("walked under src");
+        let name = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+        entries.insert(name, bytes);
+    }
+    if entries.is_empty() {
+        return Err(format!("no .md files under {} to pack", src.display()));
+    }
+
+    if let Some(parent) = archive.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let file = std::fs::File::create(archive)
+        .map_err(|e| format!("creating {}: {e}", archive.display()))?;
+    // Pinned, not `default()`: the compression level is part of "same bytes".
+    let gz = flate2::GzBuilder::new()
+        .mtime(0)
+        .write(file, flate2::Compression::new(6));
+    let mut tar = tar::Builder::new(gz);
+    for (name, bytes) in &entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_uid(0);
+        header.set_gid(0);
+        // `append_data` sets the path (GNU long names included) and the checksum.
+        tar.append_data(&mut header, name, bytes.as_slice())
+            .map_err(|e| format!("packing {name}: {e}"))?;
+    }
+    let gz = tar
+        .into_inner()
+        .map_err(|e| format!("finishing {}: {e}", archive.display()))?;
+    gz.finish()
+        .map_err(|e| format!("finishing {}: {e}", archive.display()))?;
+    Ok(entries.len())
+}
+
+/// Unpack the `.md` entries of an archive written by [`pack_md_tree`] into `dest`, returning
+/// how many were written. Only regular files at plain relative paths are accepted: an
+/// absolute path or a `..` would write outside `dest`, and a link is an escape that survives
+/// extraction. Directory entries are skipped (parents are created as needed).
+pub fn unpack_md_archive(archive: &Path, dest: &Path) -> Result<usize, String> {
+    let file =
+        std::fs::File::open(archive).map_err(|e| format!("opening {}: {e}", archive.display()))?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let entries = tar
+        .entries()
+        .map_err(|e| format!("reading {}: {e}", archive.display()))?;
+    let mut count = 0;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| format!("reading {}: {e}", archive.display()))?;
+        let kind = entry.header().entry_type();
+        if kind.is_dir() {
+            continue;
+        }
+        let path = entry
+            .path()
+            .map_err(|e| format!("reading an entry name in {}: {e}", archive.display()))?
+            .into_owned();
+        let plain = !path.as_os_str().is_empty()
+            && path
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !kind.is_file() || !plain {
+            return Err(format!(
+                "{}: refusing entry {} (only regular files at plain relative paths)",
+                archive.display(),
+                path.display()
+            ));
+        }
+        if !is_packable_md(&path) {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes)
+            .map_err(|e| format!("reading {} from {}: {e}", path.display(), archive.display()))?;
+        let target = dest.join(&path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&target, bytes).map_err(|e| format!("writing {}: {e}", target.display()))?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// A Markdown file that belongs in the corpus archive: a `.md` extension, and not a macOS
+/// `._*` AppleDouble sidecar (which `tar` on macOS writes next to the files it archives).
+fn is_packable_md(path: &Path) -> bool {
+    let is_md = path.extension().and_then(|e| e.to_str()) == Some("md");
+    let sidecar = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("._"));
+    is_md && !sidecar
 }
 
 // ---------------------------------------------------------------------------------
@@ -944,5 +1069,77 @@ mod tests {
                 .join(format!("generated/scale/needles/{slug}.md"));
             assert!(path.is_file(), "expected {} to exist", path.display());
         }
+    }
+
+    fn write_file(root: &Path, rel: &str, text: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn packing_the_md_tree_is_deterministic_and_round_trips() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(src.path(), "concept/b.md", "---\nid: b\n---\nB\n");
+        write_file(src.path(), "concept/a.md", "---\nid: a\n---\nA\n");
+        write_file(src.path(), "decision/nested/c.md", "C\n");
+        write_file(src.path(), "notes.txt", "not a node\n");
+        write_file(src.path(), "concept/._a.md", "AppleDouble sidecar\n");
+
+        let out = tempfile::tempdir().unwrap();
+        let first = out.path().join("first.tar.gz");
+        let second = out.path().join("second.tar.gz");
+        assert_eq!(pack_md_tree(src.path(), &first).unwrap(), 3);
+        assert_eq!(pack_md_tree(src.path(), &second).unwrap(), 3);
+        assert_eq!(
+            std::fs::read(&first).unwrap(),
+            std::fs::read(&second).unwrap(),
+            "the same files must pack to the same bytes"
+        );
+
+        let dest = tempfile::tempdir().unwrap();
+        assert_eq!(unpack_md_archive(&first, dest.path()).unwrap(), 3);
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("concept/a.md")).unwrap(),
+            "---\nid: a\n---\nA\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("decision/nested/c.md")).unwrap(),
+            "C\n"
+        );
+        assert!(!dest.path().join("notes.txt").exists());
+        assert!(!dest.path().join("concept/._a.md").exists());
+    }
+
+    #[test]
+    fn packing_refuses_a_tree_without_markdown() {
+        let src = tempfile::tempdir().unwrap();
+        write_file(src.path(), "notes.txt", "not a node\n");
+        let out = tempfile::tempdir().unwrap();
+        assert!(pack_md_tree(src.path(), &out.path().join("empty.tar.gz")).is_err());
+    }
+
+    #[test]
+    fn unpacking_refuses_an_entry_that_climbs_out() {
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("climbs.tar.gz");
+        let gz = flate2::GzBuilder::new().write(
+            std::fs::File::create(&archive).unwrap(),
+            flate2::Compression::new(6),
+        );
+        let mut tar = tar::Builder::new(gz);
+        let body = b"escaped\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        // `append_data` itself refuses `..`, so write the name into the header directly.
+        header.as_gnu_mut().unwrap().name[..11].copy_from_slice(b"../evil.md\0");
+        header.set_cksum();
+        tar.append(&header, &body[..]).unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+
+        let dest = out.path().join("dest");
+        assert!(unpack_md_archive(&archive, &dest).is_err());
+        assert!(!out.path().join("evil.md").exists());
     }
 }

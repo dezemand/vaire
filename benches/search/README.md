@@ -62,17 +62,18 @@ Select with `--corpus public|external|scale`, comma-separated, or `all` (default
 
 The corpus checked into this repo, built from:
 
-- Every `.md` under `benches/search/data/public/nodes/` (preserved relative paths) —
-  hand-authored fixture nodes with real judgments.
+- The hand-authored fixture nodes with real judgments, packed into
+  `benches/search/data/public/nodes.tar.gz` — one file in version control instead of ~90
+  Markdown diffs — and unpacked into the corpus, relative paths preserved, at run time.
 - Generated `document` nodes from this repo's own long-form docs (`spec/design.md`,
   `spec/cli.md`, `spec/registry.md`, `spec/manifest.md`, `README.md`, `CHANGELOG.md`) —
   any leading `---`-fenced frontmatter in the source is stripped and replaced with vaire
   frontmatter (`id`, `type: document`, `name`).
 - Generated `skill` nodes, one per `skills/<dir>/SKILL.md`.
 
-If `benches/search/data/public/nodes/` is missing or empty, the corpus is still built (from
-the generated documents/skills only) and a notice is printed — useful before the fixture
-data exists yet, and for the `--queries` smoke-test flow below.
+If that archive is missing or holds no `.md` files, the corpus is still built (from the
+generated documents/skills only) and a notice is printed — useful for the `--queries`
+smoke-test flow below.
 
 Queries: `benches/search/data/public/queries.toml` (see the format below). If that file
 doesn't exist yet, the corpus still builds and indexes; quality metrics are skipped with a
@@ -81,6 +82,22 @@ printed notice (latency reports zero queries).
 ```
 cargo bench --bench search -- --corpus public
 ```
+
+#### Editing the public corpus
+
+The authored nodes are one archive, so edit them in a directory and pack them back:
+
+```
+cargo bench --bench search -- --unpack-corpus /tmp/public-nodes
+# edit, add or remove .md files under /tmp/public-nodes
+cargo bench --bench search -- --pack-corpus /tmp/public-nodes
+```
+
+Packing is deterministic, like `vaire pack`: sorted entries, pinned metadata and no gzip
+timestamp, so the same files always give the same bytes and packing an unchanged tree
+leaves no diff. When node ids change, update `queries.toml` to match. `--unpack-corpus`
+refuses a directory that isn't empty, and only regular `.md` files at plain relative paths
+are packed or unpacked.
 
 ### `external` — your own corpus, never checked in
 
@@ -230,14 +247,18 @@ called out rather than silently dropped).
 - `--verbose` — also print the per-query Markdown table (id, category, query text
   truncated to 50 chars, primary expected id, primary rank, first relevant rank, top-1 id,
   nDCG@10).
+- `--unpack-corpus <dir>` / `--pack-corpus <dir>` — move the `public` corpus's authored
+  nodes out of `benches/search/data/public/nodes.tar.gz` into a directory to edit, and
+  back (see [Editing the public corpus](#editing-the-public-corpus)). Either one runs on
+  its own and builds nothing.
 
 `cargo bench` always appends `--bench` to a bench binary's own arguments (custom harness or
 not); the harness ignores that token.
 
 ## Smoke-testing without fixture data
 
-`cargo bench --bench search -- --corpus public` works even before
-`benches/search/data/public/nodes/` or `queries.toml` exist — it builds the corpus from the
+`cargo bench --bench search -- --corpus public` works even without
+`benches/search/data/public/nodes.tar.gz` or `queries.toml` — it builds the corpus from the
 generated documents/skills alone and skips quality metrics with a notice. To exercise the
 full scoring path before real fixture data lands, write a throwaway queries file **outside**
 `benches/search/data/` and point `--queries` at it:
