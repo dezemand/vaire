@@ -3,7 +3,7 @@
 The format loosely follows [Keep a Changelog](https://keepachangelog.com); this project
 uses [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [0.3.2] — 2026-09-15
 
 ### Added
 - **`VAIRE_LOCK_TIMEOUT`** (whole seconds) bounds how long a command waits for a held
@@ -28,7 +28,9 @@ uses [Semantic Versioning](https://semver.org).
   nearest sections above a low similarity floor. Anchors are the best-matching sections.
   On the new search benchmark's public corpus MRR@10 rises from 0.23 to 0.69 (0.72 with
   OpenAI embeddings), and queries whose top hit is an unrelated long document drop from 87%
-  to about 7%. `score` stays an opaque relative rank, now derived from rank positions.
+  to about 7%. `score` stays an opaque relative rank, now derived from rank positions: an
+  exact name or alias match scores between 4 and 5 and every other hit between 0 and 1, so
+  anything that filtered on the old magnitudes needs adjusting.
 - **A search with linked dependencies ranks every package as one search.** Each package's
   results were ranked on their own and then merged by score — and since a score says where a
   hit placed within its own package, every dependency's best match scored like the best match
