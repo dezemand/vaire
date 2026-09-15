@@ -41,12 +41,14 @@
 //! * **Connections are short-lived.** Open, do the one thing, drop. A handle held across
 //!   anything slow — a corpus walk, an index build, an HTTP request — locks every other
 //!   vaire process on the machine out of the catalog for that whole time.
-//! * **Contention waits, never fails** ([`Catalog::open`]). Every open first takes
+//! * **Contention waits rather than failing** ([`Catalog::open`]). Every open first takes
 //!   `catalog.lock` beside the database ([`crate::db::DbLock`]) — an OS file lock, so a
 //!   second process is parked by the kernel until the first lets go rather than polling
-//!   for it. Waiting is correct here: the holder is milliseconds away from finishing, and
-//!   an OS file lock is released when its process dies, so there is no such thing as a
-//!   stale catalog lock.
+//!   for it. By default it waits for as long as that takes; a process with a wait limit
+//!   (`VAIRE_LOCK_TIMEOUT`, or `vaire mcp`'s own) gives up at the limit with a config
+//!   error that names the lock and changes nothing. Waiting is correct here: the holder is
+//!   milliseconds away from finishing, and an OS file lock is released when its process
+//!   dies, so there is no such thing as a stale catalog lock.
 //!
 //! Writes stay idempotent upserts regardless, so the worst case of a race remains that two
 //! processes record the same observation twice.
@@ -262,7 +264,8 @@ impl Catalog {
     /// Two failure modes, and telling them apart is the whole job here:
     ///
     /// * **Locked** — another vaire process has it open. Waited out in the OS's own queue
-    ///   for `catalog.lock` ([`DbLock`]), because the holder is milliseconds from finishing
+    ///   for `catalog.lock` ([`DbLock`]) — up to this process's wait limit, when it has one
+    ///   (`VAIRE_LOCK_TIMEOUT`) — because the holder is milliseconds from finishing
     ///   and an OS lock cannot outlive its process. Only a process that does not take that
     ///   lock — an older vaire — can still leave Turso refusing the open, and that is an
     ///   error that deletes nothing.

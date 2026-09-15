@@ -975,7 +975,9 @@ declares a dependency, `catalog add` records a package on this machine, `registr
 
 > **Cross-process cost.** Turso takes an exclusive lock when a database is opened, so
 > catalog access is serialized machine-wide: a second vaire process queues for
-> `catalog.lock`, an OS file lock taken before Turso's, rather than failing. Commands therefore open the catalog, do one thing, and
+> `catalog.lock`, an OS file lock taken before Turso's, rather than failing — indefinitely
+> by default, or until `VAIRE_LOCK_TIMEOUT` (30 s under `vaire mcp`) runs out, which is an
+> error that names the lock and changes nothing. Commands therefore open the catalog, do one thing, and
 > close it — nothing holds a handle across an index build, and nothing may hold one
 > resident.
 

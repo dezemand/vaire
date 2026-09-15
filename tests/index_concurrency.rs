@@ -65,58 +65,64 @@ fn index_worker() {
             let _db = vaire::db::Db::connect(&target).expect("worker opens the database");
             hold_until_released(&signals);
         }
-        // Rebuild in a loop. Each run holds the lock from its first read to its promote.
+        // Rebuild in a loop. The first rebuild starts under a lock the worker takes — and
+        // reports — before building, so the parent can queue readers behind a rebuild that
+        // has provably not started; later rebuilds each take the lock for their own run.
         "build" => {
             let repo = vaire::corpus::Repo::discover(Some(&target), &target).expect("repo");
             let config =
                 vaire::config::Config::load(&target.join("knowledge.toml")).expect("manifest");
+            // A corpus that has never been built has no derived directory yet.
+            std::fs::create_dir_all(target.join(".vaire")).expect("derived dir");
+            let mut first = Some(
+                vaire::db::DbLock::acquire(&target.join(".vaire/index.lock"), "the index")
+                    .expect("worker takes the index lock"),
+            );
+            hold_until_released(&signals);
             for _ in 0..BUILDS {
                 build::run(&repo, &config, &DummyEmbedder { dims: 8 }, Mode::Full)
                     .expect("worker rebuilds the index");
+                drop(first.take());
             }
         }
         other => panic!("unknown worker mode: {other}"),
     }
 }
 
-/// Many readers at once against one index: every one of them answers.
+/// Many readers queued behind one holder, then let go together: every one of them answers.
+///
+/// The holder is the barrier. Every reader has announced that it is waiting before the holder
+/// lets go, so they provably contend — with it, and then with each other — rather than merely
+/// having been started around the same time.
 #[test]
 fn concurrent_reads_all_succeed() {
     let c = Corpus::fixture();
+    let signals = tempfile::tempdir().expect("tempdir");
+    let mut holder = spawn_worker("hold", &c.repo().index_db(), signals.path(), None);
+    wait_until_ready(&mut holder, signals.path());
 
-    let started = Instant::now();
-    let readers: Vec<Child> = (0..READERS)
-        .map(|i| {
+    let stderr = stderr_files(signals.path(), "reader", READERS);
+    let mut readers: Vec<Child> = stderr
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
             let args: &[&str] = match i % 2 {
                 0 => &["resolve", "person:jane-doe"],
                 _ => &["backlinks", "person:jane-doe"],
             };
-            vaire(&c, args)
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("spawn reader")
+            spawn_reader(&c, args, path)
         })
         .collect();
+    wait_until_waiting(&mut readers, &stderr);
 
-    let failures: Vec<String> = readers
-        .into_iter()
-        .enumerate()
-        .filter_map(|(i, reader)| {
-            let out = finish(reader, Duration::from_secs(120));
-            (!out.status.success()).then(|| {
-                format!(
-                    "reader {i}: {} — {}",
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )
-            })
-        })
-        .collect();
+    let started = Instant::now();
+    release(signals.path());
+    let failures = failed_readers(readers, &stderr);
 
     assert!(failures.is_empty(), "readers failed: {failures:?}");
+    assert!(finish(holder, Duration::from_secs(30)).status.success());
     println!(
-        "index concurrency: {READERS} concurrent reads in {:?}",
+        "index concurrency: {READERS} queued reads answered in {:?}",
         started.elapsed()
     );
 }
@@ -132,47 +138,26 @@ fn a_read_waits_for_the_holder_and_then_succeeds() {
     let mut holder = spawn_worker("hold", &c.repo().index_db(), signals.path(), None);
     wait_until_ready(&mut holder, signals.path());
 
-    // stderr goes to a file the test can watch while the reader is still running.
-    let stderr_path = signals.path().join("reader.stderr");
-    let mut reader = vaire(&c, &["resolve", "person:jane-doe"])
-        .stdout(Stdio::null())
-        .stderr(std::fs::File::create(&stderr_path).expect("reader stderr file"))
-        .spawn()
-        .expect("spawn reader");
-
     // Waited for on the notice itself, not on a sleep: how soon a freshly spawned process
-    // reaches the lock is up to the machine, and a fixed sleep made this test a race
-    // against process start-up. By the time the notice is out, the old code would long
-    // since have exited claiming corruption — the reader must still be here.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-        if stderr.contains("waiting for another vaire process") {
-            break;
-        }
-        if let Some(status) = reader.try_wait().expect("try_wait") {
-            panic!("the reader must wait for the held index, not exit ({status}): {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "a command that waits says why it is quiet — no notice after 60s: {stderr}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    // reaches the lock is up to the machine. By the time the notice is out, the old code
+    // would long since have exited claiming corruption — the reader must still be here.
+    let stderr = stderr_files(signals.path(), "reader", 1);
+    let mut readers = vec![spawn_reader(
+        &c,
+        &["resolve", "person:jane-doe"],
+        &stderr[0],
+    )];
+    wait_until_waiting(&mut readers, &stderr);
     assert!(
-        reader.try_wait().expect("try_wait").is_none(),
+        readers[0].try_wait().expect("try_wait").is_none(),
         "the reader is still waiting after announcing it"
     );
 
     release(signals.path());
-    let out = finish(reader, Duration::from_secs(60));
+    let failures = failed_readers(readers, &stderr);
     assert!(
-        out.status.success(),
-        "the read succeeds once the index is free: {} — {}",
-        out.status,
-        std::fs::read_to_string(&stderr_path)
-            .unwrap_or_default()
-            .trim()
+        failures.is_empty(),
+        "the read succeeds once the index is free: {failures:?}"
     );
     assert!(
         finish(holder, Duration::from_secs(30)).status.success(),
@@ -180,16 +165,31 @@ fn a_read_waits_for_the_holder_and_then_succeeds() {
     );
 }
 
-/// Reads interleaved with full rebuilds: none fails, and none is told to rebuild a healthy
-/// index.
+/// Reads queued behind a rebuild, then more reads while further rebuilds run: none fails, and
+/// none is told to rebuild a healthy index.
+///
+/// The builder takes the index lock and reports before it builds, and does not start until
+/// every queued reader has announced that it is waiting — so the first rebuild provably
+/// overlaps them.
 #[test]
 fn reads_during_rebuilds_succeed() {
+    const QUEUED: usize = 4;
     let c = Corpus::fixture();
     let signals = tempfile::tempdir().expect("tempdir");
     let mut builder = spawn_worker("build", c.root(), signals.path(), None);
+    wait_until_ready(&mut builder, signals.path());
 
-    let mut failures = Vec::new();
-    let mut reads = 0;
+    let stderr = stderr_files(signals.path(), "queued", QUEUED);
+    let mut queued: Vec<Child> = stderr
+        .iter()
+        .map(|path| spawn_reader(&c, &["resolve", "person:jane-doe"], path))
+        .collect();
+    wait_until_waiting(&mut queued, &stderr);
+    release(signals.path()); // the first rebuild starts, with every queued reader behind it
+
+    let mut failures = failed_readers(queued, &stderr);
+    let mut reads = QUEUED;
+    // And reads started while the remaining rebuilds run.
     loop {
         let reader = vaire(&c, &["resolve", "person:jane-doe"])
             .stdout(Stdio::null())
@@ -219,6 +219,44 @@ fn reads_during_rebuilds_succeed() {
         "reads during a rebuild failed: {failures:?}"
     );
     println!("index concurrency: {reads} reads across {BUILDS} full rebuilds");
+}
+
+/// A read during the very first build waits for it, rather than reporting "not built".
+///
+/// A first build stages its index and only creates `index.db` when it promotes it at the end,
+/// so a read that looked for the file before taking the lock would exit `4` for an index that
+/// was seconds from existing.
+#[test]
+fn a_read_during_the_first_build_waits_for_it() {
+    let c = Corpus::empty();
+    c.add(
+        "knowledge/jane.md",
+        "---\nid: jane-doe\ntype: person\nname: Jane Doe\n---\n# Jane Doe\n",
+    )
+    .commit();
+    assert!(
+        !c.repo().index_db().exists(),
+        "nothing has built this corpus yet"
+    );
+    let signals = tempfile::tempdir().expect("tempdir");
+    let mut builder = spawn_worker("build", c.root(), signals.path(), None);
+    wait_until_ready(&mut builder, signals.path());
+
+    let stderr = stderr_files(signals.path(), "first", 1);
+    let mut readers = vec![spawn_reader(
+        &c,
+        &["resolve", "person:jane-doe"],
+        &stderr[0],
+    )];
+    wait_until_waiting(&mut readers, &stderr);
+    release(signals.path()); // the first build starts, with the reader behind it
+
+    let failures = failed_readers(readers, &stderr);
+    assert!(
+        failures.is_empty(),
+        "the read answers from the first build: {failures:?}"
+    );
+    assert!(finish(builder, Duration::from_secs(120)).status.success());
 }
 
 /// Giving up on a held index is a lock error, never exit `3` — which would send whoever read
@@ -350,6 +388,74 @@ fn an_mcp_call_gives_up_with_index_locked() {
 
 // ---- the parent's half ------------------------------------------------------------------
 
+/// What a `vaire` process prints once it has been waiting for a lock for a second.
+const WAIT_NOTICE: &str = "waiting for another vaire process";
+
+/// One stderr file per reader, so a test can watch readers while they run.
+fn stderr_files(dir: &Path, prefix: &str, count: usize) -> Vec<PathBuf> {
+    (0..count)
+        .map(|i| dir.join(format!("{prefix}-{i}.stderr")))
+        .collect()
+}
+
+/// Start a `vaire` reader with its stderr going to `stderr`.
+fn spawn_reader(c: &Corpus, args: &[&str], stderr: &Path) -> Child {
+    vaire(c, args)
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(stderr).expect("reader stderr file"))
+        .spawn()
+        .expect("spawn reader")
+}
+
+/// The barrier: block until every reader has announced that it is waiting for the lock.
+///
+/// Proof that each one really is queued behind the holder, rather than merely started — and
+/// a reader that exits before announcing fails the test, since with the lock held it could
+/// only have exited by failing.
+fn wait_until_waiting(readers: &mut [Child], stderr: &[PathBuf]) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let mut all_waiting = true;
+        for (reader, path) in readers.iter_mut().zip(stderr) {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            if text.contains(WAIT_NOTICE) {
+                continue;
+            }
+            all_waiting = false;
+            if let Some(status) = reader.try_wait().expect("try_wait") {
+                panic!("a reader exited instead of waiting for the held index ({status}): {text}");
+            }
+        }
+        if all_waiting {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "not every reader announced that it was waiting within 60s"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Wait for every reader, returning a description of each one that did not succeed.
+fn failed_readers(readers: Vec<Child>, stderr: &[PathBuf]) -> Vec<String> {
+    readers
+        .into_iter()
+        .zip(stderr)
+        .filter_map(|(reader, path)| {
+            let out = finish(reader, Duration::from_secs(120));
+            (!out.status.success()).then(|| {
+                format!(
+                    "{}: {} — {}",
+                    path.display(),
+                    out.status,
+                    std::fs::read_to_string(path).unwrap_or_default().trim()
+                )
+            })
+        })
+        .collect()
+}
+
 /// A `vaire` invocation against `c`, with its own hermetic home.
 fn vaire(c: &Corpus, args: &[&str]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_vaire"));
@@ -364,6 +470,7 @@ fn vaire(c: &Corpus, args: &[&str]) -> Command {
     cmd
 }
 
+/// Re-invoke this test binary as a worker in `mode`, coordinating through `signals`.
 fn spawn_worker(mode: &str, target: &Path, signals: &Path, env: Option<(&str, &str)>) -> Child {
     let mut cmd = Command::new(std::env::current_exe().expect("test binary path"));
     cmd.args(["index_worker", "--exact", "--quiet"])
@@ -402,6 +509,7 @@ fn wait_until_ready(worker: &mut Child, signals: &Path) {
     }
 }
 
+/// Tell a worker blocked in [`hold_until_released`] to let go.
 fn release(signals: &Path) {
     std::fs::write(signals.join("release"), b"").expect("release marker");
 }

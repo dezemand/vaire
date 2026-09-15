@@ -168,10 +168,13 @@ Two rules follow, and both are load-bearing:
   handle held across anything slow — a corpus walk, an index build, an HTTP request —
   locks every other vaire process on the machine out for that whole time. A command that
   turns out to have nothing to ask must not open it at all.
-- **Contention waits, never fails.** Every open first takes `catalog.lock` beside the
-  database — an OS file lock, so a second process is parked by the kernel until the first
-  lets go instead of polling for it. The holder is milliseconds from finishing, and an OS
-  lock dies with its process, so there is no such thing as a stale catalog lock.
+- **Contention waits rather than failing.** Every open first takes `catalog.lock` beside
+  the database — an OS file lock, so a second process is parked by the kernel until the
+  first lets go instead of polling for it. The wait is indefinite by default;
+  `VAIRE_LOCK_TIMEOUT` bounds it (and `vaire mcp` bounds every wait at 30 s), and running
+  out is an error that names the lock and changes nothing. The holder is milliseconds from
+  finishing, and an OS lock dies with its process, so there is no such thing as a stale
+  catalog lock.
   Distinguishing *locked* from *corrupt* is essential: a version that treated every
   failed connect as corruption would delete the catalog whenever another process held it.
 

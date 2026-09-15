@@ -24,8 +24,8 @@ use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak, mpsc};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
 use turso::{Builder, Connection, Database, IntoParams, Row, Value};
@@ -154,6 +154,7 @@ pub fn set_lock_wait(limit: Option<Duration>) {
     LOCK_WAIT_MS.store(ms, Ordering::Relaxed);
 }
 
+/// This process's wait limit, as [`set_lock_wait`] last set it; `None` waits indefinitely.
 fn lock_wait() -> Option<Duration> {
     match LOCK_WAIT_MS.load(Ordering::Relaxed) {
         u64::MAX => None,
@@ -205,11 +206,17 @@ impl From<std::io::Error> for LockError {
 /// * **A file beside the database, never the database itself.** A rebuild replaces
 ///   `index.db` by renaming a new file over it; a process waiting on the old file would
 ///   wake up holding a lock on a file nobody uses any more.
-/// * **Re-entrant within a process.** The OS lock belongs to an open file, so a second
-///   acquisition by the same process — a command holding its index while a helper opens it
-///   again — would wait on itself forever. A process shares one lock per path instead,
-///   released when the last holder drops it. Exclusion is between processes, which is the
-///   only exclusion Turso needs.
+/// * **Re-entrant, and shared, within a process.** The OS lock belongs to an open file, so a
+///   second acquisition by the same process — a command holding its index while a helper
+///   opens it again, or two threads arriving at once — would wait on itself forever. Each
+///   path has one in-process [`Slot`] instead: callers that arrive together share a single
+///   acquisition, and the lock is released when the last holder drops it. Exclusion is
+///   between processes, which is the only exclusion Turso needs.
+/// * **One waiting thread per path, however many callers give up.** The OS call that waits
+///   has no timeout, so it runs on a thread of its own while callers wait on the slot with
+///   their own deadlines. A caller that times out leaves that thread for the next caller to
+///   wait on rather than starting another, so a resident process retrying against a long
+///   rebuild does not pile up blocked threads.
 /// * **Exclusive only.** A shared mode for readers would buy nothing: Turso lets one process
 ///   have the file open at a time regardless, so readers serialize anyway — for the
 ///   milliseconds a read takes.
@@ -221,9 +228,52 @@ pub struct DbLock {
     _held: Arc<HeldLock>,
 }
 
+/// The OS lock itself, released when the last [`DbLock`] sharing it is dropped.
 struct HeldLock {
     file: File,
-    path: PathBuf,
+}
+
+/// One lock path's in-process state, shared by every caller that asks for that path.
+///
+/// Never removed once created. A process touches a handful of lock paths in its life — its
+/// package, its dependencies, the catalog — and a slot that outlives its lock is what stops
+/// a later caller from racing a thread that is still acquiring it.
+#[derive(Default)]
+struct Slot {
+    state: Mutex<SlotState>,
+    /// Signalled when the waiting thread hands over what it got.
+    granted: Condvar,
+}
+
+#[derive(Default)]
+struct SlotState {
+    /// The lock, for as long as anyone in this process holds it.
+    held: Weak<HeldLock>,
+    /// Whether a thread is blocked in the OS lock call for this path ([`spawn_waiter`]).
+    waiter: bool,
+    /// Callers currently blocked on [`Slot::granted`].
+    waiting: usize,
+    /// What the waiting thread got that no caller has claimed yet.
+    grant: Option<std::io::Result<File>>,
+}
+
+impl SlotState {
+    /// Record `file`, already locked, as this path's held lock and hand out the first share.
+    fn hold(&mut self, file: File) -> DbLock {
+        let held = Arc::new(HeldLock { file });
+        self.held = Arc::downgrade(&held);
+        DbLock { _held: held }
+    }
+}
+
+/// Waiting threads currently alive, across every path. Not an API — a way for tests to see
+/// that timed-out callers do not each leave one behind.
+static WAITER_THREADS: AtomicU64 = AtomicU64::new(0);
+
+/// How many threads are currently blocked waiting on an OS lock for this process.
+#[doc(hidden)]
+pub fn waiter_threads() -> u64 {
+    WAITER_THREADS.load(Ordering::Relaxed)
 }
 
 impl DbLock {
@@ -234,22 +284,64 @@ impl DbLock {
         // Keyed by the canonical path, so two spellings of one directory — a symlinked home,
         // macOS's `/var` → `/private/var` — cannot become two locks that wait on each other.
         let path = canonical_lock_path(path)?;
-        if let Some(held) = held_locks().get(&path).and_then(Weak::upgrade) {
-            return Ok(DbLock { _held: held });
+        let slot = slot_for(&path);
+        let limit = lock_wait();
+        let started = Instant::now();
+        let mut announced = false;
+        // Everything below happens under the slot's mutex (released only while blocked on
+        // `granted`), so two threads can never both decide the lock is theirs to take.
+        let mut state = lock_ignoring_poison(&slot.state);
+        loop {
+            if let Some(held) = state.held.upgrade() {
+                return Ok(DbLock { _held: held });
+            }
+            if let Some(grant) = state.grant.take() {
+                return Ok(state.hold(grant?));
+            }
+            if !state.waiter {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&path)?;
+                if FileExt::try_lock_exclusive(&file)? {
+                    return Ok(state.hold(file));
+                }
+                state.waiter = true;
+                spawn_waiter(file, Arc::clone(&slot));
+            }
+            let elapsed = started.elapsed();
+            if let Some(limit) = limit
+                && elapsed >= limit
+            {
+                return Err(LockError::TimedOut(limit));
+            }
+            if !announced && elapsed >= WAIT_NOTICE_AFTER {
+                eprintln!("waiting for another vaire process to release {what}…");
+                announced = true;
+            }
+            // Asleep until the waiting thread hands over, or until the next thing this caller
+            // has to do by itself: announce the wait, or give up on it.
+            let wake_at = [limit, (!announced).then_some(WAIT_NOTICE_AFTER)]
+                .into_iter()
+                .flatten()
+                .min();
+            state.waiting += 1;
+            state = match wake_at {
+                Some(at) => {
+                    slot.granted
+                        .wait_timeout(state, at.saturating_sub(elapsed))
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+                None => slot
+                    .granted
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner),
+            };
+            state.waiting -= 1;
         }
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-        let file = wait_for(file, what)?;
-        let held = Arc::new(HeldLock {
-            file,
-            path: path.clone(),
-        });
-        held_locks().insert(path, Arc::downgrade(&held));
-        Ok(DbLock { _held: held })
     }
 }
 
@@ -259,56 +351,31 @@ impl Drop for HeldLock {
         // handle's locks "when resources allow", and the next process in line should not
         // wait on that.
         let _ = FileExt::unlock(&self.file);
-        let mut held = held_locks();
-        // Only this lock's own entry — another thread may already have taken the path again.
-        if held
-            .get(&self.path)
-            .is_some_and(|entry| entry.strong_count() == 0)
-        {
-            held.remove(&self.path);
-        }
     }
 }
 
-/// Lock `file`, parking this process until the holder lets go.
+/// Block a thread in the OS lock call for `slot`'s path, and hand what it gets to a caller.
 ///
-/// The blocking lock call has no timeout of its own, so a contended wait runs it on a thread
-/// and waits for the answer — which is what lets one wait both announce itself after a
-/// second and give up at a deadline. A thread whose waiter has already given up still gets
-/// the lock eventually; finding nobody to hand it to, it lets go at once.
-fn wait_for(file: File, what: &str) -> std::result::Result<File, LockError> {
-    if FileExt::try_lock_exclusive(&file)? {
-        return Ok(file);
-    }
-    let (tx, rx) = mpsc::channel();
+/// The call has no timeout of its own, which is why it runs apart from the callers: they
+/// wait on the slot with their own deadlines and may give up, while this thread stays for the
+/// next caller to wait on — one per path, never one per caller. If every caller has given up
+/// by the time the lock arrives, it is released at once rather than held for nobody.
+fn spawn_waiter(file: File, slot: Arc<Slot>) {
+    WAITER_THREADS.fetch_add(1, Ordering::Relaxed);
     std::thread::spawn(move || {
         let outcome = FileExt::lock_exclusive(&file).map(|()| file);
-        if let Err(mpsc::SendError(Ok(file))) = tx.send(outcome) {
-            let _ = FileExt::unlock(&file);
+        let mut state = lock_ignoring_poison(&slot.state);
+        state.waiter = false;
+        if state.waiting == 0 {
+            if let Ok(file) = outcome {
+                let _ = FileExt::unlock(&file);
+            }
+        } else {
+            state.grant = Some(outcome);
+            slot.granted.notify_all();
         }
+        WAITER_THREADS.fetch_sub(1, Ordering::Relaxed);
     });
-    let limit = lock_wait();
-    let quiet = limit.map_or(WAIT_NOTICE_AFTER, |limit| limit.min(WAIT_NOTICE_AFTER));
-    let answer = match rx.recv_timeout(quiet) {
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            let remaining = limit.map(|limit| limit.saturating_sub(quiet));
-            if remaining != Some(Duration::ZERO) {
-                eprintln!("waiting for another vaire process to release {what}…");
-            }
-            match remaining {
-                None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-                Some(remaining) => rx.recv_timeout(remaining),
-            }
-        }
-        answer => answer,
-    };
-    match answer {
-        Ok(outcome) => Ok(outcome?),
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(LockError::TimedOut(limit.unwrap_or_default())),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(LockError::Io(std::io::Error::other(
-            "the lock wait ended without an answer",
-        ))),
-    }
 }
 
 /// `path` with its directory canonicalized. The file itself may not exist yet.
@@ -326,12 +393,17 @@ fn canonical_lock_path(path: &Path) -> std::io::Result<PathBuf> {
     Ok(std::fs::canonicalize(dir)?.join(name))
 }
 
-/// The locks this process holds, by canonical path.
-fn held_locks() -> MutexGuard<'static, HashMap<PathBuf, Weak<HeldLock>>> {
-    static HELD: OnceLock<Mutex<HashMap<PathBuf, Weak<HeldLock>>>> = OnceLock::new();
-    HELD.get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+/// This process's [`Slot`] for a canonical lock path, created on first use.
+fn slot_for(path: &Path) -> Arc<Slot> {
+    static SLOTS: OnceLock<Mutex<HashMap<PathBuf, Arc<Slot>>>> = OnceLock::new();
+    let mut slots = lock_ignoring_poison(SLOTS.get_or_init(Default::default));
+    Arc::clone(slots.entry(path.to_path_buf()).or_default())
+}
+
+/// Lock `mutex`, carrying on past a poisoned one: every state guarded here stays consistent
+/// between statements, so a panic elsewhere leaves nothing half-written.
+fn lock_ignoring_poison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Whether a failed [`Db::connect`] means another process has the file open.

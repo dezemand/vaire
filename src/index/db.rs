@@ -31,7 +31,7 @@
 //! turn instead of failing. `vaire index` holds that lock for its whole run, so a read
 //! started meanwhile answers from the finished index; a read holds it for milliseconds.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use turso::{IntoParams, Row};
 
@@ -186,13 +186,20 @@ impl Index {
     /// a process outside vaire's lock, is [`VaireError::IndexLocked`] (exit `1`); a file
     /// Turso cannot open is [`VaireError::IndexCorrupt`] (exit `3`).
     pub fn open(path: &Path) -> Result<Index> {
-        if !path.exists() {
-            return Err(VaireError::IndexNotBuilt(path.display().to_string()));
+        let not_built = || VaireError::IndexNotBuilt(path.display().to_string());
+        // A missing file is only "not built" when nothing could be building it. A first build
+        // stages its index and promotes it to `index.db` at the very end, so a read that
+        // stopped at the missing file would report "not built" for an index seconds from
+        // existing, instead of waiting for it. The lock file tells the two apart: a build
+        // takes the lock before anything else, so with neither file present none can be
+        // under way — and a read in a package nobody has built leaves no lock file behind.
+        if !path.exists() && !lock_path(path).exists() {
+            return Err(not_built());
         }
         let lock = Self::lock(path)?;
-        // Asked again under the lock: whatever held it may have removed the file.
+        // Asked (again) under the lock: a build may have just finished, or never produced it.
         if !path.exists() {
-            return Err(VaireError::IndexNotBuilt(path.display().to_string()));
+            return Err(not_built());
         }
         Self::connect(path, lock).map_err(|e| match crate::db::is_locked(&e) {
             true => held_elsewhere(path, &e),
@@ -209,12 +216,8 @@ impl Index {
     /// within a process ([`DbLock`]), so a command that already holds it opens as many
     /// handles as it likes.
     pub(crate) fn lock(path: &Path) -> Result<DbLock> {
-        let dir = match path.parent() {
-            Some(dir) if !dir.as_os_str().is_empty() => dir,
-            _ => Path::new("."),
-        };
         let what = format!("the index at {}", path.display());
-        DbLock::acquire(&dir.join(LOCK_FILE), &what).map_err(|e| match e {
+        DbLock::acquire(&lock_path(path), &what).map_err(|e| match e {
             LockError::TimedOut(waited) => VaireError::IndexLocked(format!(
                 "{what} is held by another vaire process (usually `vaire index`) and was not \
                  released within {}s; try again once it finishes, or raise {LOCK_TIMEOUT_ENV}",
@@ -348,6 +351,15 @@ impl Index {
         )?;
         Ok(())
     }
+}
+
+/// The lock file for the index database at `path`: [`LOCK_FILE`] in the same directory.
+fn lock_path(path: &Path) -> PathBuf {
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    dir.join(LOCK_FILE)
 }
 
 /// Turso refused the open because another process has the file, although this one holds
