@@ -1,0 +1,496 @@
+# Search-relevance benchmark queries for the public corpus (issue #52).
+#
+# Grading: 2 = the primary answer a user wants; 1 = also relevant/useful (a closely
+# related concept, the command that implements it, or a long spec/skill that covers the
+# topic in depth). Judgments were made by reading the corpus, not by tuning against the
+# current (flawed) ranking.
+
+# ============================================================ name (10) ============
+
+[[query]]
+id = "name-loose-end"
+text = "loose end"
+category = "name"
+[query.relevant]
+"concept:loose-end" = 2
+"cli:vaire/command:unresolved" = 1
+
+[[query]]
+id = "name-gate-the-rare-act"
+text = "gate the rare act"
+category = "name"
+note = "issue #52's own example query; the short principle node should outrank document:cli-spec."
+[query.relevant]
+"principle:gate-the-rare-act" = 2
+"concept:entity-creation-pass" = 1
+
+[[query]]
+id = "name-commit-as-publish"
+text = "commit as publish"
+category = "name"
+[query.relevant]
+"concept:commit-as-publish" = 2
+"cli:vaire/command:index" = 1
+
+[[query]]
+id = "name-supersession"
+text = "supersession"
+category = "name"
+[query.relevant]
+"concept:supersession" = 2
+"finding:duplicate-id" = 1
+
+[[query]]
+id = "name-scoped-id"
+text = "scoped id"
+category = "name"
+[query.relevant]
+"concept:scoped-id" = 2
+"cli:vaire/command:search" = 1
+
+[[query]]
+id = "name-hybrid-search"
+text = "hybrid search"
+category = "name"
+[query.relevant]
+"component:hybrid-search" = 2
+"cli:vaire/command:search" = 1
+
+[[query]]
+id = "name-knowledge-lifecycle"
+text = "knowledge lifecycle"
+category = "name"
+[query.relevant]
+"concept:knowledge-lifecycle" = 2
+
+[[query]]
+id = "name-adopted-changes-digest"
+text = "adopted changes digest"
+category = "name"
+[query.relevant]
+"concept:adopted-changes-digest" = 2
+"cli:vaire/command:pull" = 1
+
+[[query]]
+id = "name-rootless-session"
+text = "rootless session"
+category = "name"
+[query.relevant]
+"concept:rootless-session" = 2
+"component:mcp-server" = 1
+
+[[query]]
+id = "name-vaire-suggest"
+text = "vaire suggest"
+category = "name"
+[query.relevant]
+"cli:vaire/command:suggest" = 2
+"concept:alias" = 1
+
+# ============================================================ alias (6) ============
+
+[[query]]
+id = "alias-tombstone"
+text = "tombstone"
+category = "alias"
+[query.relevant]
+"concept:supersession" = 2
+"finding:duplicate-id" = 1
+
+[[query]]
+id = "alias-the-gated-pass"
+text = "the gated pass"
+category = "alias"
+[query.relevant]
+"concept:entity-creation-pass" = 2
+"principle:gate-the-rare-act" = 1
+
+[[query]]
+id = "alias-disposable-index"
+text = "disposable index"
+category = "alias"
+[query.relevant]
+"concept:derived-index" = 2
+"principle:index-is-disposable" = 1
+
+[[query]]
+id = "alias-citation-digest"
+text = "citation digest"
+category = "alias"
+[query.relevant]
+"concept:adopted-changes-digest" = 2
+"cli:vaire/command:pull" = 1
+
+[[query]]
+id = "alias-catalog-scoped-session"
+text = "catalog-scoped session"
+category = "alias"
+[query.relevant]
+"concept:rootless-session" = 2
+"concept:catalog" = 1
+
+[[query]]
+id = "alias-release-entity"
+text = "release entity"
+category = "alias"
+[query.relevant]
+"concept:release-record" = 2
+"cli:vaire/command:release" = 1
+
+# ============================================================ keyword (10) =========
+
+[[query]]
+id = "keyword-embeds-to-mush"
+text = "embeds to mush"
+category = "keyword"
+note = "hard: this exact phrase also appears in spec/design.md, so document:design-spec is a legitimate secondary hit."
+[query.relevant]
+"component:hybrid-search" = 2
+"document:design-spec" = 1
+
+[[query]]
+id = "keyword-sealed-read-only"
+text = "sealed read-only"
+category = "keyword"
+[query.relevant]
+"concept:store" = 2
+"cli:vaire/command:pull" = 1
+
+[[query]]
+id = "keyword-compare-and-swap"
+text = "compare-and-swap"
+category = "keyword"
+[query.relevant]
+"decision:static-host-full-citizen" = 2
+
+[[query]]
+id = "keyword-atomic-rename"
+text = "atomic rename"
+category = "keyword"
+[query.relevant]
+"component:store" = 2
+
+[[query]]
+id = "keyword-byte-identical"
+text = "byte-identical output"
+category = "keyword"
+[query.relevant]
+"concept:artifact" = 2
+"cli:vaire/command:pack" = 1
+
+[[query]]
+id = "keyword-lint-policy"
+text = "lint policy not a gate"
+category = "keyword"
+[query.relevant]
+"finding:scoped-type-not-permitted" = 2
+"concept:scoped-id" = 1
+
+[[query]]
+id = "keyword-existence-checked"
+text = "existence is all that's checked"
+category = "keyword"
+note = "hard: 'existence' and 'check' are both very common words across the long specs."
+[query.relevant]
+"finding:dangling-ref" = 2
+"concept:reference" = 1
+
+[[query]]
+id = "keyword-surfaced-by-name"
+text = "surfaced by name not guessed"
+category = "keyword"
+[query.relevant]
+"component:workspace-resolver" = 2
+
+[[query]]
+id = "keyword-adopts-nothing"
+text = "adopts nothing on first pull"
+category = "keyword"
+[query.relevant]
+"concept:adopted-changes-digest" = 2
+"cli:vaire/command:pull" = 1
+
+[[query]]
+id = "keyword-content-hash-cache"
+text = "content-hash cache"
+category = "keyword"
+[query.relevant]
+"decision:content-hash-embedding-cache" = 2
+"component:embedding-providers" = 1
+
+# ============================================================ question (12) ========
+
+[[query]]
+id = "question-delete-entity"
+text = "what happens when I delete an entity"
+category = "question"
+[query.relevant]
+"concept:supersession" = 2
+"finding:dangling-ref" = 1
+
+[[query]]
+id = "question-link-not-created-yet"
+text = "how do I link to something that doesn't exist yet"
+category = "question"
+[query.relevant]
+"concept:loose-end" = 2
+"cli:vaire/command:suggest" = 1
+
+[[query]]
+id = "question-check-fails-looks-fine"
+text = "why did check fail on a reference that looks fine"
+category = "question"
+note = "hard: the likely real cause is the frontmatter [[ ]] trap, not a broken id."
+[query.relevant]
+"finding:frontmatter-wikilink" = 2
+"finding:dangling-ref" = 1
+
+[[query]]
+id = "question-find-id-before-referencing"
+text = "how do I find the id for something before I reference it"
+category = "question"
+[query.relevant]
+"cli:vaire/command:suggest" = 2
+"concept:alias" = 1
+
+[[query]]
+id = "question-record-vs-entity"
+text = "what makes something a record instead of an entity"
+category = "question"
+[query.relevant]
+"concept:record" = 2
+"concept:entity" = 1
+
+[[query]]
+id = "question-renaming-updates-refs"
+text = "how does renaming something update all its references"
+category = "question"
+[query.relevant]
+"principle:ids-not-names" = 2
+"concept:display-name" = 1
+
+[[query]]
+id = "question-dependency-breaking-change"
+text = "what happens when a dependency releases a breaking change"
+category = "question"
+[query.relevant]
+"decision:computed-bumps" = 2
+"skill:vaire-versioning" = 1
+"finding:dependency-version-mismatch" = 1
+
+[[query]]
+id = "question-check-clean-enough-to-release"
+text = "how do I know if check is clean enough to release"
+category = "question"
+[query.relevant]
+"cli:vaire/command:check" = 2
+"cli:vaire/command:release" = 1
+
+[[query]]
+id = "question-index-missing"
+text = "what does vaire do when the index doesn't exist yet"
+category = "question"
+[query.relevant]
+"cli:vaire/command:index" = 2
+"concept:derived-index" = 1
+"skill:vaire-query-cli" = 1
+
+[[query]]
+id = "question-agents-avoid-corrupting"
+text = "how do agents avoid corrupting the corpus"
+category = "question"
+[query.relevant]
+"principle:gate-the-rare-act" = 2
+"principle:reads-are-safe" = 1
+"skill:vaire-contributing" = 1
+
+[[query]]
+id = "question-two-people-same-entity"
+text = "what happens if two people create the same entity independently"
+category = "question"
+[query.relevant]
+"finding:duplicate-id" = 2
+"concept:supersession" = 1
+"skill:vaire-entity-creation" = 1
+
+[[query]]
+id = "question-search-across-dependencies"
+text = "how do I search across the packages I depend on"
+category = "question"
+[query.relevant]
+"cli:vaire/command:search" = 2
+"concept:linked-package" = 1
+
+# ============================================================ paraphrase (10) ======
+
+[[query]]
+id = "paraphrase-retiring-still-pointed-to"
+text = "retiring something other nodes still point to"
+category = "paraphrase"
+[query.relevant]
+"concept:supersession" = 2
+
+[[query]]
+id = "paraphrase-scratch-notes-vs-shared-truth"
+text = "an agent's private scratch notes versus shared truth"
+category = "paraphrase"
+[query.relevant]
+"concept:memory-corpus-boundary" = 2
+"concept:record" = 1
+
+[[query]]
+id = "paraphrase-humans-approve-dangerous-stuff"
+text = "only letting humans approve the dangerous stuff"
+category = "paraphrase"
+[query.relevant]
+"principle:gate-the-rare-act" = 2
+
+[[query]]
+id = "paraphrase-folder-earned-citable-unit"
+text = "a folder that earned the right to be its own citable unit"
+category = "paraphrase"
+[query.relevant]
+"concept:package" = 2
+
+[[query]]
+id = "paraphrase-note-when-unknown-who"
+text = "the note you leave when you don't know who this is yet"
+category = "paraphrase"
+[query.relevant]
+"concept:loose-end" = 2
+
+[[query]]
+id = "paraphrase-strangers-build-decide-data"
+text = "letting a stranger's build decide what your own data means"
+category = "paraphrase"
+[query.relevant]
+"decision:shipped-index-not-trusted" = 2
+"principle:files-are-authoritative" = 1
+
+[[query]]
+id = "paraphrase-why-versions-not-hand-typed"
+text = "why version numbers are never hand-typed"
+category = "paraphrase"
+[query.relevant]
+"decision:computed-bumps" = 2
+
+[[query]]
+id = "paraphrase-renaming-without-breaking-pointers"
+text = "renaming something without breaking everyone who pointed at the old name"
+category = "paraphrase"
+[query.relevant]
+"principle:ids-not-names" = 2
+"concept:display-name" = 1
+
+[[query]]
+id = "paraphrase-machine-wide-address-book"
+text = "a machine-wide address book of every project you've touched"
+category = "paraphrase"
+[query.relevant]
+"concept:catalog" = 2
+
+[[query]]
+id = "paraphrase-leftover-after-pull"
+text = "what's left over after a pull that nothing else needs anymore"
+category = "paraphrase"
+[query.relevant]
+"decision:one-slot-per-major-retention" = 2
+"concept:store" = 1
+
+# ============================================================ document (8) =========
+
+[[query]]
+id = "document-cli-reference"
+text = "complete command-line reference"
+category = "document"
+[query.relevant]
+"document:cli-spec" = 2
+
+[[query]]
+id = "document-registry-wire-protocol"
+text = "registry wire protocol"
+category = "document"
+[query.relevant]
+"document:registry-spec" = 2
+
+[[query]]
+id = "document-release-history"
+text = "release history"
+category = "document"
+[query.relevant]
+"document:changelog" = 2
+
+[[query]]
+id = "document-manifest-field-reference"
+text = "full package manifest field reference"
+category = "document"
+[query.relevant]
+"document:manifest-spec" = 2
+
+[[query]]
+id = "document-readme-overview"
+text = "project overview and installation instructions"
+category = "document"
+[query.relevant]
+"document:readme" = 2
+
+[[query]]
+id = "document-compounding-test"
+text = "the compounding test for package boundaries"
+category = "document"
+[query.relevant]
+"skill:vaire-package-curation" = 2
+"principle:knowledge-compounds" = 1
+
+[[query]]
+id = "document-check-triage-howto"
+text = "how to triage every check finding"
+category = "document"
+[query.relevant]
+"skill:vaire-check-triage" = 2
+"cli:vaire/command:check" = 1
+
+[[query]]
+id = "document-design-rationale"
+text = "design rationale for the whole corpus and index model"
+category = "document"
+[query.relevant]
+"document:design-spec" = 2
+
+# ============================================================ filter (4) ===========
+
+[[query]]
+id = "filter-concept-store"
+text = "store"
+category = "filter"
+type = "concept"
+note = "must exclude component:store, which is a different node of a different type."
+[query.relevant]
+"concept:store" = 2
+
+[[query]]
+id = "filter-command-release"
+text = "release"
+category = "filter"
+type = "command"
+note = "must exclude concept:release-record and component:release-classifier."
+[query.relevant]
+"cli:vaire/command:release" = 2
+
+[[query]]
+id = "filter-finding-orphan"
+text = "orphan"
+category = "filter"
+type = "finding"
+[query.relevant]
+"finding:orphan" = 2
+
+[[query]]
+id = "filter-decision-embeddings"
+text = "embeddings"
+category = "filter"
+type = "decision"
+note = "must exclude component:embedding-providers, which is a different type."
+[query.relevant]
+"decision:local-embeddings-default" = 2
+"decision:content-hash-embedding-cache" = 1

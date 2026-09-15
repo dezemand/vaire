@@ -9,6 +9,12 @@ uses [Semantic Versioning](https://semver.org).
 - **`VAIRE_LOCK_TIMEOUT`** (whole seconds) bounds how long a command waits for a held
   index. The command line waits for as long as it takes by default; `vaire mcp` tool calls
   wait 30 s. Running out is the new `index_locked` error (exit `1`, cli.md §4.1, §7).
+- **`cargo bench --bench search`** — a search quality and latency benchmark: graded
+  relevance judgments (MRR@10, nDCG@10, Recall@10, Success@1/3, DocIntrusion@1), a public
+  corpus built from this repository's specs and skills, a deterministic 3000-node scale
+  corpus, optional corpora of your own with your own judgments, and cached provider vectors
+  so runs stay offline (`benches/search/README.md`). `tests/search_relevance.rs` holds CI to
+  relevance floors on the public corpus.
 
 ### Changed
 - **`vaire search` ranks by relevance instead of document length** (#52). It used to add a
