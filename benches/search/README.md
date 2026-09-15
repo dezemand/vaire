@@ -169,11 +169,10 @@ measured for latency.
   hard error reporting how many texts were missing. No network, no live embedder at all.
 - **`openai`** — `vaire::embed::from_user_config(&UserConfig::load()?)`, the real network
   embedder. **Requires `--vector-cache <file>`.** Cache hits skip the network; a miss is
-  embedded by the inner embedder (truncated to 8000 bytes first, backed off to a UTF-8
-  char boundary — the OpenAI embedder otherwise sends sections as-is and the API rejects
-  oversized inputs) and the cache file is written back with the newly-embedded vectors.
-  The cache *key* is always the sha256 of the **full, untruncated** text, so a later exact
-  lookup (from indexing or another run) still hits. Never invoked by this repo's own CI or
+  embedded by the inner embedder, which splits and pools oversized sections itself, and
+  the cache file is written back with the newly-embedded vectors. The cache *key* is the
+  sha256 of the full text, so a later exact lookup (from indexing or another run) still
+  hits. Never invoked by this repo's own CI or
   acceptance runs — implemented for completeness, per the benchmark's spec.
 
 Cache file shape (`--vector-cache`):

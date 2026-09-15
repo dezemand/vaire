@@ -123,14 +123,6 @@ struct CacheFile {
     vectors: HashMap<String, Vec<f32>>,
 }
 
-/// A cache is a hard limit on the request size an embedding API accepts. `--embedder
-/// openai` sends miss texts as-is otherwise, so a section long enough to overflow the
-/// provider's own input-size limit would fail the whole run; truncating defensively here
-/// (bytes, backed off to a UTF-8 boundary) keeps the benchmark usable regardless of what a
-/// given provider currently enforces. The cache *key* stays the hash of the full,
-/// untruncated text, so a lookup from indexing or a later run still hits.
-const MAX_EMBED_INPUT_BYTES: usize = 8000;
-
 /// Serves vectors from a `--vector-cache` file, optionally backed by a live inner embedder
 /// (`openai` mode) that fills misses and marks the cache dirty for [`CacheEmbedder::flush`].
 /// `inner: None` is the `cached` mode: any miss is a hard error, never a network call.
@@ -239,31 +231,9 @@ impl Embedder for CacheEmbedder {
                 )));
             };
 
-            // Truncate each miss to at most MAX_EMBED_INPUT_BYTES bytes before sending it to
-            // the inner (network) embedder, backing off to a UTF-8 char boundary. The cache
-            // key below still hashes the FULL original text, so future lookups (including
-            // from the index build that produced this miss) hit regardless.
-            let mut truncated_count = 0usize;
-            let sent: Vec<String> = miss_idx
-                .iter()
-                .map(|&i| {
-                    let t = texts[i].as_str();
-                    if t.len() > MAX_EMBED_INPUT_BYTES {
-                        truncated_count += 1;
-                        truncate_to_byte_boundary(t, MAX_EMBED_INPUT_BYTES)
-                    } else {
-                        t.to_string()
-                    }
-                })
-                .collect();
-            if truncated_count > 0 {
-                eprintln!(
-                    "vector-cache: truncated {truncated_count} of {} miss text(s) to \
-                     {MAX_EMBED_INPUT_BYTES} bytes before embedding",
-                    miss_idx.len()
-                );
-            }
-
+            // Misses go to the inner embedder whole: vaire's OpenAI embedder splits and pools
+            // oversized sections itself, so truncating here would hide what it does.
+            let sent: Vec<String> = miss_idx.iter().map(|&i| texts[i].clone()).collect();
             let embedded = inner.embed(&sent)?;
             let mut map = self.vectors.borrow_mut();
             for (&i, vector) in miss_idx.iter().zip(embedded) {
@@ -289,18 +259,6 @@ impl Embedder for CacheEmbedder {
     }
 }
 
-/// Truncate `s` to at most `max_bytes` bytes, backing off to a valid UTF-8 char boundary.
-fn truncate_to_byte_boundary(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_string();
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].to_string()
-}
-
 fn sha256_hex(text: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(text.as_bytes());
@@ -317,15 +275,6 @@ fn sha256_hex(text: &str) -> String {
 #[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn truncate_backs_off_to_a_char_boundary() {
-        // "é" is 2 bytes (0xC3 0xA9); a max that lands mid-character must back off.
-        let s = "aé"; // 'a' (1 byte) + 'é' (2 bytes) = 3 bytes total
-        assert_eq!(truncate_to_byte_boundary(s, 2), "a");
-        assert_eq!(truncate_to_byte_boundary(s, 3), "aé");
-        assert_eq!(truncate_to_byte_boundary(s, 100), "aé");
-    }
 
     #[derive(Clone)]
     struct StubEmbedder {
@@ -382,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_mode_truncates_the_payload_but_hashes_the_full_text_as_the_key() {
+    fn openai_mode_sends_the_full_text_and_hashes_it_as_the_key() {
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join("cache.json"); // does not exist yet
         let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -390,13 +339,13 @@ mod tests {
             dims: 3,
             calls: calls.clone(),
         };
-        let long_text = "x".repeat(MAX_EMBED_INPUT_BYTES + 500);
+        let long_text = "x".repeat(8500);
         let cache = CacheEmbedder::wrap(Box::new(inner), cache_path.clone()).unwrap();
         let out = cache.embed(std::slice::from_ref(&long_text)).unwrap();
         assert_eq!(out, vec![vec![1.0, 1.0, 1.0]]);
-        // The inner embedder was called with the truncated text...
-        assert_eq!(calls.borrow()[0][0].len(), MAX_EMBED_INPUT_BYTES);
-        // ...but the cache key is the hash of the FULL text, so a later exact-text lookup hits.
+        // The inner embedder gets the whole text (oversized input is its job to handle)...
+        assert_eq!(calls.borrow()[0][0], long_text);
+        // ...and the cache key is the hash of that text, so a later exact-text lookup hits.
         assert!(cache.vectors.borrow().contains_key(&sha256_hex(&long_text)));
         cache.flush().unwrap();
         assert!(cache_path.exists());
