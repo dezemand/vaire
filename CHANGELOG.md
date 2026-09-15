@@ -5,6 +5,17 @@ uses [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+- **`VAIRE_LOCK_TIMEOUT`** (whole seconds) bounds how long a command waits for a held
+  index. The command line waits for as long as it takes by default; `vaire mcp` tool calls
+  wait 30 s. Running out is the new `index_locked` error (exit `1`, cli.md §4.1, §7).
+- **`cargo bench --bench search`** — a search quality and latency benchmark: graded
+  relevance judgments (MRR@10, nDCG@10, Recall@10, Success@1/3, DocIntrusion@1), a public
+  corpus built from this repository's specs and skills, a deterministic 3000-node scale
+  corpus, optional corpora of your own with your own judgments, and cached provider vectors
+  so runs stay offline (`benches/search/README.md`). `tests/search_relevance.rs` holds CI to
+  relevance floors on the public corpus.
+
 ### Changed
 - **`vaire search` ranks by relevance instead of document length** (#52). It used to add a
   raw substring count summed over every section of a file, a flat alias bonus, and vectors
@@ -18,14 +29,38 @@ uses [Semantic Versioning](https://semver.org).
   On the new search benchmark's public corpus MRR@10 rises from 0.23 to 0.69 (0.72 with
   OpenAI embeddings), and queries whose top hit is an unrelated long document drop from 87%
   to about 7%. `score` stays an opaque relative rank, now derived from rank positions.
+- **A search with linked dependencies ranks every package as one search.** Each package's
+  results were ranked on their own and then merged by score — and since a score says where a
+  hit placed within its own package, every dependency's best match scored like the best match
+  overall, however weakly it matched. The word statistics behind the lexical score and each
+  signal's ranking are now computed over all packages together, so a hit is ranked against
+  everything the search found; exact ties go to the package you search from (cli.md §3.4,
+  §6.8). A search within a single package ranks exactly as before.
+- **The catalog queues on the same kind of lock** (`catalog.lock`) instead of polling
+  Turso with backoff and giving up after 5 s.
 
-### Added
-- **`cargo bench --bench search`** — a search quality and latency benchmark: graded
-  relevance judgments (MRR@10, nDCG@10, Recall@10, Success@1/3, DocIntrusion@1), a public
-  corpus built from this repository's specs and skills, a deterministic 3000-node scale
-  corpus, optional corpora of your own with your own judgments, and cached provider vectors
-  so runs stay offline (`benches/search/README.md`). `tests/search_relevance.rs` holds CI to
-  relevance floors on the public corpus.
+### Fixed
+- **A read while another vaire process had the index open failed as "index is corrupt"**
+  (exit `3`) — the one diagnosis that invites rebuilding a healthy index (#50). Turso lets
+  one process open a database at a time, so two concurrent reads could collide, and any
+  read during `vaire index` did. Every index open now first takes `.vaire/index.lock`, an
+  OS file lock (`flock`/`LockFileEx`), so a second process queues in the kernel instead of
+  failing: concurrent reads all answer, a read during `vaire index` waits and answers from
+  the finished index, and two `vaire index` runs serialize. A wait longer than a second
+  says so on stderr.
+- **`vaire mcp` held every index it read for the life of the server**, locking
+  `vaire index` out for as long as an agent session stayed open. Indexes are now released
+  after each request.
+- **`vaire index`/`vaire pull` no longer fail on an oversized section with the OpenAI
+  provider.** A section over the API's 8192-token per-input limit (a large table, a long
+  document with no subheadings) was sent as-is and rejected with `HTTP 400: maximum input
+  length is 8192 tokens`, which aborted the whole run. Such a section is now split into pieces
+  that fit, cut at paragraph or line breaks. Each piece is embedded and the pieces are pooled
+  (a length-weighted mean) back into the section's single vector, so the whole section stays
+  searchable, not just its opening. OpenAI's embeddings models use byte-level BPE, where every
+  token takes at least one byte, so capping piece bytes guarantees the token limit without
+  shipping a tokenizer. Requests are also bounded by total size, keeping a batch of large
+  sections under the 300,000-token per-request limit.
 
 ## [0.3.1] — 2026-09-13
 

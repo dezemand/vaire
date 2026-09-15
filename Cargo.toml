@@ -48,6 +48,7 @@ index = [
     "dep:sha2",
     "dep:inquire",
     "dep:toon-format",
+    "dep:fs4",
 ]
 
 # `vaire pack` — the package artifact. Gated and off by default while the format was
@@ -86,6 +87,10 @@ turso = { version = "0.7", features = ["fts"], optional = true }
 # Turso's embedded API is async (io_uring); we own one current-thread runtime inside the
 # `Index` and `block_on` at that boundary, keeping the rest of the CLI synchronous.
 tokio = { version = "1", features = ["rt"], optional = true }
+# Cross-process locks in front of every database open (`crate::db::DbLock`): `flock` on
+# Unix, `LockFileEx` on Windows, so a waiting process queues in the kernel instead of
+# polling. Already in the dependency tree; std's `File::lock` would need Rust 1.89.
+fs4 = { version = "0.13", optional = true }
 
 # Corpus discovery: include/exclude globs over the working tree (cli.md §6)
 globset = "0.4"

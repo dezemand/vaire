@@ -281,6 +281,27 @@ impl Workspace {
         self.handles.borrow().get(root).cloned()
     }
 
+    /// Close every index this view has opened, keeping everything else it has learned.
+    ///
+    /// For a resident process (`vaire mcp`): an open index holds its package's lock, so a
+    /// view that kept its handles between requests would lock `vaire index` out of every
+    /// package it had ever read, for as long as the server ran. Each handle is replaced
+    /// with an unopened copy rather than emptied in place, because it is shared through an
+    /// `Rc`; nothing between two requests should still be holding one.
+    pub fn release_indexes(&self) {
+        for handle in self.handles.borrow_mut().values_mut() {
+            if handle.index.get().is_some() {
+                *handle = Rc::new(PackageHandle {
+                    id: handle.id.clone(),
+                    root: handle.root.clone(),
+                    config: handle.config.clone(),
+                    is_run_root: handle.is_run_root,
+                    index: OnceCell::new(),
+                });
+            }
+        }
+    }
+
     /// The member set a fan-out read consults: the run-root plus every locatable closure
     /// member (sorted + deduped by canonical root), and the names of dependencies that
     /// could not be located — one shared definition so the skip/dedup semantics stay

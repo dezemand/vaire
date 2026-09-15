@@ -26,8 +26,10 @@
 //! The resolution keeps Turso, because the exclusive lock **is** the cross-process mutex
 //! that would otherwise have needed building — and an OS file lock is released when its
 //! process dies, so there are no stale locks to recover from. Two rules make it work, both
-//! enforced in `catalog`: connections are short-lived, and contention is retried rather
-//! than failed. With those, this test passes with every write landing exactly once. The
+//! enforced in `catalog`: connections are short-lived, and contention waits rather than
+//! fails — on `catalog.lock`, an OS lock taken before Turso's, so a second process queues
+//! in the kernel instead of polling (issue #50 moved it there from a retry loop). With
+//! those, this test passes with every write landing exactly once. The
 //! cost is honest and worth restating: **catalog access across processes is serialized**,
 //! so anything holding a catalog handle open across slow work blocks every other vaire
 //! process on the machine.

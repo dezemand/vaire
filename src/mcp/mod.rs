@@ -11,6 +11,7 @@
 //! (mirroring exit `4`), not a build.
 
 use std::io::{self, BufRead, Write};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -33,6 +34,12 @@ pub const READ_TOOLS: [&str; 8] = [
     "deps",
 ];
 
+/// How long a tool call waits for an index another process holds (usually a `vaire index`)
+/// before answering with an `index_locked` tool error. An agent is mid-conversation: an
+/// error it can act on serves it better than a call that hangs behind a long rebuild.
+/// `VAIRE_LOCK_TIMEOUT` overrides it.
+pub const LOCK_WAIT: Duration = Duration::from_secs(30);
+
 /// Run the STDIO MCP server until the client disconnects (EOF on stdin).
 pub fn serve(ctx: Ctx) -> Result<()> {
     let stdin = io::stdin();
@@ -43,7 +50,12 @@ pub fn serve(ctx: Ctx) -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = handle_line(&ctx, &line) {
+        let response = handle_line(&ctx, &line);
+        // Before answering, not after: a server holds each index only for the request that
+        // opened it. Kept open between requests, an index would lock `vaire index` out for
+        // as long as the agent's session lasts — hours — and a rebuild could never land.
+        ctx.release_indexes();
+        if let Some(response) = response {
             writeln!(out, "{response}")?;
             out.flush()?;
         }

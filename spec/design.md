@@ -481,7 +481,11 @@ ranks first) and **vector** (the nearest sections, with only a low similarity fl
 produced the biggest numbers decide: a term count summed over every section made long
 documents outrank the node a query was about, and a high cosine threshold meant vectors never
 moved a result (issue #52). Fused by rank, each signal's vote is bounded, so the precision of
-names and FTS and the recall of vectors both count.
+names and FTS and the recall of vectors both count. A search over linked packages is ranked
+as **one** search: every package's own index gathers candidates, but the word statistics and
+each signal's ranking are computed over all of them together. Ranked package by package, the
+best match each dependency happened to have scored like the best match overall, however weak
+it was.
 
 **Embeddings — per section, local, cached.** Sections split on headings (`##`); each chunk
 is embedded; the **file is the returned unit**. Vectors live in the *same* `.vaire/index.db`

@@ -20,6 +20,12 @@
 //! every file without one, regardless of lexical/vector standing (see [`fuse`] for exactly
 //! where that line sits and why).
 //!
+//! [`search_members`] runs the same passes over several indexes — a package and its linked
+//! dependencies — and ranks them as one search: the lexical score's corpus statistics
+//! ([`CorpusStats`]) are summed over every member, and each signal's ranked list and the
+//! fusion cover all members' candidates together, so a hit's score places it among
+//! everything the search found. Ties go to the package the search runs in.
+//!
 //! (Reference resolution, design.md §8, is the *same* machinery used in the other
 //! direction — alias + FTS first, embeddings as backup — and will live alongside this.)
 
@@ -248,7 +254,7 @@ const MAX_ANCHORS: usize = 3;
 struct Acc {
     node_type: String,
     path: String,
-    /// [`lexical_candidates`]'s per-file score: BM25 MAX over matching sections.
+    /// [`lexical_score`]'s per-file score: BM25 MAX over matching sections.
     lexical_score: f32,
     /// That file's best-scoring sections, `(line, heading)`, best first, capped at
     /// [`MAX_ANCHORS`] — bodies are fetched later, only for files that make the final cut
@@ -322,22 +328,104 @@ pub fn search_prepared(
     query: &str,
     opts: &SearchOpts,
 ) -> Result<Vec<SearchHit>> {
-    let tokens = tokenize(query);
-    if tokens.is_empty() {
+    let member = SearchMember {
+        package: None,
+        index,
+    };
+    Ok(search_members_prepared(&[member], qvec, query, opts)?
+        .into_iter()
+        .map(|found| found.hit)
+        .collect())
+}
+
+/// One index taking part in [`search_members`]. `package` is `None` for the package the
+/// search runs in, whose ids stay bare, and the package's name for a dependency, whose hits
+/// come back qualified (`@pkg/type:id`).
+pub struct SearchMember<'a> {
+    pub package: Option<&'a str>,
+    pub index: &'a Index,
+}
+
+/// A hit from [`search_members`]: `member` is the position, in the slice passed in, of the
+/// member it came from; `hit.id` is already qualified for that member.
+pub struct MemberHit {
+    pub member: usize,
+    pub hit: SearchHit,
+}
+
+/// A candidate file's key while ranking: its member's position in the ranking order (the
+/// package the search runs in first, then dependencies by name), then its id within that
+/// member. Every tie — within one signal's ranked list or on the final score — is broken by
+/// this key, so a tie goes to the package the search runs in, whatever order the caller
+/// listed the members in.
+type CandidateKey = (usize, String);
+
+/// [`search`] over several indexes as if they were one. The query is embedded once and each
+/// member gathers its own candidates, but everything that ranks them — the corpus statistics
+/// behind the lexical score, each signal's ranked list, and the [`fuse`] over those lists —
+/// is computed over all members together. A file's score therefore says how it compares with
+/// everything the search found: the best match a small dependency happens to have does not
+/// score like the best match overall, as it did when each member was ranked on its own.
+pub fn search_members(
+    members: &[SearchMember<'_>],
+    embedder: &dyn Embedder,
+    query: &str,
+    opts: &SearchOpts,
+) -> Result<Vec<MemberHit>> {
+    if members.is_empty() {
         return Ok(Vec::new());
     }
-    let mut acc: BTreeMap<String, Acc> = BTreeMap::new();
+    let qvec = embed_query(embedder, query)?;
+    search_members_prepared(members, qvec.as_deref(), query, opts)
+}
 
-    for (id, m) in lexical_candidates(index, &tokens)? {
-        let entry = acc
-            .entry(id)
-            .or_insert_with(|| Acc::new(m.node_type, m.path));
-        entry.lexical_score = m.score;
-        entry.lexical_sections = m.sections;
+/// [`search_members`] with an already-embedded query vector.
+fn search_members_prepared(
+    members: &[SearchMember<'_>],
+    qvec: Option<&[f32]>,
+    query: &str,
+    opts: &SearchOpts,
+) -> Result<Vec<MemberHit>> {
+    let tokens = tokenize(query);
+    if tokens.is_empty() || members.is_empty() {
+        return Ok(Vec::new());
     }
-    name_pass(index, &tokens, &mut acc)?;
-    if let Some(qvec) = qvec {
-        vector_pass(index, qvec, VECTOR_TOP_K, &mut acc)?;
+    // The ranking order behind every `CandidateKey`: `package: None` sorts first.
+    let mut order: Vec<usize> = (0..members.len()).collect();
+    order.sort_by_key(|&m| members[m].package);
+
+    // Lexical scores only compare across members when they come from one set of corpus
+    // statistics, so every member's candidates are gathered before any of them is scored.
+    let terms = scored_terms(&tokens);
+    let mut gathered = Vec::with_capacity(order.len());
+    let mut stats = CorpusStats::default();
+    for &m in &order {
+        let candidates = lexical_candidates(members[m].index, &tokens, &terms)?;
+        stats.add(&candidates.stats);
+        gathered.push(candidates);
+    }
+    let (idf, avgdl) = stats.idf_and_avgdl(&terms);
+
+    let mut acc: BTreeMap<CandidateKey, Acc> = BTreeMap::new();
+    let mut in_scope: Vec<HashSet<String>> = Vec::new();
+    for (pos, (&m, candidates)) in order.iter().zip(gathered).enumerate() {
+        let index = members[m].index;
+        let mut member_acc: BTreeMap<String, Acc> = BTreeMap::new();
+        for (id, lexical) in lexical_score(candidates, &terms, &idf, avgdl) {
+            let entry = member_acc
+                .entry(id)
+                .or_insert_with(|| Acc::new(lexical.node_type, lexical.path));
+            entry.lexical_score = lexical.score;
+            entry.lexical_sections = lexical.sections;
+        }
+        name_pass(index, &tokens, &mut member_acc)?;
+        if let Some(qvec) = qvec {
+            vector_pass(index, qvec, VECTOR_TOP_K, &mut member_acc)?;
+        }
+        if let Some(scope) = &opts.scope {
+            in_scope.push(scope_set(index, scope, &opts.scope_field)?);
+        }
+        acc.extend(member_acc.into_iter().map(|(id, a)| ((pos, id), a)));
     }
     fuse(&mut acc);
 
@@ -345,37 +433,61 @@ pub fn search_prepared(
     if let Some(t) = &opts.type_filter {
         acc.retain(|_, a| a.node_type == t.as_str());
     }
-    if let Some(scope) = &opts.scope {
-        let in_scope = scope_set(index, scope, &opts.scope_field)?;
-        acc.retain(|id, _| in_scope.contains(id));
+    if opts.scope.is_some() {
+        acc.retain(|(pos, id), _| in_scope[*pos].contains(id));
     }
 
     // Rank + truncate *before* resolving anchors, so the small DB lookups in
     // `resolve_anchors` only ever touch the files that actually make the final cut.
-    let mut hits: Vec<(String, Acc)> = acc.into_iter().collect();
-    hits.sort_by(|(xid, x), (yid, y)| {
+    let mut ranked: Vec<(CandidateKey, Acc)> = acc.into_iter().collect();
+    ranked.sort_by(|(xk, x), (yk, y)| {
         y.score
             .partial_cmp(&x.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| xid.cmp(yid))
+            .then_with(|| xk.cmp(yk))
     });
-    hits.truncate(opts.limit.unwrap_or(10));
+    ranked.truncate(opts.limit.unwrap_or(10));
 
-    resolve_anchors(index, &tokens, &mut hits)?;
-
-    Ok(hits
-        .into_iter()
-        .map(|(id, a)| SearchHit {
-            id: NodeId::parse_stored(&id),
-            node_type: NodeType::new(a.node_type),
-            path: a.path,
-            score: a.score,
-            anchors: a.anchors,
-        })
-        .collect())
+    // Anchors come from each hit's own index: resolve them member by member, then put the
+    // hits back in rank order.
+    let mut by_member: BTreeMap<usize, Vec<(usize, String, Acc)>> = BTreeMap::new();
+    for (rank, ((pos, id), a)) in ranked.into_iter().enumerate() {
+        by_member.entry(pos).or_default().push((rank, id, a));
+    }
+    let mut hits: Vec<(usize, MemberHit)> = Vec::new();
+    for (pos, group) in by_member {
+        let member = &members[order[pos]];
+        let (ranks, mut selected): (Vec<usize>, Vec<(String, Acc)>) = group
+            .into_iter()
+            .map(|(rank, id, a)| (rank, (id, a)))
+            .unzip();
+        resolve_anchors(member.index, &tokens, &mut selected)?;
+        for (rank, (id, a)) in ranks.into_iter().zip(selected) {
+            let mut node_id = NodeId::parse_stored(&id);
+            if let Some(package) = member.package {
+                node_id = node_id.with_package(package.to_string());
+            }
+            let hit = SearchHit {
+                id: node_id,
+                node_type: NodeType::new(a.node_type),
+                path: a.path,
+                score: a.score,
+                anchors: a.anchors,
+            };
+            hits.push((
+                rank,
+                MemberHit {
+                    member: order[pos],
+                    hit,
+                },
+            ));
+        }
+    }
+    hits.sort_by_key(|(rank, _)| *rank);
+    Ok(hits.into_iter().map(|(_, found)| found).collect())
 }
 
-/// One node's lexical (BM25) match (see [`lexical_candidates`]): the file-level score (MAX
+/// One node's lexical (BM25) match (see [`lexical_score`]): the file-level score (MAX
 /// aggregation over its matched sections) and up to [`MAX_ANCHORS`] of its best-scoring
 /// sections, `(line, heading)`, best first.
 struct LexicalMatch {
@@ -385,15 +497,75 @@ struct LexicalMatch {
     sections: Vec<(u32, String)>,
 }
 
-/// The lexical signal: Tantivy's own `fts_score` triages candidate sections cheaply (its
-/// field weights apply before this module's heading boost and it can't aggregate per
-/// file, so it never becomes the final ranking — only which sections are worth a body
-/// fetch and a proper re-score), then [`section_bm25`] scores each candidate in Rust with
-/// corpus IDF, section-length normalisation, a heading boost, and whole-token frequency
-/// instead of substring counts. A file's matching sections are combined into one per-file
-/// score by [`aggregate_sections`] (MAX): a long document no longer wins just by having
-/// more matching sections. Everything downstream ([`fuse`], `resolve_anchors`) only ever
-/// reads the resulting [`LexicalMatch`], never the underlying sections.
+/// One member's lexical candidates, gathered but not yet scored (see
+/// [`lexical_candidates`]). Scoring waits until every member of a search has been gathered,
+/// so that all of them are scored against the same [`CorpusStats`].
+struct LexicalCandidates {
+    files: Vec<CandidateFile>,
+    stats: CorpusStats,
+}
+
+/// A file in [`LexicalCandidates`], with its matched sections as `(heading, line, body)`.
+struct CandidateFile {
+    id: String,
+    node_type: String,
+    path: String,
+    sections: Vec<(String, u32, String)>,
+}
+
+/// The corpus statistics a query's BM25 scores are computed from: how many sections there
+/// are, their total length (the character proxy [`section_bm25`] normalises by), and each
+/// scored term's document frequency, in [`scored_terms`] order. They add up across members
+/// to exactly the statistics of one index holding all their sections — so a word that is
+/// common in the package being searched weighs as little in a dependency's sections as in
+/// its own, instead of scoring high there merely because the dependency rarely uses it.
+#[derive(Default)]
+struct CorpusStats {
+    section_count: i64,
+    total_len: i64,
+    dfs: Vec<i64>,
+}
+
+impl CorpusStats {
+    fn add(&mut self, other: &CorpusStats) {
+        self.section_count += other.section_count;
+        self.total_len += other.total_len;
+        if self.dfs.len() < other.dfs.len() {
+            self.dfs.resize(other.dfs.len(), 0);
+        }
+        for (total, df) in self.dfs.iter_mut().zip(&other.dfs) {
+            *total += df;
+        }
+    }
+
+    /// Each scored term's classic BM25 IDF, and the average section length.
+    fn idf_and_avgdl(&self, terms: &[ScoredTerm]) -> (HashMap<String, f32>, f32) {
+        let n = self.section_count as f32;
+        let mut idf: HashMap<String, f32> = HashMap::with_capacity(terms.len());
+        for (i, t) in terms.iter().enumerate() {
+            let df = self.dfs.get(i).copied().unwrap_or(0) as f32;
+            idf.insert(t.text.clone(), (1.0 + (n - df + 0.5) / (df + 0.5)).ln());
+        }
+        let avgdl = if self.section_count > 0 {
+            (self.total_len as f64 / self.section_count as f64).max(1.0) as f32
+        } else {
+            1.0
+        };
+        (idf, avgdl)
+    }
+}
+
+/// The lexical signal, first half: Tantivy's own `fts_score` triages candidate sections
+/// cheaply (its field weights apply before this module's heading boost and it can't
+/// aggregate per file, so it never becomes the final ranking — only which sections are
+/// worth a body fetch and a proper re-score), and this gathers those sections' bodies plus
+/// the member's [`CorpusStats`]. The second half, [`lexical_score`], scores each candidate
+/// in Rust with [`section_bm25`] — corpus IDF, section-length normalisation, a heading
+/// boost, and whole-token frequency instead of substring counts — and combines a file's
+/// matching sections into one per-file score with [`aggregate_sections`] (MAX): a long
+/// document no longer wins just by having more matching sections. Everything downstream
+/// ([`fuse`], `resolve_anchors`) only ever reads the resulting [`LexicalMatch`], never the
+/// underlying sections.
 ///
 /// The ranked candidate statement ([`fts_candidates`]) is one of the two patterns Turso's
 /// ranked optimizer path actually matches: no JOIN, the same `?1` bound to both
@@ -401,7 +573,29 @@ struct LexicalMatch {
 /// JOIN or an extra `ORDER BY` key silently drops to the *fallback* pattern, which returns
 /// `0.0` for every row with no error, so `node_type`/`path` are fetched by a separate query
 /// ([`node_meta`]) instead of being joined into this one.
-fn lexical_candidates(index: &Index, tokens: &[String]) -> Result<BTreeMap<String, LexicalMatch>> {
+fn lexical_candidates(
+    index: &Index,
+    tokens: &[String],
+    terms: &[ScoredTerm],
+) -> Result<LexicalCandidates> {
+    // Section count and total length, whether or not anything matches: a member without a
+    // single candidate still counts toward the statistics every member is scored against,
+    // as its sections would in one index holding them all. Both are whole-corpus
+    // aggregates, independent of the query and of the candidate cap below, so one round
+    // trip serves both.
+    let (section_count, total_len) = index
+        .query_opt(
+            "SELECT count(*), coalesce(sum(length(heading) + length(body)), 0) FROM sections",
+            (),
+            |r| Ok((col_i64(r, 0)?, col_i64(r, 1)?)),
+        )?
+        .unwrap_or((0, 0));
+    let mut stats = CorpusStats {
+        section_count,
+        total_len,
+        dfs: vec![0; terms.len()],
+    };
+
     let match_query = build_match_query(tokens);
     let mut candidates = fts_candidates(index, &match_query, FTS_CANDIDATE_CAP)?;
     if !candidates.is_empty() && candidates.iter().all(|c| c.tantivy_score == 0.0) {
@@ -420,26 +614,17 @@ fn lexical_candidates(index: &Index, tokens: &[String]) -> Result<BTreeMap<Strin
         candidates = fts_candidates(index, &match_query, None)?;
     }
     if candidates.is_empty() {
-        return Ok(BTreeMap::new());
+        return Ok(LexicalCandidates {
+            files: Vec::new(),
+            stats,
+        });
     }
 
-    // Corpus statistics for this query: total section count, the average section length
-    // (a character proxy, computed the same way per section in `section_bm25`), and each
-    // scored term's document frequency for the classic BM25 IDF — including inflection
-    // variants, each a distinct literal token with its own document frequency. N and
-    // avgdl in one round trip (both are whole-corpus aggregates, independent of the query
-    // and of the candidate cap above) rather than two, and every term's df likewise in one
+    // Each scored term's document frequency for the classic BM25 IDF — including inflection
+    // variants, each a distinct literal token with its own document frequency — in one
     // round trip: a `SELECT` of N scalar subqueries, each the exact single-token
     // `fts_match` shape already known to hit the FTS index, rather than N separate
     // statements.
-    let (n, avgdl) = index
-        .query_opt(
-            "SELECT count(*), avg(length(heading) + length(body)) FROM sections",
-            (),
-            |r| Ok((col_i64(r, 0)? as f32, col_f64(r, 1)?.max(1.0) as f32)),
-        )?
-        .unwrap_or((0.0, 1.0));
-    let terms = scored_terms(tokens);
     let df_sql = format!(
         "SELECT {}",
         (1..=terms.len())
@@ -453,16 +638,11 @@ fn lexical_candidates(index: &Index, tokens: &[String]) -> Result<BTreeMap<Strin
         .iter()
         .map(|t| turso::Value::from(t.text.clone()))
         .collect();
-    let dfs: Vec<i64> = index
+    stats.dfs = index
         .query_opt(&df_sql, df_params, |r| {
             (0..terms.len()).map(|i| col_i64(r, i)).collect()
         })?
         .unwrap_or_else(|| vec![0; terms.len()]);
-    let mut idf: HashMap<String, f32> = HashMap::with_capacity(terms.len());
-    for (t, df) in terms.iter().zip(dfs) {
-        let df = df as f32;
-        idf.insert(t.text.clone(), (1.0 + (n - df + 0.5) / (df + 0.5)).ln());
-    }
 
     // Bodies for exactly the surviving candidates, fetched by primary key — never for
     // every fts_match'd section, however many a long document contributes.
@@ -482,21 +662,40 @@ fn lexical_candidates(index: &Index, tokens: &[String]) -> Result<BTreeMap<Strin
             .or_default()
             .push((c.heading, c.line, body));
     }
-    if by_node.is_empty() {
-        return Ok(BTreeMap::new());
-    }
     let ids: Vec<String> = by_node.keys().cloned().collect();
     let meta = node_meta(index, &ids)?;
+    let files = by_node
+        .into_iter()
+        .filter_map(|(id, sections)| {
+            // defensive: a matched section with no owning node (should not happen)
+            let (node_type, path) = meta.get(&id)?.clone();
+            Some(CandidateFile {
+                id,
+                node_type,
+                path,
+                sections,
+            })
+        })
+        .collect();
+    Ok(LexicalCandidates { files, stats })
+}
 
+/// The lexical signal, second half: score one member's [`lexical_candidates`] with the
+/// search's shared corpus statistics — each section by [`section_bm25`], each file by its
+/// best section ([`aggregate_sections`]).
+fn lexical_score(
+    candidates: LexicalCandidates,
+    terms: &[ScoredTerm],
+    idf: &HashMap<String, f32>,
+    avgdl: f32,
+) -> BTreeMap<String, LexicalMatch> {
     let mut out: BTreeMap<String, LexicalMatch> = BTreeMap::new();
-    for (id, sections) in by_node {
-        let Some((node_type, path)) = meta.get(&id) else {
-            continue; // defensive: a matched section with no owning node (should not happen)
-        };
-        let mut scored: Vec<(f32, u32, String)> = sections
+    for file in candidates.files {
+        let mut scored: Vec<(f32, u32, String)> = file
+            .sections
             .into_iter()
             .filter_map(|(heading, line, body)| {
-                let score = section_bm25(&heading, &body, &terms, &idf, avgdl);
+                let score = section_bm25(&heading, &body, terms, idf, avgdl);
                 (score > 0.0).then_some((score, line, heading))
             })
             .collect();
@@ -518,16 +717,16 @@ fn lexical_candidates(index: &Index, tokens: &[String]) -> Result<BTreeMap<Strin
             .map(|(_, line, heading)| (line, heading))
             .collect();
         out.insert(
-            id,
+            file.id,
             LexicalMatch {
-                node_type: node_type.clone(),
-                path: path.clone(),
+                node_type: file.node_type,
+                path: file.path,
                 score: aggregate_sections(&section_scores),
                 sections,
             },
         );
     }
-    Ok(out)
+    out
 }
 
 /// One ranked FTS candidate section — [`fts_candidates`]'s row shape. `tantivy_score` is
@@ -604,7 +803,7 @@ fn aggregate_sections(scores: &[f32]) -> f32 {
 
 /// BM25F-lite score for one section against `terms` (each already carrying its own
 /// `weight` — see [`scored_terms`]): combined term frequency `tf_body + W_HEADING *
-/// tf_heading`, corpus `idf` (from `lexical_candidates`), and length normalisation against
+/// tf_heading`, corpus `idf` (from [`CorpusStats`]), and length normalisation against
 /// `avgdl` using the section's own character length — the exact character proxy `avgdl`
 /// was computed with, so the two stay comparable. A term's full BM25 contribution (its own
 /// idf and tf-saturation curve) is scaled by its `weight`, mirroring how the Tantivy
@@ -877,7 +1076,7 @@ fn vector_pass(
 /// fusion: `score = Σ w_s / (RRF_K + rank_s)` over whichever of lexical / name / vector
 /// this file has a rank in at all (a file absent from a signal's list contributes `0.0`
 /// for that term — never a rank of "last place"). Each signal's ranked list breaks ties by
-/// `id` ascending, same as the final output (`BTreeMap` already iterates that way, so a
+/// [`CandidateKey`], same as the final output (`BTreeMap` already iterates that way, so a
 /// stable sort by score alone gets this for free).
 ///
 /// The name signal is folded in twice, deliberately: every nonzero tier contributes its
@@ -888,7 +1087,7 @@ fn vector_pass(
 /// Gating a looser tier this way (e.g. "every query token present in the candidate") let
 /// more documents intrude at rank 1 without helping precision elsewhere — tiers below
 /// [`NAME_GATE_TIER`] stay soft RRF contributors, never a hard gate.
-fn fuse(acc: &mut BTreeMap<String, Acc>) {
+fn fuse(acc: &mut BTreeMap<CandidateKey, Acc>) {
     if acc.is_empty() {
         return;
     }
@@ -924,14 +1123,14 @@ fn squash_unit(score: f32) -> f32 {
     }
 }
 
-/// Rank every file `key` accepts, highest first, ties broken by `id` ascending (`acc`
+/// Rank every file `key` accepts, highest first, ties broken by [`CandidateKey`] (`acc`
 /// already iterates that way, and the sort below is stable). A file `key` rejects
 /// (returns `None`) has no rank — no presence in this signal at all.
 fn rank_signal(
-    acc: &BTreeMap<String, Acc>,
+    acc: &BTreeMap<CandidateKey, Acc>,
     key: impl Fn(&Acc) -> Option<f32>,
-) -> HashMap<String, u32> {
-    let mut items: Vec<(&String, f32)> = acc
+) -> HashMap<CandidateKey, u32> {
+    let mut items: Vec<(&CandidateKey, f32)> = acc
         .iter()
         .filter_map(|(id, a)| key(a).map(|v| (id, v)))
         .collect();
@@ -1380,19 +1579,13 @@ fn members_for(
     Ok((members, skipped))
 }
 
-/// [`search`] across the run-root + its dependency closure: the query is embedded ONCE,
-/// each member runs the same three passes *and the same [`fuse`]* against its own index.
-/// Fusion is reciprocal-rank (plus the name tier's hard gate), so a file's score depends on
-/// its rank within that member's own candidate set and its own name-tier gate, not on any
-/// shared scale — "comparable" now means identical ranks (and identical gates) score
-/// identically everywhere (same code, same constants), not that two members' top hits
-/// reflect equally strong matches. A weak best-in-member match can still outrank a stronger
-/// one from a deeper member. Per-member results carry the per-member LIMIT, and the merge
-/// re-ranks by (score desc, qualified id asc) before the global limit; fusing across the
-/// whole merged pool instead of per member would fix this, but needs each member to expose
-/// its raw per-signal candidates before ranking — a bigger change than this pass, not
-/// implemented here. A member whose index is unavailable is skipped and surfaced — except
-/// the run-root, whose failure is the classic local error.
+/// [`search`] across the run-root + its dependency closure, ranked as one search over all of
+/// them ([`search_members`]): the query is embedded once, and each signal is ranked over every
+/// member's candidates together — so where a hit lands says how it compares with everything
+/// the search found, whichever package it came from, and a tie goes to the run-root. A
+/// member whose index is unavailable is skipped and surfaced — except the run-root, whose
+/// failure is the classic local error, and the dependency a `--scope @pkg/…` names: that
+/// search asks for that one member, so its failure is returned instead.
 pub fn search_workspace(
     ws: &Workspace,
     embedder: &dyn Embedder,
@@ -1408,7 +1601,26 @@ pub fn search_workspace(
     let (members, mut skipped) = members_for(ws, scope_pkg.as_deref(), local)?;
     let current_root = ws.current().root.clone();
 
-    let qvec = embed_query(embedder, query)?;
+    // Open every member's index before searching any of them: a dependency whose index is
+    // unavailable is left out of the search and reported, not a failure.
+    let mut opened: Vec<(Rc<PackageHandle>, bool)> = Vec::new();
+    for member in members {
+        let is_run_root = member.root == current_root;
+        match member.index() {
+            Ok(_) => opened.push((member, is_run_root)),
+            Err(e) if is_run_root => return Err(e),
+            Err(e) if scope_pkg.is_some() => return Err(e), // the one member asked for
+            Err(_) => skipped.push(member.id.to_string()),
+        }
+    }
+    let indexes: Vec<SearchMember<'_>> = opened
+        .iter()
+        .map(|(handle, is_run_root)| SearchMember {
+            package: (!is_run_root).then(|| handle.id.as_str()),
+            index: handle.index().expect("opened above"),
+        })
+        .collect();
+
     // The member-local view of --scope: the container id without its @pkg/ qualifier
     // (scope edges store bare within-package targets).
     let member_opts = SearchOpts {
@@ -1422,41 +1634,20 @@ pub fn search_workspace(
         scope_field: opts.scope_field.clone(),
     };
 
-    let mut all: Vec<WsHit> = Vec::new();
-    for member in members {
-        let is_run_root = member.root == current_root;
-        let index = match member.index() {
-            Ok(index) => index,
-            Err(e) if is_run_root => return Err(e),
-            Err(e) if scope_pkg.is_some() => return Err(e), // the one member asked for
-            Err(_) => {
-                skipped.push(member.id.to_string());
-                continue;
-            }
-        };
-        for mut hit in search_prepared(index, qvec.as_deref(), query, &member_opts)? {
-            if !is_run_root {
-                hit.id = hit.id.with_package(member.id.0.clone());
-            }
-            all.push(WsHit {
-                package: (!is_run_root).then(|| member.id.to_string()),
-                root: member.root.clone(),
+    let hits = search_members(&indexes, embedder, query, &member_opts)?
+        .into_iter()
+        .map(|MemberHit { member, hit }| {
+            let (handle, is_run_root) = &opened[member];
+            WsHit {
+                package: (!is_run_root).then(|| handle.id.to_string()),
+                root: handle.root.clone(),
                 hit,
-            });
-        }
-    }
-
-    all.sort_by(|x, y| {
-        y.hit
-            .score
-            .partial_cmp(&x.hit.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| x.hit.id.cmp(&y.hit.id))
-    });
-    all.truncate(opts.limit.unwrap_or(10));
+            }
+        })
+        .collect();
     skipped.sort();
     skipped.dedup();
-    Ok((all, skipped))
+    Ok((hits, skipped))
 }
 
 /// [`suggest`] across the run-root + its dependency closure (same member routing and
@@ -1589,6 +1780,99 @@ mod tests {
                 "rowid {} must address {}'s own row, not some other section: {body:?}",
                 c.rowid,
                 c.node_id
+            );
+        }
+    }
+
+    /// Insert a node and its sections directly, for tests that exercise the whole ranking
+    /// pipeline without a corpus on disk.
+    fn insert_node(
+        index: &Index,
+        id: &str,
+        node_type: &str,
+        alias_text: &str,
+        sections: &[(String, String)],
+    ) {
+        index
+            .execute(
+                "INSERT INTO nodes (id, type, path, frontmatter, package, alias_text)
+                 VALUES (?1, ?2, ?3, '{}', 'test', ?4)",
+                turso::params![id, node_type, format!("{id}.md"), alias_text],
+            )
+            .expect("insert node");
+        for (i, (heading, body)) in sections.iter().enumerate() {
+            index
+                .execute(
+                    "INSERT INTO sections (node_id, heading, line, body) VALUES (?1, ?2, ?3, ?4)",
+                    turso::params![id, heading.as_str(), (i as i64) * 10 + 1, body.as_str()],
+                )
+                .expect("insert section");
+        }
+    }
+
+    /// Issue #52's failure mode, end to end: a short node that is exactly what the query is
+    /// about must outrank a long, unrelated document that merely mentions the query's words
+    /// across many of its sections. Scoring by a sum of term hits over every section of a
+    /// file made the long document win both queries below.
+    #[test]
+    fn a_relevant_short_node_outranks_a_long_unrelated_document() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index =
+            Index::create_for_bulk_load(&dir.path().join("index.db")).expect("create index");
+        insert_node(
+            &index,
+            "principle:gate-the-rare-act",
+            "principle",
+            "gate the rare act",
+            &[(
+                String::new(),
+                "# Gate the rare act\n\nMinting a new entity is irreversible, so entity creation \
+                 is gated; everyday additive writes are not."
+                    .to_string(),
+            )],
+        );
+        let filler = "Flags, exit codes and output formats are listed with an example \
+                      invocation, the expected JSON shape and the human-readable rendering.";
+        let sections: Vec<(String, String)> = (0..40)
+            .map(|i| {
+                let body = if i % 2 == 0 {
+                    format!(
+                        "{filler} An entity can appear in an example here. Index creation \
+                         happens on demand. Nothing in this command is irreversible. A gate, \
+                         a rare case or an act of configuration is described once. {filler}"
+                    )
+                } else {
+                    format!("{filler} {filler}")
+                };
+                (format!("Command {i}"), body)
+            })
+            .collect();
+        insert_node(
+            &index,
+            "document:cli-spec",
+            "document",
+            "cli spec",
+            &sections,
+        );
+        index.ensure_fts_index().expect("build fts index");
+
+        let opts = SearchOpts {
+            limit: Some(10),
+            ..Default::default()
+        };
+        // The first query has no name match, so only lexical ranking can decide it; the
+        // second is the issue's own example, decided by the exact name match.
+        for query in ["irreversible entity creation", "gate the rare act"] {
+            let hits = search_prepared(&index, None, query, &opts).expect("search");
+            let ids: Vec<String> = hits.iter().map(|h| h.id.to_string()).collect();
+            assert!(
+                ids.iter().any(|id| id == "document:cli-spec"),
+                "{query:?}: the long document matches too, so this checks ranking, not recall: {ids:?}"
+            );
+            assert_eq!(
+                ids.first().map(String::as_str),
+                Some("principle:gate-the-rare-act"),
+                "{query:?}: the short node the query is about must rank first: {ids:?}"
             );
         }
     }
@@ -1752,5 +2036,229 @@ mod tests {
             1
         );
         assert_eq!(name_match_tier(&tokenize("zzz"), &tokenize("loose end")), 0);
+    }
+
+    /// A single-section test node: `(id, name and aliases, sections)`.
+    type TestNode = (&'static str, &'static str, Vec<(String, String)>);
+
+    fn node(id: &'static str, alias_text: &'static str, text: &str) -> TestNode {
+        (id, alias_text, vec![(String::new(), text.to_string())])
+    }
+
+    /// A throwaway index holding `nodes`, every one a `concept`, with its FTS index built.
+    fn index_of(dir: &tempfile::TempDir, file: &str, nodes: &[TestNode]) -> Index {
+        let index = Index::create_for_bulk_load(&dir.path().join(file)).expect("create index");
+        for (id, alias_text, sections) in nodes {
+            insert_node(&index, id, "concept", alias_text, sections);
+        }
+        index.ensure_fts_index().expect("build fts index");
+        index
+    }
+
+    /// The package a cross-package test searches from: three pages about "kubernetes cluster
+    /// access" and two about something else. No id, name or alias shares a word with that
+    /// query, so for it the lexical signal alone ranks these pages.
+    fn local_nodes() -> Vec<TestNode> {
+        vec![
+            node(
+                "concept:kubectl-guide",
+                "kubectl guide",
+                "# Kubernetes cluster access\n\nRequest kubectl access to a Kubernetes cluster \
+                 through the access portal; cluster access is granted per team.",
+            ),
+            node(
+                "concept:team-clusters",
+                "team clusters",
+                "# Kubernetes clusters\n\nThe platform team runs two Kubernetes clusters, one for \
+                 staging and one for production; each cluster has its own control plane.",
+            ),
+            node(
+                "concept:request-process",
+                "request process",
+                "# Access requests\n\nEvery access request names the cluster or service it is \
+                 for and is approved by its owner.",
+            ),
+            node(
+                "concept:backups",
+                "backups",
+                "# Backups\n\nNightly backups of every virtual machine are kept for thirty days.",
+            ),
+            node(
+                "concept:dns",
+                "dns records",
+                "# DNS records\n\nInternal DNS records are managed in the team's own zone file.",
+            ),
+        ]
+    }
+
+    /// A dependency of [`local_nodes`] whose only page sharing a word with "kubernetes cluster
+    /// access" is about something else entirely.
+    fn dependency_nodes() -> Vec<TestNode> {
+        vec![
+            node(
+                "concept:makerspace",
+                "community makerspace",
+                "# Community makerspace\n\nThe makerspace lends tools to local makers, hosts a \
+                 monthly meetup, and gives new members access to its workshop.",
+            ),
+            node(
+                "concept:meetups",
+                "meetups",
+                "# Meetups\n\nMonthly meetups share projects with the wider community.",
+            ),
+        ]
+    }
+
+    /// Ranked on its own, a dependency's best match takes first place there and scores like
+    /// the best match in the package being searched, however weakly it matches — so merging
+    /// per-package results by score put it on top. Ranked as one search, it must fall below
+    /// every page that matches the query better, wherever those pages live.
+    #[test]
+    fn a_weak_best_match_in_a_dependency_does_not_outrank_stronger_local_matches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = index_of(&dir, "root.db", &local_nodes());
+        let dep = index_of(&dir, "dep.db", &dependency_nodes());
+        let opts = SearchOpts {
+            limit: Some(10),
+            ..Default::default()
+        };
+        let query = "kubernetes cluster access";
+
+        let alone = search_prepared(&dep, None, query, &opts).expect("search the dependency");
+        let local = search_prepared(&root, None, query, &opts).expect("search the root");
+        assert_eq!(
+            alone.first().map(|h| h.id.to_string()).as_deref(),
+            Some("concept:makerspace")
+        );
+        assert!(
+            local.len() >= 3 && alone[0].score > local[1].score,
+            "the scenario under test: ranked on its own, the dependency's weak match outscores \
+             the local page ranked second ({} vs {:?})",
+            alone[0].score,
+            local.get(1).map(|h| h.score)
+        );
+
+        let members = [
+            SearchMember {
+                package: None,
+                index: &root,
+            },
+            SearchMember {
+                package: Some("dep"),
+                index: &dep,
+            },
+        ];
+        let ids: Vec<String> = search_members_prepared(&members, None, query, &opts)
+            .expect("search both")
+            .into_iter()
+            .map(|found| found.hit.id.to_string())
+            .collect();
+        let weak = ids
+            .iter()
+            .position(|id| id == "@dep/concept:makerspace")
+            .unwrap_or_else(|| panic!("the dependency's page still matches: {ids:?}"));
+        for better in [
+            "concept:kubectl-guide",
+            "concept:team-clusters",
+            "concept:request-process",
+        ] {
+            let at = ids
+                .iter()
+                .position(|id| id == better)
+                .unwrap_or_else(|| panic!("{better} matches: {ids:?}"));
+            assert!(
+                at < weak,
+                "{better} matches the query better than the dependency's page, so it must rank \
+                 above it: {ids:?}"
+            );
+        }
+    }
+
+    /// Searching several members ranks exactly as searching one index holding all of their
+    /// nodes: the corpus statistics add up, and every signal is ranked over the whole pool.
+    #[test]
+    fn a_search_across_members_ranks_like_one_index_holding_them_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = index_of(&dir, "root.db", &local_nodes());
+        let dep = index_of(&dir, "dep.db", &dependency_nodes());
+        let all: Vec<TestNode> = local_nodes()
+            .into_iter()
+            .chain(dependency_nodes())
+            .collect();
+        let combined = index_of(&dir, "combined.db", &all);
+        let members = [
+            SearchMember {
+                package: None,
+                index: &root,
+            },
+            SearchMember {
+                package: Some("dep"),
+                index: &dep,
+            },
+        ];
+        let opts = SearchOpts {
+            limit: Some(10),
+            ..Default::default()
+        };
+
+        for query in [
+            "kubernetes cluster access",
+            "makerspace workshop access",
+            "monthly meetup",
+        ] {
+            let whole: Vec<(String, f32)> = search_prepared(&combined, None, query, &opts)
+                .expect("search the combined index")
+                .into_iter()
+                .map(|h| (h.id.to_string(), h.score))
+                .collect();
+            let pooled: Vec<(String, f32)> = search_members_prepared(&members, None, query, &opts)
+                .expect("search the members")
+                .into_iter()
+                .map(|found| {
+                    let id = found.hit.id.to_string();
+                    let bare = id.strip_prefix("@dep/").unwrap_or(&id).to_string();
+                    (bare, found.hit.score)
+                })
+                .collect();
+            assert!(!whole.is_empty(), "{query:?} must match something");
+            assert_eq!(pooled, whole, "{query:?}");
+        }
+    }
+
+    /// Two members holding the same page tie on every signal; the tie goes to the package the
+    /// search runs in, whatever order the members were passed in.
+    #[test]
+    fn a_tie_between_members_goes_to_the_package_the_search_runs_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let page = [node(
+            "concept:runbook",
+            "runbook",
+            "# Runbook\n\nRestart the ingest service when its queue stalls.",
+        )];
+        let root = index_of(&dir, "root.db", &page);
+        let dep = index_of(&dir, "dep.db", &page);
+        let members = [
+            SearchMember {
+                package: Some("dep"),
+                index: &dep,
+            },
+            SearchMember {
+                package: None,
+                index: &root,
+            },
+        ];
+        let opts = SearchOpts {
+            limit: Some(10),
+            ..Default::default()
+        };
+
+        let hits = search_members_prepared(&members, None, "restart the ingest service", &opts)
+            .expect("search");
+        let ids: Vec<String> = hits.iter().map(|found| found.hit.id.to_string()).collect();
+        assert_eq!(ids, ["concept:runbook", "@dep/concept:runbook"]);
+        assert_eq!(
+            hits[0].member, 1,
+            "`member` is the hit's position in the slice the caller passed"
+        );
     }
 }

@@ -228,6 +228,16 @@ impl Ctx {
         Ok(self.workspace.get().expect("just initialized"))
     }
 
+    /// Close every index this context has opened ([`Workspace::release_indexes`]). `vaire
+    /// mcp` calls it between requests; a one-shot command releases them by exiting.
+    ///
+    /// [`Workspace::release_indexes`]: crate::workspace::Workspace::release_indexes
+    pub fn release_indexes(&self) {
+        if let Some(ws) = self.workspace.get() {
+            ws.release_indexes();
+        }
+    }
+
     /// Open the already-built index, mapping a missing/corrupt file to the documented
     /// exit codes. Read commands never build it as a side effect (cli.md §1). An index
     /// whose schema version doesn't match this binary is rejected as corrupt (exit `3`),

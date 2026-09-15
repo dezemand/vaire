@@ -256,16 +256,20 @@ vaire search <query> [--type <T>] [--scope <container-id>] [--limit <N>]
   scoring by its best section so that length alone earns nothing; **name**, the query graded
   against each node's `name:`, `aliases:` and id, where an exact match ranks first and a
   partial one adds weight; and **vector** similarity of the nearest sections. Sorted by
-  descending score; ties broken by (qualified) `id` ascending for determinism.
+  descending score; ties go to this package's results before a dependency's, then by
+  (qualified) `id` ascending, for determinism.
 - **Cross-package** (§6.5): the query runs over this package **and its linked dependency
   closure** — that is the selective-consumption payoff: what you depend on is part of
-  your knowledge. The query is embedded once and reused per member; a dependency indexed
-  with different embedding dimensions contributes FTS/alias hits only (vector recall
+  your knowledge. The query is embedded once, and the closure is ranked as **one** search:
+  each member gathers its own candidates, but the word statistics behind the lexical score
+  and every signal's ranking are computed over all members together (§6.8). A dependency
+  indexed with different embedding dimensions contributes FTS/alias hits only (vector recall
   silently absent for it — `status` surfaces the mismatch). `--local` restricts to this
   package and `--all` widens to every catalogued package (§6.8, implied outside a
   package); `--scope @pkg/container` searches inside a dependency's container.
   Cross-package hits carry `package` in JSON; unavailable dependencies are listed in
-  `skipped`.
+  `skipped` — except the one a `--scope @pkg/container` names: that search asks for that
+  package alone, so an unavailable index fails the command instead, as the run-root's does.
 
 JSON:
 
@@ -491,6 +495,15 @@ vaire index [--full] [--working-tree] [--re-embed] [--no-deps]
 - An index whose **schema version** doesn't match this binary is rebuilt from scratch (the
   version is bumped on any schema change); a plain `vaire index` therefore self-migrates.
 - Exit `3` if the index is structurally corrupt and cannot be opened (suggests `--full`).
+- **One process at a time, queued.** Every open of a package's index — by this command or
+  by any read — first takes `.vaire/index.lock`, an OS file lock (`flock`/`LockFileEx`).
+  `vaire index` holds it for its whole run, so a second `vaire index` queues behind the
+  first, and a read started meanwhile waits and then answers from the finished index. A
+  command still waiting after a second says so on stderr. On the command line the wait
+  lasts as long as it takes; `VAIRE_LOCK_TIMEOUT=<seconds>` bounds it, and running out is
+  `index_locked` (exit `1`) — never exit `3`: a locked index is healthy, and rebuilding it
+  is the wrong fix. The same error without any wait means the file is open in a process
+  that does not take the lock (an older vaire, or another tool).
 
 ### 4.2 `vaire check`
 
@@ -971,8 +984,10 @@ declares a dependency, `catalog add` records a package on this machine, `registr
   depth and skip rules): it runs once, on request, over a tree you already have.
 
 > **Cross-process cost.** Turso takes an exclusive lock when a database is opened, so
-> catalog access is serialized machine-wide: a second vaire process waits (briefly, with
-> backoff) rather than failing. Commands therefore open the catalog, do one thing, and
+> catalog access is serialized machine-wide: a second vaire process queues for
+> `catalog.lock`, an OS file lock taken before Turso's, rather than failing — indefinitely
+> by default, or until `VAIRE_LOCK_TIMEOUT` (30 s under `vaire mcp`) runs out, which is an
+> error that names the lock and changes nothing. Commands therefore open the catalog, do one thing, and
 > close it — nothing holds a handle across an index build, and nothing may hold one
 > resident.
 
@@ -1323,6 +1338,11 @@ MCP tools, one-to-one:
 - The server operates against the already-built index and never builds or writes it. If the
   index is missing, tool calls return an MCP error pointing at `vaire index` (mirroring exit
   `4`); the agent is not allowed to trigger a build.
+- The server holds an index only for the request that opened it, so a resident server never
+  locks `vaire index` out. A tool call that finds the index held by another process
+  (usually a running `vaire index`) waits at most 30 s — `VAIRE_LOCK_TIMEOUT` overrides —
+  and then returns an `index_locked` tool error rather than leaving the agent hanging
+  (§4.1).
 - One server instance serves one repo, resolved at startup via the same discovery as the CLI
   (§2.1).
 
@@ -1663,20 +1683,24 @@ The rules:
   with none it behaves as `--all-packages` over the catalog. `--scope` is refused, since a
   scope is a container id relative to a package.
 
-Ranking across packages is deliberately unclever: results are merged and ranked by score.
-A score is derived from how high a hit ranks in its own member's lexical, name and vector
-rankings, so results from different members compare by position, not by absolute match
-strength — which is only meaningful because every member index is built and ranked by the
-same code. When registries join the fan-out, remote scores will *not* be comparable — that
-is where grouping by source and refusing to normalize arrives, with the answering source
-labelled.
+Ranking across packages treats the members as **one** search. Each member's index gathers
+its own candidates — FTS sections, name matches, nearest sections — but the corpus
+statistics behind the lexical score (section count, total length, each word's document
+frequency) are summed over every member, and each signal is ranked once over all of their
+candidates before the ranks are fused. A score therefore places a hit among everything the
+search found, not only among its own package's hits: ranked member by member, each
+dependency's best match scored like the best match overall, however weakly it matched. Ties
+go to the package the search runs in. That is only possible because every member index is
+built by the same code and read in place. When registries join the fan-out, remote scores
+will *not* be comparable — that is where grouping by source and refusing to normalize
+arrives, with the answering source labelled.
 
 ## 7. Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | `0` | Success. For `check`: no violations. |
-| `1` | Generic/unexpected error. |
+| `1` | Generic/unexpected error — including `index_locked`: the index is held by another process past `VAIRE_LOCK_TIMEOUT`, or by one that does not take vaire's lock (§4.1). Deliberately not `3`: the index is fine. |
 | `2` | Usage error — bad flags or arguments (also what `--help` paths use). |
 | `3` | Index unreadable/corrupt, or its schema version doesn't match — rebuild with `vaire index --full`. |
 | `4` | No corpus repo found, or index not built yet (read commands). |
