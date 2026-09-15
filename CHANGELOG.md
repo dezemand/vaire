@@ -3,6 +3,22 @@
 The format loosely follows [Keep a Changelog](https://keepachangelog.com); this project
 uses [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Changed
+- **`vaire search` ranks by relevance instead of document length** (#52). It used to add a
+  raw substring count summed over every section of a file, a flat alias bonus, and vectors
+  only above cosine 0.9 — so long spec documents won almost every multi-word query and
+  embeddings never changed a result. It now ranks three signals separately and fuses them
+  by rank (cli.md §3.4, design.md §9): **lexical** — Tantivy picks the candidate sections and
+  they are re-scored with BM25F, headings and titles weighted, a file scoring by its best
+  section, stopwords dropped and inflected forms matched; **name** — the query graded
+  against `name:`, `aliases:` and the id, an exact match ranking first; **vector** — the
+  nearest sections above a low similarity floor. Anchors are the best-matching sections.
+  On the new search benchmark's public corpus MRR@10 rises from 0.23 to 0.69 (0.72 with
+  OpenAI embeddings), and queries whose top hit is an unrelated long document drop from 87%
+  to about 7%. `score` stays an opaque relative rank, now derived from rank positions.
+
 ## [0.3.1] — 2026-09-13
 
 ### Added
