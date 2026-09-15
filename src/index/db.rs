@@ -25,14 +25,22 @@
 //!
 //! WAL is Turso's default journal mode. The DB is gitignored and per-checkout: each machine
 //! rebuilds its own from the Markdown.
+//!
+//! **More than one process.** Turso lets one process have the file open at a time, so every
+//! open first takes `index.lock` beside it ([`Index::lock`]) and a second process waits its
+//! turn instead of failing. `vaire index` holds that lock for its whole run, so a read
+//! started meanwhile answers from the finished index; a read holds it for milliseconds.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use turso::{IntoParams, Row};
 
-use crate::db::Db;
+use crate::db::{Db, DbLock, LOCK_TIMEOUT_ENV, LockError};
 pub use crate::db::{col_blob, col_f64, col_i64, col_opt_i64, col_opt_text, col_text, col_u32};
 use crate::error::{Result, VaireError};
+
+/// The lock file every index database in a directory is opened under ([`Index::lock`]).
+const LOCK_FILE: &str = "index.lock";
 
 /// The current index schema version, stored in the `schema_version` table. **Bump this on
 /// any change to the schema** (a new column/table, changed semantics): `vaire index` then
@@ -166,17 +174,57 @@ const FTS_INDEX_STMT: &str = "CREATE INDEX IF NOT EXISTS sections_fts ON section
 /// discipline (version gate, `meta`, the deferred FTS index).
 pub struct Index {
     db: Db,
+    // Declared after `db`, so the connection closes before the next process is let in.
+    _lock: DbLock,
 }
 
 impl Index {
-    /// Open an existing index. Errors map to the documented exit codes: a missing file
-    /// is [`VaireError::IndexNotBuilt`] (exit `4`); a file Turso cannot open is
-    /// [`VaireError::IndexCorrupt`] (exit `3`).
+    /// Open an existing index, **waiting** for any other vaire process that has it open.
+    ///
+    /// Errors map to the documented exit codes: a missing file is
+    /// [`VaireError::IndexNotBuilt`] (exit `4`); a file held past `VAIRE_LOCK_TIMEOUT`, or by
+    /// a process outside vaire's lock, is [`VaireError::IndexLocked`] (exit `1`); a file
+    /// Turso cannot open is [`VaireError::IndexCorrupt`] (exit `3`).
     pub fn open(path: &Path) -> Result<Index> {
-        if !path.exists() {
-            return Err(VaireError::IndexNotBuilt(path.display().to_string()));
+        let not_built = || VaireError::IndexNotBuilt(path.display().to_string());
+        // A missing file is only "not built" when nothing could be building it. A first build
+        // stages its index and promotes it to `index.db` at the very end, so a read that
+        // stopped at the missing file would report "not built" for an index seconds from
+        // existing, instead of waiting for it. The lock file tells the two apart: a build
+        // takes the lock before anything else, so with neither file present none can be
+        // under way — and a read in a package nobody has built leaves no lock file behind.
+        if !path.exists() && !lock_path(path).exists() {
+            return Err(not_built());
         }
-        Self::connect(path).map_err(|e| VaireError::IndexCorrupt(e.to_string()))
+        let lock = Self::lock(path)?;
+        // Asked (again) under the lock: a build may have just finished, or never produced it.
+        if !path.exists() {
+            return Err(not_built());
+        }
+        Self::connect(path, lock).map_err(|e| match crate::db::is_locked(&e) {
+            true => held_elsewhere(path, &e),
+            false => VaireError::IndexCorrupt(e.to_string()),
+        })
+    }
+
+    /// Take the cross-process lock for the index database at `path`, waiting for another
+    /// vaire process that holds it.
+    ///
+    /// **One lock per directory, not per file.** The live index, a rebuild staged beside it,
+    /// and a scratch baseline all open under the same `index.lock`, so nothing another
+    /// process does in that directory can interleave with a rebuild's promote. Re-entrant
+    /// within a process ([`DbLock`]), so a command that already holds it opens as many
+    /// handles as it likes.
+    pub(crate) fn lock(path: &Path) -> Result<DbLock> {
+        let what = format!("the index at {}", path.display());
+        DbLock::acquire(&lock_path(path), &what).map_err(|e| match e {
+            LockError::TimedOut(waited) => VaireError::IndexLocked(format!(
+                "{what} is held by another vaire process (usually `vaire index`) and was not \
+                 released within {}s; try again once it finishes, or raise {LOCK_TIMEOUT_ENV}",
+                waited.as_secs()
+            )),
+            LockError::Io(e) => e.into(),
+        })
     }
 
     /// Create (or recreate) the index file and install the schema.
@@ -192,7 +240,11 @@ impl Index {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let index = Self::connect(path)?;
+        let lock = Self::lock(path)?;
+        let index = Self::connect(path, lock).map_err(|e| match crate::db::is_locked(&e) {
+            true => held_elsewhere(path, &e),
+            false => e,
+        })?;
         for stmt in SCHEMA_STMTS {
             index.execute(stmt, ())?;
         }
@@ -211,9 +263,10 @@ impl Index {
         Ok(())
     }
 
-    fn connect(path: &Path) -> Result<Index> {
+    fn connect(path: &Path, lock: DbLock) -> Result<Index> {
         Ok(Index {
             db: Db::connect(path)?,
+            _lock: lock,
         })
     }
 
@@ -298,4 +351,25 @@ impl Index {
         )?;
         Ok(())
     }
+}
+
+/// The lock file for the index database at `path`: [`LOCK_FILE`] in the same directory.
+fn lock_path(path: &Path) -> PathBuf {
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    dir.join(LOCK_FILE)
+}
+
+/// Turso refused the open because another process has the file, although this one holds
+/// vaire's lock — so that process never took it: an older vaire, or another tool opening
+/// the file directly. Nothing to wait on, and nothing wrong with the file.
+fn held_elsewhere(path: &Path, error: &VaireError) -> VaireError {
+    VaireError::IndexLocked(format!(
+        "the index at {} is open in a process that does not take vaire's index lock — an \
+         older vaire, or another tool reading the file directly; close it and try again \
+         ({error})",
+        path.display()
+    ))
 }

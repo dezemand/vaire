@@ -36,6 +36,13 @@ fn main() -> ProcExitCode {
 fn dispatch(cli: Cli) -> Result<ExitCode> {
     let format = cli.output_format();
 
+    // How long this process waits for a database another vaire process holds: on the
+    // command line, for as long as it takes, like any job queued behind another; under
+    // `mcp`, bounded, because the caller is an agent mid-conversation (cli.md §5).
+    // `VAIRE_LOCK_TIMEOUT` sets it for either.
+    let default_wait = matches!(cli.command, Command::Mcp).then_some(mcp::LOCK_WAIT);
+    vaire::db::set_lock_wait(vaire::db::lock_wait_from_env(default_wait)?);
+
     // `init` scaffolds the corpus, so it runs *before* discovery (which needs `.vaire/`).
     // Its target is the positional path if given, else the `--repo`/`VAIRE_REPO` override,
     // else the current directory.

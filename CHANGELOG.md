@@ -5,7 +5,39 @@ uses [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+- **`VAIRE_LOCK_TIMEOUT`** (whole seconds) bounds how long a command waits for a held
+  index. The command line waits for as long as it takes by default; `vaire mcp` tool calls
+  wait 30 s. Running out is the new `index_locked` error (exit `1`, cli.md §4.1, §7).
+
+### Changed
+- **`vaire search` ranks by relevance instead of document length** (#52). It used to add a
+  raw substring count summed over every section of a file, a flat alias bonus, and vectors
+  only above cosine 0.9 — so long spec documents won almost every multi-word query and
+  embeddings never changed a result. It now ranks three signals separately and fuses them
+  by rank (cli.md §3.4, design.md §9): **lexical** — Tantivy picks the candidate sections and
+  they are re-scored with BM25F, headings and titles weighted, a file scoring by its best
+  section, stopwords dropped and inflected forms matched; **name** — the query graded
+  against `name:`, `aliases:` and the id, an exact match ranking first; **vector** — the
+  nearest sections above a low similarity floor. Anchors are the best-matching sections.
+  On the new search benchmark's public corpus MRR@10 rises from 0.23 to 0.69 (0.72 with
+  OpenAI embeddings), and queries whose top hit is an unrelated long document drop from 87%
+  to about 7%. `score` stays an opaque relative rank, now derived from rank positions.
+- **The catalog queues on the same kind of lock** (`catalog.lock`) instead of polling
+  Turso with backoff and giving up after 5 s.
+
 ### Fixed
+- **A read while another vaire process had the index open failed as "index is corrupt"**
+  (exit `3`) — the one diagnosis that invites rebuilding a healthy index (#50). Turso lets
+  one process open a database at a time, so two concurrent reads could collide, and any
+  read during `vaire index` did. Every index open now first takes `.vaire/index.lock`, an
+  OS file lock (`flock`/`LockFileEx`), so a second process queues in the kernel instead of
+  failing: concurrent reads all answer, a read during `vaire index` waits and answers from
+  the finished index, and two `vaire index` runs serialize. A wait longer than a second
+  says so on stderr.
+- **`vaire mcp` held every index it read for the life of the server**, locking
+  `vaire index` out for as long as an agent session stayed open. Indexes are now released
+  after each request.
 - **`vaire index`/`vaire pull` no longer fail on an oversized section with the OpenAI
   provider.** A section over the API's 8192-token per-input limit (a large table, a long
   document with no subheadings) was sent as-is and rejected with `HTTP 400: maximum input
