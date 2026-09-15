@@ -3,6 +3,30 @@
 The format loosely follows [Keep a Changelog](https://keepachangelog.com); this project
 uses [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Fixed
+- **A read while another vaire process had the index open failed as "index is corrupt"**
+  (exit `3`) — the one diagnosis that invites rebuilding a healthy index (#50). Turso lets
+  one process open a database at a time, so two concurrent reads could collide, and any
+  read during `vaire index` did. Every index open now first takes `.vaire/index.lock`, an
+  OS file lock (`flock`/`LockFileEx`), so a second process queues in the kernel instead of
+  failing: concurrent reads all answer, a read during `vaire index` waits and answers from
+  the finished index, and two `vaire index` runs serialize. A wait longer than a second
+  says so on stderr.
+- **`vaire mcp` held every index it read for the life of the server**, locking
+  `vaire index` out for as long as an agent session stayed open. Indexes are now released
+  after each request.
+
+### Added
+- **`VAIRE_LOCK_TIMEOUT`** (whole seconds) bounds how long a command waits for a held
+  index. The command line waits for as long as it takes by default; `vaire mcp` tool calls
+  wait 30 s. Running out is the new `index_locked` error (exit `1`, cli.md §4.1, §7).
+
+### Changed
+- **The catalog queues on the same kind of lock** (`catalog.lock`) instead of polling
+  Turso with backoff and giving up after 5 s.
+
 ## [0.3.1] — 2026-09-13
 
 ### Added
