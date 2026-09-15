@@ -30,13 +30,11 @@ fn public_corpus_relevance_sanity() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let queries_path = repo_root.join("benches/search/data/public/queries.toml");
 
-    if !queries_path.is_file() {
-        println!(
-            "search_relevance: {} does not exist yet — skipping (nothing to assert)",
-            queries_path.display()
-        );
-        return;
-    }
+    assert!(
+        queries_path.is_file(),
+        "{} is missing: the relevance floors below need it",
+        queries_path.display()
+    );
 
     let queries =
         eval::queries::load(&queries_path).expect("benches/search/data/public/queries.toml parses");

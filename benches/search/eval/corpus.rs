@@ -457,7 +457,7 @@ pub fn split(build: &CorpusBuild, parts: usize) -> Result<Vec<CorpusBuild>, Stri
         let tempdir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
         std::fs::write(
             tempdir.path().join("knowledge.toml"),
-            rename_manifest(&manifest, &format!("{base_name}-p{i}")),
+            rename_manifest(&manifest, &format!("{base_name}-p{i}"))?,
         )
         .map_err(|e| format!("writing knowledge.toml for part {i}: {e}"))?;
         dirs.push(tempdir);
@@ -494,22 +494,15 @@ pub fn split(build: &CorpusBuild, parts: usize) -> Result<Vec<CorpusBuild>, Stri
         .collect())
 }
 
-/// `manifest` with its `name = …` line replaced by `name = "<name>"`.
-fn rename_manifest(manifest: &str, name: &str) -> String {
-    let mut out: String = manifest
-        .lines()
-        .map(|line| {
-            let key = line.split('=').next().unwrap_or("").trim();
-            if key == "name" {
-                format!("name = \"{name}\"")
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    out.push('\n');
-    out
+/// `manifest` with its root `name` set to `name`. Parsed rather than matched line by line,
+/// so a `name` key inside a nested table (an external corpus's manifest can carry any)
+/// stays as it was.
+fn rename_manifest(manifest: &str, name: &str) -> Result<String, String> {
+    let mut table: toml::Table = manifest
+        .parse()
+        .map_err(|e| format!("parsing the corpus manifest: {e}"))?;
+    table.insert("name".to_string(), toml::Value::String(name.to_string()));
+    toml::to_string(&table).map_err(|e| format!("writing the renamed manifest: {e}"))
 }
 
 /// FNV-1a, 64-bit: a hash whose value never changes between runs or Rust releases (std's
@@ -911,7 +904,8 @@ pub fn build_scale(n_nodes: usize, seed: u64) -> Result<(CorpusBuild, Vec<Query>
 
     let vocab = Vocab::generate(&mut rng, VOCAB_SIZE);
 
-    let n_needles = N_NEEDLES.min(n_nodes);
+    // Leave room for at least one document, so the corpus never exceeds `n_nodes`.
+    let n_needles = N_NEEDLES.min(n_nodes.saturating_sub(1));
     let n_documents = ((n_nodes * 15) / 100).clamp(1, n_nodes.saturating_sub(n_needles).max(1));
     let n_concepts_total = n_nodes.saturating_sub(n_documents).max(n_needles);
     let n_filler_concepts = n_concepts_total.saturating_sub(n_needles);
@@ -1141,5 +1135,28 @@ mod tests {
         let dest = out.path().join("dest");
         assert!(unpack_md_archive(&archive, &dest).is_err());
         assert!(!out.path().join("evil.md").exists());
+    }
+
+    #[test]
+    fn rename_manifest_changes_only_the_root_name() {
+        let manifest = "name = \"corpus\"\nversion = \"1.0.0\"\n\n[extra]\nname = \"keep me\"\n";
+        let renamed = rename_manifest(manifest, "corpus-p1").unwrap();
+        let table: toml::Table = renamed.parse().unwrap();
+        assert_eq!(table["name"].as_str(), Some("corpus-p1"));
+        assert_eq!(table["version"].as_str(), Some("1.0.0"));
+        assert_eq!(table["extra"]["name"].as_str(), Some("keep me"));
+    }
+
+    #[test]
+    fn build_scale_creates_exactly_the_requested_node_count() {
+        for n in [1, 2, 5, 30, 31, 120] {
+            let (build, _) = build_scale(n, SCALE_SEED).unwrap();
+            let nodes = walk_files(&build.root)
+                .unwrap()
+                .into_iter()
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+                .count();
+            assert_eq!(nodes, n, "build_scale({n}) wrote {nodes} node file(s)");
+        }
     }
 }

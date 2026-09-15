@@ -37,8 +37,8 @@ impl Query {
         !self.relevant.is_empty()
     }
 
-    /// The judged id with grade `2` (the primary answer), if any. Deterministic when
-    /// more than one id is (incorrectly) graded `2`: the lexicographically first id.
+    /// The judged id with grade `2` (the primary answer), if any; [`parse`] allows at most
+    /// one per query.
     pub fn primary_expected_id(&self) -> Option<&str> {
         self.relevant
             .iter()
@@ -62,9 +62,9 @@ pub fn load(path: &Path) -> Result<Vec<Query>, String> {
 
 /// Parse and validate query-file text. `origin` labels errors (a path for [`load`]).
 ///
-/// Validates: every `id` non-empty and unique, and every judgment grade in `1..=2`.
-/// Existence of judged ids in the index can only be checked after indexing — see
-/// [`warn_missing_ids`].
+/// Validates: every `id` non-empty and unique, every judgment grade in `1..=2`, and at
+/// most one grade-`2` (primary) judgment per query. Existence of judged ids in the index
+/// can only be checked after indexing — see [`warn_missing_ids`].
 pub fn parse(text: &str, origin: &str) -> Result<Vec<Query>, String> {
     let file: QueryFile =
         toml::from_str(text).map_err(|e| format!("{origin}: invalid queries.toml: {e}"))?;
@@ -84,6 +84,20 @@ pub fn parse(text: &str, origin: &str) -> Result<Vec<Query>, String> {
                     q.id
                 ));
             }
+        }
+        let primaries: Vec<&str> = q
+            .relevant
+            .iter()
+            .filter(|&(_, &grade)| grade == 2)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        if primaries.len() > 1 {
+            return Err(format!(
+                "{origin}: query {:?} grades {} ids as 2 ({}); only one primary answer is allowed",
+                q.id,
+                primaries.len(),
+                primaries.join(", ")
+            ));
         }
     }
     Ok(file.query)
@@ -167,6 +181,23 @@ category = "keyword"
 "concept:x" = 3
 "#;
         assert!(parse(toml, "test").unwrap_err().contains("must be 1 or 2"));
+    }
+
+    #[test]
+    fn rejects_more_than_one_primary_judgment() {
+        let toml = r#"
+[[query]]
+id = "q"
+text = "a"
+category = "keyword"
+[query.relevant]
+"concept:x" = 2
+"concept:y" = 2
+"concept:z" = 1
+"#;
+        let err = parse(toml, "test").unwrap_err();
+        assert!(err.contains("only one primary answer"), "{err}");
+        assert!(err.contains("concept:x, concept:y"), "{err}");
     }
 
     #[test]

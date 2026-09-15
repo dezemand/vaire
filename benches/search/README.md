@@ -279,13 +279,13 @@ cargo bench --bench search -- --corpus public --queries "$dir/smoke.toml" --verb
 ## Running the sanity test
 
 `tests/search_relevance.rs` builds the `public` corpus with the `local` embedder, runs its
-queries (skipping gracefully with a printed notice if `queries.toml` doesn't exist yet),
-and prints the same Markdown tables:
+queries, and prints the same Markdown tables. It fails if `queries.toml` is missing:
 
 ```
 cargo test --test search_relevance -- --nocapture
 ```
 
-Its assertions are deliberately weak for now (every metric finite and within `[0, 1]`, at
-least one query loaded when the file exists) — real thresholds land once there is a
-ranking change on another branch to hold to a standard.
+Besides checking that every metric is finite and within `[0, 1]`, it holds the ranking to
+floors a little below its measured numbers — MRR@10 ≥ 0.664, nDCG@10 ≥ 0.639 and
+DocIntrusion@1 ≤ 0.117 — and requires six exact name and alias queries, including #52's
+own "gate the rare act" and the "tombstone" alias, to rank their answer first.

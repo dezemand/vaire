@@ -341,10 +341,13 @@ fn render_corpus_compare(out: &mut String, b: &CorpusReport, n: &CorpusReport) {
 
     let base_by_id: BTreeMap<&str, &QueryReport> =
         b.queries.iter().map(|q| (q.id.as_str(), q)).collect();
+    let new_ids: BTreeSet<&str> = n.queries.iter().map(|q| q.id.as_str()).collect();
     let mut improved = Vec::new();
     let mut regressed = Vec::new();
+    let mut only_new = Vec::new();
     for nq in &n.queries {
         let Some(bq) = base_by_id.get(nq.id.as_str()) else {
+            only_new.push(format!("`{}`", nq.id));
             continue;
         };
         match (bq.primary_rank, nq.primary_rank) {
@@ -355,6 +358,13 @@ fn render_corpus_compare(out: &mut String, b: &CorpusReport, n: &CorpusReport) {
             _ => {}
         }
     }
+    let only_base: Vec<String> = b
+        .queries
+        .iter()
+        .filter(|q| !new_ids.contains(q.id.as_str()))
+        .map(|q| format!("`{}`", q.id))
+        .collect();
+
     let _ = writeln!(out, "\n### Primary-rank changes");
     if improved.is_empty() && regressed.is_empty() {
         let _ = writeln!(out, "- no primary-rank changes");
@@ -363,22 +373,41 @@ fn render_corpus_compare(out: &mut String, b: &CorpusReport, n: &CorpusReport) {
             out,
             "- improved ({}): {}",
             improved.len(),
-            if improved.is_empty() {
-                "-".to_string()
-            } else {
-                improved.join("; ")
-            }
+            join_or_dash(&improved)
         );
         let _ = writeln!(
             out,
             "- regressed ({}): {}",
             regressed.len(),
-            if regressed.is_empty() {
-                "-".to_string()
-            } else {
-                regressed.join("; ")
-            }
+            join_or_dash(&regressed)
         );
+    }
+
+    // Each side's aggregates average its own judged queries, so a query present on only one
+    // side can move the deltas above without ever showing up as a rank change.
+    if !only_base.is_empty() || !only_new.is_empty() {
+        let _ = writeln!(out, "\n### Unmatched queries");
+        let _ = writeln!(
+            out,
+            "- only in base ({}): {}",
+            only_base.len(),
+            join_or_dash(&only_base)
+        );
+        let _ = writeln!(
+            out,
+            "- only in new ({}): {}",
+            only_new.len(),
+            join_or_dash(&only_new)
+        );
+    }
+}
+
+/// `items` joined with `; `, or `-` when there are none.
+fn join_or_dash(items: &[String]) -> String {
+    if items.is_empty() {
+        "-".to_string()
+    } else {
+        items.join("; ")
     }
 }
 
@@ -502,5 +531,16 @@ mod tests {
         let md = render_compare_markdown(&base, &new);
         assert!(md.contains("regressed (1)"));
         assert!(md.contains("1 -> 3"));
+    }
+
+    #[test]
+    fn compare_lists_queries_present_on_only_one_side() {
+        let base = sample_run("base");
+        let mut new = sample_run("new");
+        new.corpora[0].queries[0].id = "q2".to_string();
+        let md = render_compare_markdown(&base, &new);
+        assert!(md.contains("### Unmatched queries"), "{md}");
+        assert!(md.contains("only in base (1): `q1`"), "{md}");
+        assert!(md.contains("only in new (1): `q2`"), "{md}");
     }
 }

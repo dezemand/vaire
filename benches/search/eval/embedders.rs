@@ -151,15 +151,18 @@ impl CacheEmbedder {
     fn wrap(inner: Box<dyn Embedder>, path: PathBuf) -> Result<Self, String> {
         let vectors = if path.exists() {
             let file = read_cache_file(&path)?;
-            if file.identity != inner.identity() {
-                eprintln!(
-                    "warning: --vector-cache {} was recorded under identity {:?}; the current \
-                     embedder identity is {:?}. Reusing cached vectors by text hash regardless \
-                     (this is a benchmarking dev tool, not a production cache).",
+            // Hits from another model (or width) would sit next to fresh misses from this
+            // one, while the report records only the current identity.
+            if file.identity != inner.identity() || file.dims != inner.dimensions() {
+                return Err(format!(
+                    "--vector-cache {} holds vectors from {:?} ({} dims), but the embedder is \
+                     {:?} ({} dims); use a separate cache file per embedder",
                     path.display(),
                     file.identity,
-                    inner.identity()
-                );
+                    file.dims,
+                    inner.identity(),
+                    inner.dimensions()
+                ));
             }
             file.vectors
         } else {
@@ -349,5 +352,36 @@ mod tests {
         assert!(cache.vectors.borrow().contains_key(&sha256_hex(&long_text)));
         cache.flush().unwrap();
         assert!(cache_path.exists());
+    }
+
+    #[test]
+    fn openai_mode_refuses_a_cache_from_another_embedder() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = || StubEmbedder {
+            dims: 3,
+            calls: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        };
+        let write_cache = |name: &str, identity: &str, dims: usize| {
+            let path = dir.path().join(name);
+            let file = CacheFile {
+                identity: identity.to_string(),
+                dims,
+                vectors: HashMap::new(),
+            };
+            std::fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
+            path
+        };
+
+        let other_model = write_cache("other-model.json", "local:3", 3);
+        let err = CacheEmbedder::wrap(Box::new(inner()), other_model)
+            .err()
+            .expect("a cache from another model is refused");
+        assert!(err.contains("separate cache file per embedder"), "{err}");
+
+        let other_width = write_cache("other-width.json", "stub:1", 8);
+        assert!(CacheEmbedder::wrap(Box::new(inner()), other_width).is_err());
+
+        let same = write_cache("same.json", "stub:1", 3);
+        assert!(CacheEmbedder::wrap(Box::new(inner()), same).is_ok());
     }
 }
