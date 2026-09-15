@@ -313,6 +313,92 @@ fn copy_tree_excluding(src: &Path, dest: &Path, exclude_dirnames: &[&str]) -> io
 }
 
 // ---------------------------------------------------------------------------------
+// split — one corpus spread over several packages (`--packages N`)
+// ---------------------------------------------------------------------------------
+
+/// Spread `build`'s Markdown files over `parts` separate packages, so a search across
+/// several packages can be scored against the same judgments as the whole corpus. Each file
+/// goes to the part a stable hash of its corpus-relative path picks (so every run splits the
+/// same way), and each part gets the corpus's own manifest under its own name (`<name>-p0`,
+/// `<name>-p1`, …). Ids stay unique across the parts because they were unique in the whole.
+pub fn split(build: &CorpusBuild, parts: usize) -> Result<Vec<CorpusBuild>, String> {
+    let parts = parts.max(1);
+    let manifest = std::fs::read_to_string(build.root.join("knowledge.toml"))
+        .map_err(|e| format!("reading the corpus manifest: {e}"))?;
+    let base_name = build.config().name;
+
+    let mut dirs = Vec::with_capacity(parts);
+    for i in 0..parts {
+        let tempdir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+        std::fs::write(
+            tempdir.path().join("knowledge.toml"),
+            rename_manifest(&manifest, &format!("{base_name}-p{i}")),
+        )
+        .map_err(|e| format!("writing knowledge.toml for part {i}: {e}"))?;
+        dirs.push(tempdir);
+    }
+
+    let files = walk_files(&build.root).map_err(|e| format!("walking the corpus: {e}"))?;
+    let mut counts = vec![0usize; parts];
+    for path in files {
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&build.root)
+            .expect("walked under the root");
+        let part = (fnv1a(rel.to_string_lossy().as_bytes()) % parts as u64) as usize;
+        let dest = dirs[part].path().join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(&path, &dest)
+            .map_err(|e| format!("copying {} -> {}: {e}", path.display(), dest.display()))?;
+        counts[part] += 1;
+    }
+
+    Ok(dirs
+        .into_iter()
+        .enumerate()
+        .map(|(i, dir)| {
+            CorpusBuild::new(
+                dir,
+                vec![format!("split part {i} of {parts}: {} file(s)", counts[i])],
+            )
+        })
+        .collect())
+}
+
+/// `manifest` with its `name = …` line replaced by `name = "<name>"`.
+fn rename_manifest(manifest: &str, name: &str) -> String {
+    let mut out: String = manifest
+        .lines()
+        .map(|line| {
+            let key = line.split('=').next().unwrap_or("").trim();
+            if key == "name" {
+                format!("name = \"{name}\"")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    out.push('\n');
+    out
+}
+
+/// FNV-1a, 64-bit: a hash whose value never changes between runs or Rust releases (std's
+/// `DefaultHasher` promises neither), which is what keeps the split reproducible.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+// ---------------------------------------------------------------------------------
 // scale — deterministic synthetic corpus for latency (and the issue #52 adversarial case)
 // ---------------------------------------------------------------------------------
 

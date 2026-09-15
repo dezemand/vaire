@@ -217,6 +217,13 @@ called out rather than silently dropped).
   gracefully).
 - `--repeat N` — timed repeats per query (default 5).
 - `--scale-nodes N` — node count for the `scale` corpus (default 3000).
+- `--packages N` — also spread the `public` and `external` corpora over `N` packages and
+  score a search across them, reported as two more corpora: `<corpus>-split<N>-merged`
+  (each package ranked on its own and the hits merged by score — how a search across
+  linked packages ranked before #58) and `<corpus>-split<N>-pooled` (every package ranked
+  as one search, `vaire::search::search_members`). Each file goes to the package a stable
+  hash of its path picks; the first package plays the one the search runs from. Default
+  `1` (off).
 - `--out <dir>` — where JSON reports are written (default `target/search-bench`).
 - `--label <string>` — report label; also the JSON filename (sanitized to a flat,
   filesystem-safe name). Default `<branch>-<shortsha>` from `git`, else `unlabeled`.

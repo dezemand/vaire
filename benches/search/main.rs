@@ -27,6 +27,7 @@ struct Cli {
     queries_override: Option<PathBuf>,
     repeat: usize,
     scale_nodes: usize,
+    packages: usize,
     verbose: bool,
     compare: Option<(PathBuf, PathBuf)>,
 }
@@ -35,6 +36,8 @@ const HELP: &str = "\
 cargo bench --bench search -- [flags]
 
   --corpus <list>          public|external|scale, comma-separated, or `all` (default: public)
+  --packages <N>           also spread public/external over N packages and score a search
+                           across them, merged per package vs pooled (default: 1 = off)
   --external-dir <dir>     your own corpus root (env VAIRE_BENCH_EXTERNAL_DIR)
   --external-queries <f>   your own judgments file (env VAIRE_BENCH_EXTERNAL_QUERIES)
   --external-name <label>  label for the external corpus in reports (default: external)
@@ -89,6 +92,7 @@ fn parse_args(args: Vec<String>) -> Result<Cli, String> {
     let mut queries_override = None;
     let mut repeat = 5usize;
     let mut scale_nodes = 3000usize;
+    let mut packages = 1usize;
     let mut verbose = false;
     let mut compare = None;
 
@@ -122,6 +126,11 @@ fn parse_args(args: Vec<String>) -> Result<Cli, String> {
                 scale_nodes = next_val(&mut it, "--scale-nodes")?
                     .parse()
                     .map_err(|_| "--scale-nodes must be a positive integer".to_string())?;
+            }
+            "--packages" => {
+                packages = next_val(&mut it, "--packages")?
+                    .parse()
+                    .map_err(|_| "--packages must be a positive integer".to_string())?;
             }
             "--verbose" => verbose = true,
             "--compare" => {
@@ -175,6 +184,7 @@ fn parse_args(args: Vec<String>) -> Result<Cli, String> {
         queries_override,
         repeat: repeat.max(1),
         scale_nodes: scale_nodes.max(1),
+        packages: packages.max(1),
         verbose,
         compare,
     })
@@ -271,10 +281,22 @@ fn run(cli: &Cli) -> Result<(), String> {
                     &build,
                     embedder.as_dyn(),
                     &queries,
-                    notices,
+                    notices.clone(),
                     cli.repeat,
                 )?;
                 run_report.corpora.push(report);
+                if cli.packages > 1 {
+                    let reports = eval::runner::run_split_corpus(
+                        "public",
+                        &build,
+                        cli.packages,
+                        embedder.as_dyn(),
+                        &queries,
+                        notices,
+                        cli.repeat,
+                    )?;
+                    run_report.corpora.extend(reports);
+                }
             }
             "external" => {
                 let (Some(dir), Some(queries_path)) = (&cli.external_dir, &cli.external_queries)
@@ -297,10 +319,22 @@ fn run(cli: &Cli) -> Result<(), String> {
                     &build,
                     embedder.as_dyn(),
                     &queries,
-                    notices,
+                    notices.clone(),
                     cli.repeat,
                 )?;
                 run_report.corpora.push(report);
+                if cli.packages > 1 {
+                    let reports = eval::runner::run_split_corpus(
+                        &cli.external_name,
+                        &build,
+                        cli.packages,
+                        embedder.as_dyn(),
+                        &queries,
+                        notices,
+                        cli.repeat,
+                    )?;
+                    run_report.corpora.extend(reports);
+                }
             }
             "scale" => {
                 let (build, generated_queries) =
