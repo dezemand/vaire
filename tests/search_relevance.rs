@@ -1,13 +1,15 @@
-//! Sanity check for the issue #52 search benchmark harness: builds the `public` corpus
-//! with the local embedder, runs its queries (if any exist yet), and prints the same
-//! Markdown metrics table `cargo bench --bench search` does.
+//! CI relevance floor for `vaire search` (issue #52): builds the `public` corpus with the
+//! local embedder (CI has no network, so this is the only embedder these floors can hold
+//! to a standard against), runs its queries, and prints the same Markdown metrics table
+//! `cargo bench --bench search` does.
 //!
 //! Run with `cargo test --test search_relevance -- --nocapture` to see the table.
 //!
-//! Deliberately weak assertions for now (real thresholds land once the ranking
-//! optimisations on other branches have something to be measured against): only that the
-//! queries file parses to at least one query when it exists, and that every metric is
-//! finite and within `[0, 1]`.
+//! Every metric is finite and within `[0, 1]` (basic sanity); overall MRR@10/nDCG@10 must
+//! not drop far below, and DocIntrusion@1 not rise far above, the ranking pipeline's
+//! measured numbers on this corpus; and a handful of exact name/alias queries must keep
+//! ranking their answer first — the failure mode issue #52 is about, held to a standard
+//! directly instead of only through an aggregate average.
 
 // `eval` is the shared library the `search` bench also builds on (see
 // `benches/search/README.md`); this test only exercises a slice of its surface (the
@@ -110,6 +112,60 @@ fn public_corpus_relevance_sanity() {
         finite_unit(
             &format!("query {:?} recall_at_10", q.id),
             q.recall_at_10.expect("judged"),
+        );
+    }
+
+    // Relevance floors: the ranking pipeline's own measured numbers on this corpus, with
+    // the local embedder, are MRR@10 0.694, nDCG@10 0.669, DocIntrusion@1 0.067. A 0.03
+    // cushion on MRR/nDCG and 0.05 on DocIntrusion@1 catches a real ranking regression
+    // without flaking on noise from an incidental change to the fixture corpus.
+    const FLOOR_MRR: f64 = 0.694 - 0.03;
+    const FLOOR_NDCG: f64 = 0.669 - 0.03;
+    const CEILING_DOC_INTRUSION: f64 = 0.067 + 0.05;
+    assert!(
+        report.overall.mrr_at_10 >= FLOOR_MRR,
+        "overall MRR@10 regressed: {} < floor {FLOOR_MRR}",
+        report.overall.mrr_at_10
+    );
+    assert!(
+        report.overall.ndcg_at_10 >= FLOOR_NDCG,
+        "overall nDCG@10 regressed: {} < floor {FLOOR_NDCG}",
+        report.overall.ndcg_at_10
+    );
+    assert!(
+        report.overall.doc_intrusion_at_1 <= CEILING_DOC_INTRUSION,
+        "overall DocIntrusion@1 regressed: {} > ceiling {CEILING_DOC_INTRUSION}",
+        report.overall.doc_intrusion_at_1
+    );
+
+    // Must-pass queries: an exact name/alias match must never lose to a longer, merely-
+    // related document — issue #52's symptom, held to a standard directly rather than
+    // only through an aggregate average that could hide a single bad regression.
+    let must_rank_first = [
+        ("name-gate-the-rare-act", "principle:gate-the-rare-act"),
+        ("alias-tombstone", "concept:supersession"),
+        ("name-loose-end", "concept:loose-end"),
+        ("name-supersession", "concept:supersession"),
+        ("name-knowledge-lifecycle", "concept:knowledge-lifecycle"),
+        ("name-hybrid-search", "component:hybrid-search"),
+    ];
+    let by_id: std::collections::HashMap<&str, &eval::report::QueryReport> =
+        report.queries.iter().map(|q| (q.id.as_str(), q)).collect();
+    for (query_id, expected_id) in must_rank_first {
+        let q = *by_id
+            .get(query_id)
+            .unwrap_or_else(|| panic!("must-pass query {query_id:?} not found in queries.toml"));
+        assert_eq!(
+            q.primary_expected_id.as_deref(),
+            Some(expected_id),
+            "must-pass query {query_id:?} no longer judges {expected_id:?} as its primary answer"
+        );
+        assert_eq!(
+            q.primary_rank,
+            Some(1),
+            "must-pass query {query_id:?} must rank {expected_id:?} first, got rank {:?} (top hit: {:?})",
+            q.primary_rank,
+            q.top10.first().map(|h| h.id.as_str())
         );
     }
 }
