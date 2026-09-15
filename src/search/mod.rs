@@ -1,32 +1,24 @@
-//! Hybrid retrieval — FTS first, vectors for recall (design.md §9, cli.md §3.4).
+//! Hybrid search: lexical + name/alias + vector signals, combined by reciprocal-rank fusion
+//! (design.md §9, cli.md §3.4). The **file is the returned unit**, with its best-matching
+//! sections as anchors. Results sort by descending score; ties break by `id` ascending.
 //!
-//! Three retrieval jobs want different things; this module serves open-ended `search`:
-//! FTS + `aliases:` carry precision, vectors are the recall layer behind them. The
-//! **file is the returned unit**, with the matching section anchors. Results sort by
-//! descending score; ties break by `id` ascending for determinism.
-//!
-//! Three signals feed the final ranking, each scored by its own pass and kept
-//! architecturally separate from how they combine:
-//! - **lexical** ([`lexical_candidates`]) — Tantivy's `fts_score` triages candidate
-//!   sections cheaply, then [`section_bm25`] re-scores them in Rust (corpus IDF, a heading
-//!   boost, section-length normalisation, whole-token frequency) and
-//!   [`aggregate_sections`] (MAX) turns a file's matching sections into one score. The
-//!   lexical query itself ([`build_match_query`]) drops stopwords and adds each token's
-//!   inflection variants at a down-weighted boost, since the index tokenizer does no
-//!   stemming. Deliberately the one function that knows how section matches become a file
-//!   score + ranked anchor sections, so a different lexical scorer drops in by replacing
-//!   it alone.
+//! Three signals feed the ranking, each scored by its own pass:
+//! - **lexical** ([`lexical_candidates`]) — the query ([`build_match_query`]) drops
+//!   stopwords and adds inflection variants at a down-weighted boost (the index tokenizer
+//!   does no stemming); Tantivy's `fts_score` triages candidate sections cheaply, then
+//!   [`section_bm25`] re-scores them in Rust (corpus IDF, a heading boost, section-length
+//!   normalisation, whole-token frequency), and [`aggregate_sections`] reduces a file's
+//!   matching sections to one score.
 //! - **name** ([`name_pass`]) — graded name/alias/id-slug tiers (design.md §8), the same
 //!   precision `suggest` already has.
 //! - **vector** ([`vector_pass`]) — brute-force cosine top-K, a noise floor rather than a
-//!   precision gate (a fixed high cosine threshold routinely returns *zero* sections for a
-//!   real embedder, so vectors never influence ranking at all).
+//!   precision gate (a fixed high-confidence threshold routinely returns *zero* sections
+//!   for a real embedder, so a floor is applied only once signals are combined).
 //!
-//! [`fuse`] is what turns those three signals into the single score results are ordered
-//! by: reciprocal-rank fusion over lexical + name + vector, with a node's name tier able to
-//! hard-outrank a lower tier's regardless of its lexical/vector standing once that tier is
-//! strong enough to trust absolutely — see [`fuse`] for exactly where that line is drawn
-//! and why.
+//! [`fuse`] combines the three into the score results are ordered by: reciprocal-rank
+//! fusion over all three, plus a hard gate — an exact name/alias/id-slug match outranks
+//! every file without one, regardless of lexical/vector standing (see [`fuse`] for exactly
+//! where that line sits and why).
 //!
 //! (Reference resolution, design.md §8, is the *same* machinery used in the other
 //! direction — alias + FTS first, embeddings as backup — and will live alongside this.)
@@ -71,12 +63,14 @@ pub struct SearchOpts {
 }
 
 // ---- signal + fusion constants (opaque relative ranks, design.md §9 / cli.md §3.4) ----
+// Tuned on the search benchmark (issue #52); each comment below explains the trade-off a
+// constant sits on, not the tuning process.
 
 /// How many candidate sections `fts_match`/`fts_score` considers, ranked by score, before
 /// per-file MAX aggregation. Bounding this bounds the follow-up [`node_meta`] lookup to a
-/// fixed-size candidate set instead of however many sections in the whole corpus matched.
-/// Chosen on the search benchmark: quality-identical to a much larger/unlimited cap, but
-/// meaningfully faster on a large corpus.
+/// fixed-size candidate set instead of however many sections in the whole corpus matched:
+/// quality-identical to a much larger/unlimited cap, but meaningfully faster on a large
+/// corpus.
 const FTS_CANDIDATE_CAP: Option<i64> = Some(100);
 
 /// How many sections the vector pass pulls, ranked by raw cosine distance. No dense-vector
@@ -87,31 +81,30 @@ const VECTOR_TOP_K: i64 = 20;
 /// sections are pulled for *every* query regardless of relevance (a brute-force top-K has
 /// no "no match" outcome), which would make even a nonsense query surface filler results.
 /// This is a noise floor, not a precision gate — precision still comes from lexical +
-/// name. Chosen on the search benchmark.
+/// name.
 const VECTOR_MIN_SIM: f32 = 0.3;
 
 /// Reciprocal-rank fusion (see [`fuse`]): `score = Σ w_s / (RRF_K + rank_s)` over each
-/// signal a file appears in. RRF's rank-damping constant, chosen on the search benchmark:
-/// a small value lets 1st place lead more decisively, which suits how clean each signal's
-/// own ranking already is here (each is either a real match or absent, not a noisy
-/// retriever).
+/// signal a file appears in. RRF's rank-damping constant: a small value lets 1st place
+/// lead more decisively, which suits how clean each signal's own ranking already is here
+/// (each is either a real match or absent, not a noisy retriever).
 const RRF_K: f32 = 5.0;
 /// Vector's RRF weight, at parity with lexical (whose own term is unweighted, `1.0`).
-/// Chosen on the search benchmark.
 const RRF_W_VEC: f32 = 1.0;
 /// The name signal's RRF weight — folded in alongside lexical/vector *before* the
 /// [`NAME_GATE_TIER`] hard gate is applied (see [`fuse`]), so a name match below the gate
-/// still nudges the ranking instead of contributing nothing. Chosen on the search
-/// benchmark: too heavy a weight lets a weak (tier 1) partial-token match crowd out a
-/// genuinely better lexical/vector candidate in the RRF sum.
-const RRF_W_NAME: f32 = 2.0;
+/// still nudges the ranking instead of contributing nothing. Kept low: even a weak
+/// (tier 1) partial-token match must not crowd out a genuinely better lexical/vector
+/// candidate in the RRF sum.
+const RRF_W_NAME: f32 = 1.0;
 /// The name/alias/id-slug tier (see [`name_match_tier`]) at or above which a match hard-
-/// outranks every file below that tier, regardless of lexical/vector standing. Chosen on
-/// the search benchmark: gating tier 2 ("candidate's tokens subset of the query's", e.g. a
-/// short name inside a long question) too aggressively hard-outranked some genuinely
-/// better `document`/`question` matches. Tiers 1-2 still feed the fused score via
-/// [`RRF_W_NAME`], just without the hard gate.
-const NAME_GATE_TIER: u8 = 3;
+/// outranks every file below that tier, regardless of lexical/vector standing. Set to
+/// exact matches only (tier 4): gating a looser tier (e.g. tier 3, "every query token
+/// present in the candidate" — a short name inside a long question) hard-outranked some
+/// genuinely better `document`/`question` matches and let documents intrude at rank 1
+/// more often. Tiers 1-3 still feed the fused score via [`RRF_W_NAME`], just without the
+/// hard gate.
+const NAME_GATE_TIER: u8 = 4;
 
 // BM25F-lite constants for `section_bm25`, the score that actually orders lexical
 // results. `BM25_K1`/`BM25_B` mirror Tantivy's own fixed BM25 constants, even though this
@@ -144,7 +137,7 @@ const STOPWORDS: &[&str] = &[
 /// lexical query and as [`ScoredTerm::weight`] in the Rust re-score: real tokens compete
 /// at full strength, a plausible variant (e.g. "entities" for query token "entity") only
 /// recovers a match the index's non-stemming tokenizer would otherwise miss entirely,
-/// without letting a wrong guess outrank an exact hit. Chosen on the search benchmark.
+/// without letting a wrong guess outrank an exact hit.
 const INFLECTION_BOOST: f32 = 0.5;
 
 /// Drop [`STOPWORDS`] from `tokens`, unless doing so would leave nothing (an all-stopword
@@ -399,11 +392,8 @@ struct LexicalMatch {
 /// corpus IDF, section-length normalisation, a heading boost, and whole-token frequency
 /// instead of substring counts. A file's matching sections are combined into one per-file
 /// score by [`aggregate_sections`] (MAX): a long document no longer wins just by having
-/// more matching sections.
-///
-/// Deliberately the ONE function that knows how section-level matches become a file-level
-/// lexical score plus ranked anchor sections: everything downstream ([`fuse`],
-/// `resolve_anchors`) only ever reads a [`LexicalMatch`].
+/// more matching sections. Everything downstream ([`fuse`], `resolve_anchors`) only ever
+/// reads the resulting [`LexicalMatch`], never the underlying sections.
 ///
 /// The ranked candidate statement ([`fts_candidates`]) is one of the two patterns Turso's
 /// ranked optimizer path actually matches: no JOIN, the same `?1` bound to both
@@ -606,11 +596,8 @@ fn candidate_bodies(index: &Index, rowids: &[i64]) -> Result<HashMap<i64, String
 
 /// Combine one file's matching-section BM25 scores into its per-file score, given already
 /// sorted descending by the caller (anchor selection reads off the same order): the single
-/// best-matching section. A long file no longer earns score merely for having more
-/// matching sections.
-///
-/// Chosen on the search benchmark over summing every section, the best plus a discounted
-/// second-best, and a geometric decay over all of them.
+/// best-matching section, rather than a sum, decay, or blend over several. A long file no
+/// longer earns score merely for having more matching sections.
 fn aggregate_sections(scores: &[f32]) -> f32 {
     scores.first().copied().unwrap_or(0.0)
 }
@@ -678,11 +665,13 @@ fn node_meta(index: &Index, ids: &[String]) -> Result<HashMap<String, (String, S
         .collect())
 }
 
-/// A small English stopword list for the name-match signal only (design.md §8/§9) — never
-/// used by [`lexical_candidates`] or [`snippet`]. Function words shouldn't count as
-/// meaningful overlap when a query is graded against a node's name/alias/id-slug
-/// candidates: without this, a query like "what is a loose end" would share a "token" with
-/// almost every node in the corpus.
+/// A small English stopword list for the name-match signal only (design.md §8/§9) — kept
+/// separate from [`STOPWORDS`] (measured on the search benchmark: sharing one list
+/// regressed public MRR/nDCG on both embedders, since a few of the extra function words
+/// [`STOPWORDS`] drops from the lexical query — e.g. "not", "he" — also occur, meaningfully,
+/// inside real node names/aliases). Function words shouldn't count as meaningful overlap
+/// when a query is graded against a node's name/alias/id-slug candidates: without this, a
+/// query like "what is a loose end" would share a "token" with almost every node.
 const NAME_STOPWORDS: &[&str] = &[
     "a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or", "is", "are", "was", "were",
     "be", "been", "being", "by", "with", "as", "that", "this", "these", "those", "it", "its",
@@ -705,8 +694,8 @@ fn is_name_stopword(token: &str) -> bool {
 /// `resolve_anchors`, for whichever such nodes survive to the final hit list — never
 /// eagerly for this pass's whole (possibly much wider) candidate set.
 ///
-/// Would also improve `suggest` (unchanged per this task): its exact/token-subset match is
-/// a coarser 2-tier version of the same idea, and it has no id-slug candidate.
+/// `suggest`'s own exact/token-subset match (not changed here) is a coarser 2-tier version
+/// of the same idea, with no id-slug candidate — the same grading would improve it too.
 fn name_pass(index: &Index, tokens: &[String], acc: &mut BTreeMap<String, Acc>) -> Result<()> {
     // Narrow the scan with the query's non-stopword tokens: any candidate a token matches
     // as a *whole token* is necessarily also a *substring* of `alias_text` (each candidate
@@ -814,11 +803,13 @@ fn name_match_tier(query_tokens: &[String], candidate_tokens: &[String]) -> u8 {
     if has_shared_non_stop { 1 } else { 0 }
 }
 
-/// Vector recall: brute-force top-K nearest sections by cosine distance — no threshold (a
-/// fixed high cosine gate means a real embedder essentially never contributes). No JOIN:
-/// type/path for genuinely new candidates and heading/body for anchors are fetched
-/// separately (`nodes_info`, `resolve_anchors`), so this scan never pulls prose or node
-/// metadata for the ~everything a JOIN alongside it would touch.
+/// Vector recall: brute-force top-K nearest sections by cosine distance — top-K sections;
+/// a similarity floor ([`VECTOR_MIN_SIM`]) is applied only once signals are combined, not
+/// here (an unconditional high-confidence gate at this stage would mean a real embedder
+/// essentially never contributes). No JOIN: type/path for genuinely new candidates and
+/// heading/body for anchors are fetched separately (`nodes_info`, `resolve_anchors`), so
+/// this scan never pulls prose or node metadata for the ~everything a JOIN alongside it
+/// would touch.
 fn vector_pass(
     index: &Index,
     qvec: &[f32],
@@ -892,11 +883,11 @@ fn vector_pass(
 /// The name signal is folded in twice, deliberately: every nonzero tier contributes its
 /// usual weighted RRF term (so it can still tip a close race), and additionally, a tier at
 /// or above [`NAME_GATE_TIER`] hard-outranks *every* file below that tier by adding the
-/// tier number itself ahead of the (squashed-to-`[0, 1)`) RRF score — a name match this
-/// precise should never lose to a merely-longer document, for any lexical/vector margin.
-/// Gating every tier this way, including tier 1 ("shares one non-stopword token"),
-/// regressed a few `document`/`keyword` queries — tier 1 alone stays a soft RRF
-/// contributor, never a hard gate.
+/// tier number itself ahead of the (squashed-to-`[0, 1)`) RRF score — an exact name/alias
+/// match should never lose to a merely-longer document, for any lexical/vector margin.
+/// Gating a looser tier this way (e.g. "every query token present in the candidate") let
+/// more documents intrude at rank 1 without helping precision elsewhere — tiers below
+/// [`NAME_GATE_TIER`] stay soft RRF contributors, never a hard gate.
 fn fuse(acc: &mut BTreeMap<String, Acc>) {
     if acc.is_empty() {
         return;
