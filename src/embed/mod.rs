@@ -247,8 +247,9 @@ impl Embedder for OpenAiEmbedder {
             return Ok(vec![vec![0.0; self.dims]; texts.len()]);
         }
 
+        let max_inputs = MAX_REQUEST_INPUTS.min(max_inputs_for_response(self.dims));
         let mut vectors = Vec::with_capacity(pieces.len());
-        for request in request_batches(&pieces, MAX_REQUEST_INPUTS, MAX_REQUEST_BYTES) {
+        for request in request_batches(&pieces, max_inputs, MAX_REQUEST_BYTES) {
             vectors.extend(self.request(request)?);
         }
         pool_pieces(&plan, vectors, self.dims)
@@ -312,6 +313,19 @@ const MAX_INPUT_BYTES: usize = 8000;
 /// bytes, as above) and at 2048 inputs.
 const MAX_REQUEST_BYTES: usize = 290_000;
 const MAX_REQUEST_INPUTS: usize = 2048;
+
+/// How many inputs one request may carry so that its response fits under
+/// `MAX_EMBEDDING_RESPONSE_BYTES`. The response grows with inputs × `dims`, and the API
+/// pretty-prints one float per line, so a float costs up to ~32 bytes (indentation, up to 22
+/// characters, `,\n`) plus a little per vector for its `object`/`index` keys and brackets.
+fn max_inputs_for_response(dims: usize) -> usize {
+    const BYTES_PER_FLOAT: usize = 32;
+    const BYTES_PER_VECTOR: usize = 128;
+    let per_vector = dims
+        .saturating_mul(BYTES_PER_FLOAT)
+        .saturating_add(BYTES_PER_VECTOR);
+    (MAX_EMBEDDING_RESPONSE_BYTES as usize / per_vector).max(1)
+}
 
 /// Split `text` into consecutive pieces of at most `max_bytes` bytes each. A cut prefers a
 /// paragraph break, then a line break, then a space, and never lands inside a UTF-8
@@ -666,6 +680,21 @@ mod tests {
             batches,
             vec![&["aaaa", "bbbb"][..], &["cc", "d", "e", "f"][..]]
         );
+    }
+
+    #[test]
+    fn a_full_request_keeps_its_response_under_the_size_cap() {
+        for dims in [384, 1536, 3072] {
+            let inputs = max_inputs_for_response(dims);
+            assert!(inputs >= 1);
+            assert!(
+                inputs * (dims * 32 + 128) <= MAX_EMBEDDING_RESPONSE_BYTES as usize,
+                "{dims} dims: {inputs} inputs could overflow the response cap"
+            );
+        }
+        // 3072-dim vectors (text-embedding-3-large) no longer fit the indexer's 128-section
+        // batches in one response, so those are split across requests.
+        assert!(max_inputs_for_response(3072) < 128);
     }
 
     #[test]
